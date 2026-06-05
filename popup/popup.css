@@ -1,0 +1,363 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 360px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  background: #fff;
+  color: #1a1a1a;
+}
+
+/* ── Header ── */
+.header {
+  background: #0f172a;
+  color: white;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.header-logo {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #38bdf8;
+}
+
+.header-sub {
+  font-size: 10px;
+  opacity: 0.55;
+  margin-top: 2px;
+}
+
+.source-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: #1e3a5f;
+  color: #7dd3fc;
+}
+
+.source-badge.dice {
+  background: #1e3a20;
+  color: #86efac;
+}
+
+/* ── Body ── */
+.body {
+  padding: 14px 16px;
+}
+
+/* ── Profile card ── */
+.profile-card {
+  display: none;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+
+.profile-card.show {
+  display: block;
+}
+
+.profile-name {
+  font-weight: 700;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.profile-title {
+  font-size: 12px;
+  color: #475569;
+  margin-top: 2px;
+}
+
+.profile-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+/* ── JD Dropdown ── */
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.jd-select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #0f172a;
+  background: #fff;
+  cursor: pointer;
+  margin-bottom: 14px;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.jd-select:focus {
+  outline: none;
+  border-color: #38bdf8;
+}
+
+/* ── Score card ── */
+.score-card {
+  display: none;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.score-card.show {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.score-circle {
+  flex-shrink: 0;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 3px solid currentColor;
+}
+
+.score-number {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.score-circle small {
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+.score-circle.excellent { color: #16a34a; background: #f0fdf4; }
+.score-circle.good      { color: #0284c7; background: #f0f9ff; }
+.score-circle.fair      { color: #d97706; background: #fffbeb; }
+.score-circle.poor      { color: #dc2626; background: #fef2f2; }
+
+.score-info {
+  flex: 1;
+}
+
+.score-label {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.score-rationale {
+  font-size: 11px;
+  color: #475569;
+  line-height: 1.5;
+}
+
+/* ── Buttons ── */
+.btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  text-align: center;
+}
+
+.btn-primary {
+  background: #0f172a;
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #1e293b;
+}
+
+.btn-primary:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: #f1f5f9;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  margin-top: 8px;
+  margin-bottom: 6px;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #e2e8f0;
+}
+
+.btn-secondary:disabled {
+  background: #f8fafc;
+  color: #cbd5e1;
+  border-color: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.btn-duplicate {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+  font-weight: 500;
+}
+
+.btn-duplicate:hover {
+  background: #e2e8f0;
+}
+
+.btn-success {
+  background: #dcfce7;
+  color: #16a34a;
+  cursor: default;
+}
+
+/* ── Status ── */
+.status {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  display: none;
+}
+
+.status.show { display: block; }
+.status.info    { background: #f0f9ff; color: #0284c7; }
+.status.ok      { background: #f0fdf4; color: #16a34a; }
+.status.error   { background: #fef2f2; color: #dc2626; }
+.status.loading { background: #fffbeb; color: #d97706; }
+
+/* ── Not-a-profile screen ── */
+.empty-state {
+  text-align: center;
+  padding: 24px 16px;
+  color: #64748b;
+}
+
+.empty-state strong {
+  display: block;
+  font-size: 13px;
+  color: #0f172a;
+  margin-bottom: 6px;
+}
+
+.empty-state p {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ── Dev toolbar (mock states) ── */
+.dev-bar {
+  border-top: 1px solid #f1f5f9;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.dev-bar label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+/* ── Settings section ── */
+.settings-section {
+  border-top: 1px solid #f1f5f9;
+  padding: 10px 16px 12px;
+}
+
+.settings-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  margin-bottom: 6px;
+}
+
+.settings-row {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-row input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  font-size: 11px;
+  color: #0f172a;
+  min-width: 0;
+}
+
+.settings-row input:focus {
+  outline: none;
+  border-color: #38bdf8;
+}
+
+.settings-row button {
+  padding: 6px 12px;
+  background: #0f172a;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-row button:hover {
+  background: #1e293b;
+}
+
+.settings-hint {
+  font-size: 10px;
+  margin-top: 4px;
+  min-height: 14px;
+}
+
+.settings-hint.ok    { color: #16a34a; }
+.settings-hint.error { color: #dc2626; }
+
+/* ── Footer ── */
+.footer {
+  text-align: center;
+  font-size: 10px;
+  color: #cbd5e1;
+  padding: 6px;
+  border-top: 1px solid #f1f5f9;
+}

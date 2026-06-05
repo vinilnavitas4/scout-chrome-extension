@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <div class="header">
+    <div>
+      <div class="header-logo">SCOUT</div>
+      <div class="header-sub">Navitas AI Labs · Candidate Fit Scorer</div>
+    </div>
+    <span class="source-badge" id="source-badge">—</span>
+  </div>
+
+  <!-- Main content: shown when on a supported profile page -->
+  <div id="main-view">
+    <div class="body">
+
+      <!-- Profile card -->
+      <div class="profile-card" id="profile-card">
+        <div class="profile-name" id="profile-name">—</div>
+        <div class="profile-title" id="profile-title">—</div>
+        <div class="profile-meta">
+          <span id="profile-location">—</span>
+          <span id="profile-exp">—</span>
+        </div>
+      </div>
+
+      <!-- JD dropdown -->
+      <div class="section-label">Select Job Description</div>
+      <select class="jd-select" id="jd-select">
+        <option value="">— Choose a JD —</option>
+      </select>
+
+      <!-- Score card -->
+      <div class="score-card" id="score-card">
+        <div class="score-circle" id="score-circle">
+          <span class="score-number" id="score-number">—</span>
+          <small>/100</small>
+        </div>
+        <div class="score-info">
+          <div class="score-label" id="score-label">—</div>
+          <div class="score-rationale" id="score-rationale">—</div>
+        </div>
+      </div>
+
+      <!-- Add to SCOUT button -->
+      <button class="btn btn-primary" id="add-btn" disabled>Add to SCOUT</button>
+
+      <div class="status" id="status"></div>
+    </div>
+
+    <!-- Dev mock toolbar -->
+    <div class="dev-bar">
+      <span>DEV</span>
+      <label>
+        <input type="checkbox" id="mock-duplicate" />
+        Mock "Already in SCOUT"
+      </label>
+    </div>
+
+    <!-- Google Sheets settings -->
+    <div class="settings-section">
+      <div class="settings-label">Google Sheets (Apps Script URL)</div>
+      <div class="settings-row">
+        <input type="text" id="sheet-url" placeholder="Paste your Web App URL…" />
+        <button id="save-url-btn">Save</button>
+      </div>
+      <div class="settings-hint" id="url-hint"></div>
+    </div>
+
+
+  </div>
+
+  <!-- Empty state: shown when not on a candidate profile page -->
+  <div id="empty-view" style="display:none">
+    <div class="empty-state">
+      <strong>No candidate profile detected</strong>
+      <p>Open a candidate profile on<br><b>Dice.com</b> or <b>LinkedIn</b> to use SCOUT.</p>
+    </div>
+  </div>
+
+  <div class="footer">SCOUT · Navitas AI Labs</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
