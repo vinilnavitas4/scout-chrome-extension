@@ -1,0 +1,699 @@
+// LinkedIn profile parser — extracts name, title, location, skills, experience_years
+// Stores result in chrome.storage.session under key "scout_candidate"
+
+function getText(selectors) {
+  const list = Array.isArray(selectors) ? selectors : [selectors];
+  for (const sel of list) {
+    const el = document.querySelector(sel);
+    if (el && el.innerText.trim()) return el.innerText.trim();
+  }
+  return "";
+}
+
+function findTopcardColumn() {
+  const topcardSection = document.querySelector('section[componentkey*="Topcard"]');
+  if (topcardSection) {
+    const contactLink = topcardSection.querySelector('a[href*="contact-info"]');
+    if (contactLink) {
+      let candidate = contactLink.parentElement;
+      while (candidate && candidate !== topcardSection) {
+        const directPs = candidate.querySelectorAll(':scope > p');
+        if (directPs.length > 0 && candidate.querySelector('h2')) return candidate;
+        candidate = candidate.parentElement;
+      }
+    }
+  }
+  const contactLink = document.querySelector('a[href*="overlay/contact-info"]');
+  if (contactLink) {
+    let node = contactLink.parentElement;
+    for (let i = 0; i < 8 && node; i++) {
+      if (node.querySelector('h2') && node.querySelectorAll(':scope > p').length >= 1) return node;
+      node = node.parentElement;
+    }
+  }
+  return null;
+}
+
+function findSectionByHeading(headingText) {
+  const target = headingText.toLowerCase().trim();
+  for (const h2 of document.querySelectorAll('section h2')) {
+    const text = h2.innerText.trim().toLowerCase();
+    if (text === target || text.startsWith(target)) return h2.closest('section');
+  }
+  for (const h2 of document.querySelectorAll('h2')) {
+    const text = h2.innerText.trim().toLowerCase();
+    if (text === target || text.startsWith(target)) {
+      return h2.closest('section') || h2.closest('[class]')?.parentElement;
+    }
+  }
+  return null;
+}
+
+function getSectionItems(section) {
+  const expItems = section.querySelectorAll('div[componentkey^="entity-collection-item"]');
+  if (expItems.length > 0) return Array.from(expItems);
+
+  for (const sel of ['li.pvs-list__item--line-separated', 'li.pvs-list__paged-list-item', 'ul > li']) {
+    const found = section.querySelectorAll(sel);
+    if (found.length > 0) return Array.from(found);
+  }
+
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const uuidItems = Array.from(section.querySelectorAll('div[componentkey]')).filter(el => {
+    return uuidRe.test(el.getAttribute('componentkey') || '') && el.querySelector('p');
+  });
+  if (uuidItems.length > 0) return uuidItems;
+
+  return Array.from(section.querySelectorAll(':scope > div > div > div')).filter(
+    d => d.querySelectorAll('p').length > 0 && !d.querySelector('section')
+  );
+}
+
+function extractOpenToWork() {
+  // Primary: "Open to work" panel renders as <strong>Open to work</strong> in topcard
+  const topcard = document.querySelector('section[componentkey*="Topcard"]') || document.body;
+  for (const el of topcard.querySelectorAll('strong, b')) {
+    if (/^open\s+to\s+work$/i.test((el.textContent || '').trim())) return true;
+  }
+
+  // Secondary: aria-label on photo frame svg (older LinkedIn versions)
+  const photoLink = document.querySelector('[componentkey*="topcard-logo"]');
+  const figure = photoLink
+    ? photoLink.querySelector('figure')
+    : document.querySelector('section[componentkey*="Topcard"] figure');
+  if (figure) {
+    for (const el of figure.querySelectorAll('[aria-label]')) {
+      if (/open\s+to\s+work/i.test(el.getAttribute('aria-label') || '')) return true;
+    }
+  }
+
+  return false;
+}
+
+function extractAboutFromDoc(doc) {
+  // Try expandable-text-box near an "about" h2
+  for (const box of doc.querySelectorAll('[data-testid="expandable-text-box"]')) {
+    let n = box.parentElement;
+    for (let i = 0; i < 10 && n; i++) {
+      for (const h2 of n.querySelectorAll('h2')) {
+        if ((h2.textContent || '').trim().toLowerCase().startsWith('about')) {
+          const clone = box.cloneNode(true);
+          clone.querySelector('[data-testid="expandable-text-button"], button')?.remove();
+          const text = (clone.textContent || '').trim();
+          if (text) return text;
+        }
+      }
+      n = n.parentElement;
+    }
+  }
+  // Try h2 "about" → nearest p with substantial text
+  for (const h2 of doc.querySelectorAll('h2')) {
+    if (!(h2.textContent || '').trim().toLowerCase().startsWith('about')) continue;
+    let n = h2.parentElement;
+    for (let i = 0; i < 6 && n; i++) {
+      for (const p of n.querySelectorAll('p')) {
+        const text = (p.textContent || '').trim();
+        if (text.length > 30) return text;
+      }
+      n = n.parentElement;
+    }
+  }
+  return '';
+}
+
+function extractAbout() {
+  // Strategy 0 (own profile): edit link is inside the About section
+  const editLink = document.querySelector('a[href*="edit/forms/summary"], a[aria-label="Edit about"]');
+  if (editLink) {
+    let n = editLink.parentElement;
+    for (let i = 0; i < 8 && n; i++) {
+      const box = n.querySelector('[data-testid="expandable-text-box"]');
+      if (box) {
+        const clone = box.cloneNode(true);
+        clone.querySelector('[data-testid="expandable-text-button"], button')?.remove();
+        const text = (clone.textContent || '').trim();
+        if (text) { console.log('[SCOUT] About via edit-link:', text.substring(0, 60)); return text; }
+      }
+      n = n.parentElement;
+    }
+  }
+  return extractAboutFromDoc(document);
+}
+
+async function fetchAbout() {
+  try {
+    const url = window.location.href.split('?')[0];
+    const res = await fetch(url, { credentials: 'include', headers: { 'accept': 'text/html' } });
+    if (!res.ok) return '';
+    const html = await res.text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const text = extractAboutFromDoc(doc);
+    if (text) { console.log('[SCOUT] fetchAbout hit:', text.substring(0, 60)); return text; }
+
+    // JSON-LD fallback
+    for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const data = JSON.parse(script.textContent || '');
+        const desc = data.description || data['@graph']?.find(n => n.description)?.description;
+        if (desc) return desc;
+      } catch(_) {}
+    }
+  } catch(e) {
+    console.log('[SCOUT] fetchAbout error:', e.message);
+  }
+  return '';
+}
+
+function extractEducation() {
+  const education = [];
+  const section = findSectionByHeading('Education');
+  if (!section) return education;
+  getSectionItems(section).forEach(item => {
+    const editLink = item.querySelector('a[href*="edit/forms/"]');
+    const ps = editLink ? editLink.querySelectorAll('p') : item.querySelectorAll('p');
+    const school = ps[0]?.innerText.trim() || '';
+    const degree = ps[1]?.innerText.trim() || '';
+    const dates  = ps[2]?.innerText.trim() || '';
+    if (school) education.push({ school, degree, dates });
+  });
+  return education;
+}
+
+function calcExperienceYears(experience) {
+  // Strategy 1: sum "X yrs Y mos" duration strings from LinkedIn
+  let totalMonths = 0;
+  for (const exp of experience) {
+    const m = (exp.dates || '').match(/(\d+)\s*yr[s]?\s*(?:(\d+)\s*mo[s]?)?/);
+    if (m) {
+      totalMonths += (parseInt(m[1]) || 0) * 12 + (parseInt(m[2]) || 0);
+    }
+  }
+  if (totalMonths > 0) return Math.round(totalMonths / 12 * 10) / 10;
+
+  // Fallback: earliest start year → now
+  let earliest = null;
+  const now = new Date().getFullYear();
+  for (const exp of experience) {
+    const m = (exp.dates || '').match(/\b(19|20)(\d{2})\b/);
+    if (m) {
+      const y = parseInt(m[0]);
+      if (!earliest || y < earliest) earliest = y;
+    }
+  }
+  return earliest ? now - earliest : null;
+}
+
+function extractProfile() {
+  const column = findTopcardColumn();
+
+  const name = (() => {
+    if (column) {
+      const h2 = column.querySelector('h2');
+      if (h2) return h2.innerText.trim();
+    }
+    return getText(['div[data-display-contents="true"] h2', 'h1.text-heading-xlarge', 'h1']);
+  })();
+
+  const title = (() => {
+    if (column) {
+      const directPs = column.querySelectorAll(':scope > p');
+      if (directPs.length > 0) return directPs[0].innerText.trim();
+    }
+    return getText(['.text-body-medium.break-words', '.pv-text-details__left-panel .text-body-medium']);
+  })();
+
+  const location = (() => {
+    if (column) {
+      const contactLink = column.querySelector('a[href*="contact-info"]');
+      if (contactLink) {
+        const row = contactLink.closest('div');
+        if (row && row !== column) {
+          const firstP = row.querySelector('p');
+          if (firstP && !firstP.querySelector('a')) return firstP.innerText.trim();
+        }
+      }
+      for (const div of column.querySelectorAll(':scope > div')) {
+        for (const p of div.querySelectorAll('p')) {
+          const txt = p.innerText.trim();
+          if (txt.includes(',') && !txt.includes('·') && !p.querySelector('a')) return txt;
+        }
+      }
+    }
+    return getText([
+      '.text-body-small.inline.t-black--light.break-words',
+      '.pv-text-details__left-panel span.text-body-small'
+    ]);
+  })();
+
+  // Experience
+  const experience = [];
+  const expSection = findSectionByHeading('Experience');
+  if (expSection) {
+    const dateRe = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}|\bPresent\b/i;
+
+    for (const item of expSection.querySelectorAll('div[componentkey^="entity-collection-item"]')) {
+      // Company name: first <p> in header area (not inside the roles ul)
+      const headerPs = Array.from(item.querySelectorAll('p')).filter(p => !p.closest('ul'));
+      const companyName = headerPs[0]?.innerText.trim() || '';
+
+      const roleItems = item.querySelectorAll('ul > li');
+      if (roleItems.length > 0) {
+        // Multi-role entry: each li = one position
+        for (const li of roleItems) {
+          const roleLink = li.querySelector('a:not([componentkey])');
+          const ps = roleLink ? Array.from(roleLink.querySelectorAll('p')) : [];
+          const title = ps[0]?.innerText.trim() || '';
+          let dates = '';
+          for (const p of ps) {
+            if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
+          }
+          if (title) experience.push({ title, company: companyName, dates });
+        }
+      } else {
+        // Single-role entry: company header IS the role
+        const singleLink = item.querySelector('a:not([componentkey])');
+        const ps = singleLink ? Array.from(singleLink.querySelectorAll('p')) : headerPs;
+        const title = ps[0]?.innerText.trim() || '';
+        let dates = '';
+        for (const p of ps) {
+          if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
+        }
+        if (title) experience.push({ title, company: companyName, dates });
+      }
+    }
+
+    // Fallback: old approach for profiles without entity-collection-item componentkeys
+    if (experience.length === 0) {
+      getSectionItems(expSection).forEach(item => {
+        const ps = item.querySelectorAll('p');
+        const title = ps[0]?.innerText.trim() || '';
+        const company = ps[1]?.innerText.trim() || '';
+        const dates = ps[2]?.innerText.trim() || '';
+        if (title) experience.push({ title, company, dates });
+      });
+    }
+  }
+
+  // Skills — Source 1: Skills section on main page
+  const seen = new Set();
+  const skills = [];
+
+  function addSkill(raw) {
+    const s = (raw || '').trim().split('\n')[0].trim();
+    if (s && s.length < 80 && s.length > 1 &&
+        !s.toLowerCase().includes('show all') &&
+        !s.toLowerCase().includes('endorse') &&
+        !seen.has(s.toLowerCase())) {
+      seen.add(s.toLowerCase());
+      skills.push(s);
+    }
+  }
+
+  const skillSection = findSectionByHeading('Skills');
+  if (skillSection) {
+    // New LinkedIn layout: skill componentkeys (confirmed from real DOM)
+    const skillItems = Array.from(
+      skillSection.querySelectorAll('div[componentkey^="com.linkedin.sdui.profile.skill"]')
+    ).filter(el => {
+      const ck = el.getAttribute('componentkey') || '';
+      return !ck.endsWith('-divider') && el.querySelector('p');
+    });
+
+    skillItems.forEach(item => {
+      // First <p> in each skill item = skill name (confirmed from DOM inspection)
+      addSkill(item.querySelector('p')?.innerText);
+    });
+
+    // Old layout fallback
+    if (skills.length === 0) {
+      skillSection.querySelectorAll('.t-bold span[aria-hidden="true"]').forEach(el =>
+        addSkill(el.innerText)
+      );
+    }
+  }
+
+  // Skills — Source 2: Experience skill-association links
+  // e.g. "Java, Spring boot  and +4 skills" or "SQL, Java and +8 skills"
+  document.querySelectorAll('a[href*="skill-associations-details"]').forEach(link => {
+    const text = (link.innerText || '').trim();
+    // Strip trailing "and +N skills"
+    const cleaned = text.replace(/\s+and\s+\+\d+\s+skills?\.?$/i, '').replace(/\s{2,}/g, ' ');
+    cleaned.split(',').forEach(s => addSkill(s));
+  });
+
+  // Skills — Source 3: Headline pipe-separated list
+  // e.g. "SDE 1 at PharmEasy|Ex PwC| NITK'23 | Dsa, Java, Spring Boot, SQL, LLD"
+  if (title && title.includes('|')) {
+    const parts = title.split('|');
+    const lastPart = parts[parts.length - 1].trim();
+    // Only treat as skills if it looks like a comma-separated list (no year, no company)
+    if (lastPart.includes(',') && !/\b(20|19)\d{2}\b/.test(lastPart)) {
+      lastPart.split(',').forEach(s => addSkill(s));
+    }
+  }
+
+  const experience_years = calcExperienceYears(experience);
+  const about = extractAbout();
+  console.log('[SCOUT] about result:', about ? about.substring(0, 80) : '(empty)');
+  const education = extractEducation();
+  const openToWork = extractOpenToWork();
+
+  return {
+    source: "linkedin",
+    name, title, location, skills, experience_years,
+    profileUrl: window.location.href.split('?')[0],
+    experience, about, education, openToWork
+  };
+}
+
+// Clicks "Show all skills" → extracts from the modal that renders in-place in the live DOM.
+// The detail page is client-rendered (no componentkeys in fetched HTML), so fetch won't work.
+async function expandAndExtractAllSkills(profile) {
+  const skillSection = findSectionByHeading('Skills');
+  if (!skillSection) return;
+
+  const showAllBtn = skillSection.querySelector(
+    'a[aria-label="Show all skills"], a[aria-label*="skills" i][href*="/details/skills"]'
+  );
+  if (!showAllBtn) {
+    console.warn('[SCOUT] No "Show all skills" button found');
+    return;
+  }
+
+  const seen = new Set(profile.skills.map(s => s.toLowerCase()));
+
+  function harvest() {
+    document.querySelectorAll('div[componentkey^="com.linkedin.sdui.profile.skill"]').forEach(el => {
+      if ((el.getAttribute('componentkey') || '').endsWith('-divider')) return;
+      const p = el.querySelector('p');
+      if (!p) return;
+      const skill = (p.innerText || p.textContent || '').trim().split('\n')[0].trim();
+      if (skill && skill.length < 80 &&
+          !skill.toLowerCase().includes('show all') &&
+          !skill.toLowerCase().includes('endorse') &&
+          !seen.has(skill.toLowerCase())) {
+        seen.add(skill.toLowerCase());
+        profile.skills.push(skill);
+      }
+    });
+  }
+
+  showAllBtn.click();
+
+  await new Promise(resolve => {
+    let polls = 0;
+    let stable = 0;
+    let lastCount = profile.skills.length;
+
+    const timer = setInterval(() => {
+      polls++;
+      harvest();
+
+      if (profile.skills.length > lastCount) {
+        stable = 0;
+        lastCount = profile.skills.length;
+      } else {
+        stable++;
+      }
+
+      if (stable >= 4 || polls >= 30) {
+        clearInterval(timer);
+        // Close the skills overlay
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+        console.log(`[SCOUT] expandAndExtractAllSkills: ${profile.skills.length} total skills`);
+        resolve();
+      }
+    }, 500);
+  });
+}
+
+const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
+const cleanPhone = (s) => (s || '').replace(/\((mobile|home|work|cell)\)/ig, '').trim();
+
+// Parse email + phone out of a contact-info DOM/Document (server HTML or live modal).
+function parseContactFrom(root) {
+  let email = '';
+  let phone = '';
+
+  const mailtoEl = root.querySelector('a[href^="mailto:"]');
+  if (mailtoEl) email = mailtoEl.getAttribute('href').replace('mailto:', '').trim();
+
+  if (!email) {
+    for (const el of root.querySelectorAll('a, span, p, li')) {
+      const text = (el.textContent || '').trim();
+      if (EMAIL_RE.test(text) && !text.includes('linkedin.com') && text.length < 120) {
+        email = text.match(EMAIL_RE)[0]; break;
+      }
+    }
+  }
+
+  // Phone: find label <p>"Phone" → sibling value <p> (e.g. "9154262710 (Mobile)")
+  for (const label of root.querySelectorAll('p, h3, h4, dt, span, label')) {
+    if (/^phone$/i.test((label.textContent || '').trim())) {
+      let valEl = label.nextElementSibling;
+      if (!valEl && label.parentElement) valEl = label.parentElement.querySelector('p:nth-of-type(2), dd, a');
+      const val = cleanPhone(valEl && valEl.textContent);
+      if (val && /\d{6,}/.test(val)) { phone = val; break; }
+    }
+  }
+  return { email, phone };
+}
+
+async function extractContactInfo() {
+  // Poll for contact link — topcard lazy-unloads during scroll, may not be back yet
+  let contactLink = document.querySelector('a[href*="overlay/contact-info"]');
+  if (!contactLink) {
+    await new Promise(resolve => {
+      let polls = 0;
+      const timer = setInterval(() => {
+        polls++;
+        contactLink = document.querySelector('a[href*="overlay/contact-info"]');
+        if (contactLink || polls >= 24) { clearInterval(timer); resolve(); }
+      }, 150);
+    });
+    console.log('[SCOUT] contact link poll result:', contactLink ? 'found' : 'not found');
+  }
+
+  if (!contactLink) {
+    console.log('[SCOUT] No contact-info link found after 3.6s poll');
+    return { email: '', phone: '' };
+  }
+
+  // Strategy A (preferred): fetch the overlay route — it returns server-rendered
+  // HTML with email/phone inline. No modal, no timing, no navigation.
+  try {
+    const url = contactLink.href || (window.location.href.split('?')[0].replace(/\/$/, '') + '/overlay/contact-info/');
+    console.log('[SCOUT] Fetching contact overlay:', url);
+    const res = await fetch(url, { credentials: 'include', headers: { 'accept': 'text/html' } });
+    if (res.ok) {
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const scope = doc.querySelector('[componentkey*="ContactInfo"], [data-sdui-screen*="ContactDetails"], dialog') || doc;
+      const got = parseContactFrom(scope);
+      if (got.email || got.phone) {
+        console.log('[SCOUT] contact info via fetch:', got);
+        return got;
+      }
+      console.log('[SCOUT] fetch returned no contact fields, falling back to modal');
+    } else {
+      console.log('[SCOUT] fetch status', res.status, '— falling back to modal');
+    }
+  } catch (e) {
+    console.log('[SCOUT] fetch failed:', e.message, '— falling back to modal');
+  }
+
+  // Strategy B (fallback): click the link, scrape the live modal.
+  console.log('[SCOUT] Clicking contact-info overlay');
+  contactLink.click();
+
+  // Wait up to 10s for any modal/dialog or mailto link to appear
+  await new Promise(resolve => {
+    let polls = 0;
+    const timer = setInterval(() => {
+      polls++;
+      const ready = document.querySelector('a[href^="mailto:"]') ||
+                    document.querySelector('dialog[open]') ||
+                    document.querySelector('[data-sdui-screen*="ContactDetails"]') ||
+                    document.querySelector('[componentkey*="ContactInfo"]') ||
+                    document.querySelector('[role="dialog"]') ||
+                    document.querySelector('[aria-modal="true"]') ||
+                    document.querySelector('[data-test-modal]') ||
+                    document.querySelector('section.pv-contact-info') ||
+                    document.querySelector('input[type="email"]');
+      if (ready || polls > 40) { clearInterval(timer); resolve(); }
+    }, 250);
+  });
+
+  // Extra settle time for AJAX content inside modal
+  await new Promise(r => setTimeout(r, 600));
+
+  console.log('[SCOUT] modal URL:', window.location.href.includes('contact-info') ? 'has contact-info' : 'no contact-info in URL');
+  console.log('[SCOUT] modal dialogs:', document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]').length);
+  console.log('[SCOUT] modal mailtos:', document.querySelectorAll('a[href^="mailto:"]').length);
+  console.log('[SCOUT] modal componentkeys:', document.querySelectorAll('[componentkey*="ContactInfo"],[data-sdui-screen*="ContactDetails"]').length);
+
+  let email = '';
+  let phone = '';
+  const emailRe = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
+
+  // Scope to the contact-info overlay so we don't grab page numbers (follower counts etc).
+  const ctx = document.querySelector(
+    '[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]'
+  ) || document.body;
+  console.log('[SCOUT] modal ctx tag:', ctx === document.body ? 'BODY (no modal found)' : ctx.tagName + ' ' + (ctx.getAttribute('componentkey') || ctx.getAttribute('role') || ''));
+
+  // Strategy 1: mailto link (other's profile — most reliable)
+  const mailtoEl = ctx.querySelector('a[href^="mailto:"]') || document.querySelector('a[href^="mailto:"]');
+  if (mailtoEl) {
+    email = mailtoEl.getAttribute('href').replace('mailto:', '').trim();
+    console.log('[SCOUT] email via mailto:', email);
+  }
+
+  // Strategy 2: email input value (own profile edit view)
+  if (!email) {
+    for (const inp of ctx.querySelectorAll('input[type="email"], input[name*="email"], input[id*="email"]')) {
+      if (inp.value) { email = inp.value.trim(); console.log('[SCOUT] email via input:', email); break; }
+    }
+  }
+
+  // Strategy 3: regex scan of overlay text (catches all remaining cases)
+  if (!email) {
+    for (const el of ctx.querySelectorAll('a, span, p, li')) {
+      const text = (el.innerText || el.textContent || '').trim();
+      if (emailRe.test(text) && !text.includes('linkedin.com') && text.length < 120) {
+        const m = text.match(emailRe);
+        if (m) { email = m[0]; console.log('[SCOUT] email via regex:', email); break; }
+      }
+    }
+  }
+
+  const cleanPhone = (s) =>
+    (s || '').replace(/\((mobile|home|work|cell)\)/ig, '').trim();
+
+  // Phone strategy 1: label <p>/<h3> "Phone" → following sibling holds the number (current LinkedIn DOM)
+  for (const label of ctx.querySelectorAll('p, h3, h4, dt, span, label')) {
+    if (/^phone$/i.test((label.innerText || '').trim())) {
+      // value is usually the next <p> within the same block
+      const block = label.parentElement;
+      let valEl = label.nextElementSibling;
+      if (!valEl && block) valEl = block.querySelector('p:nth-of-type(2), dd, a');
+      const val = cleanPhone(valEl?.innerText);
+      if (val && /\d{6,}/.test(val)) { phone = val; console.log('[SCOUT] phone via label:', phone); break; }
+    }
+  }
+
+  // Phone strategy 2: section with phone/mobile heading (older DOM)
+  if (!phone) {
+    for (const sec of ctx.querySelectorAll('section, div')) {
+      const heading = (sec.querySelector('h3, h4, dt, label')?.innerText || '').toLowerCase();
+      if (heading.includes('phone') || heading.includes('mobile')) {
+        const val = cleanPhone(sec.querySelector('span, p, dd, a')?.innerText);
+        if (val && val.length < 30 && /\d{6,}/.test(val)) { phone = val; console.log('[SCOUT] phone via heading:', phone); break; }
+      }
+    }
+  }
+
+  // Phone strategy 3: pattern scan inside overlay only
+  if (!phone) {
+    const phoneRe = /[\+\d][\d\s\-\.\(\)]{6,18}\d/;
+    for (const el of ctx.querySelectorAll('span, p, a')) {
+      const text = cleanPhone(el.innerText);
+      if (phoneRe.test(text) && text.length < 25 && !/[a-zA-Z]{3}/.test(text) && (text.match(/\d/g) || []).length >= 7) {
+        const m = text.match(phoneRe);
+        if (m) { phone = m[0].trim(); console.log('[SCOUT] phone via regex:', phone); break; }
+      }
+    }
+  }
+
+  console.log('[SCOUT] contact info result:', { email, phone });
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+  await new Promise(r => setTimeout(r, 300));
+
+  return { email, phone };
+}
+
+function scrollAndExtract() {
+  return new Promise((resolve) => {
+    const scrollStep = 800;
+    const scrollDelay = 400;
+    let pos = 0;
+    let capturedAbout = '';
+    const mainEl = document.querySelector('main#workspace') || document.querySelector('main') || document.documentElement;
+
+    // Capture OTW before scrolling — topcard lazy-unloads when scrolled out of viewport
+    const capturedOpenToWork = extractOpenToWork();
+    console.log('[SCOUT] OpenToWork (pre-scroll):', capturedOpenToWork);
+
+    function step() {
+      pos += scrollStep;
+      window.scrollTo(0, pos);
+      mainEl.scrollTop = pos;
+
+      const maxScroll = Math.max(document.body.scrollHeight, mainEl.scrollHeight, document.documentElement.scrollHeight);
+
+      setTimeout(() => {
+        if (!capturedAbout) {
+          capturedAbout = extractAbout();
+          if (capturedAbout) console.log('[SCOUT] About captured at scroll pos', pos);
+        }
+        if (pos < maxScroll) {
+          step();
+        } else {
+          const profile = extractProfile();
+          if (capturedAbout) profile.about = capturedAbout;
+          profile.openToWork = capturedOpenToWork;
+
+          if (!profile.about) {
+            // About lazy-loads only when its container is in viewport (between topcard and activity).
+            // Scroll to 400px so the About container enters view, wait for render, extract, then
+            // scroll back to 0 and wait for topcard to reload before resolving (avoids contact-info miss).
+            window.scrollTo(0, 400);
+            mainEl.scrollTop = 400;
+            setTimeout(() => {
+              const aboutText = extractAbout();
+              console.log('[SCOUT] About after targeted 400px scroll:', aboutText ? aboutText.substring(0, 60) : '(empty)');
+              if (aboutText) profile.about = aboutText;
+              window.scrollTo(0, 0);
+              mainEl.scrollTop = 0;
+              // Wait 700ms for topcard to reload before contact-info extraction runs
+              setTimeout(() => resolve(profile), 700);
+            }, 1200);
+          } else {
+            window.scrollTo(0, 0);
+            mainEl.scrollTop = 0;
+            setTimeout(() => resolve(profile), 700);
+          }
+        }
+      }, scrollDelay);
+    }
+
+    // Scroll to top first then start downward scroll
+    window.scrollTo(0, 0);
+    mainEl.scrollTop = 0;
+    setTimeout(step, 400);
+  });
+}
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'getProfile') {
+    scrollAndExtract().then(async profile => {
+      // Contact info FIRST — while still on the main profile. The skills
+      // "Show all" click can navigate to /details/skills and lose the
+      // contact-info link, leaving email/phone blank.
+      const { email, phone } = await extractContactInfo();
+      profile.email = email;
+      profile.phone = phone;
+
+      if (!profile.about) {
+        profile.about = await fetchAbout();
+      }
+
+      await expandAndExtractAllSkills(profile);
+
+      console.log('[SCOUT] LinkedIn parsed:', profile);
+      chrome.storage.session.set({ scout_candidate: profile });
+      sendResponse({ profile });
+    });
+  }
+  return true;
+});
