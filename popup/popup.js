@@ -106,6 +106,7 @@ jdSelect.addEventListener('change', () => {
 // ── Score display ─────────────────────────────────────────────────────────────
 
 function requestScore(jdId) {
+  addBtn.disabled = true; // prevent stale score being submitted while new one loads
   showStatus('Scoring…', 'loading');
   chrome.runtime.sendMessage(
     { type: 'GET_SCORE', payload: { jd_id: jdId, candidate } },

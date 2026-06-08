@@ -94,14 +94,14 @@ function getSheet() {
 function ensureHeaders(sheet) {
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(HEADERS);
+    // Formatting only runs once — avoids 4 extra API calls on every POST
+    sheet.getRange(1, 1, 1, HEADERS.length)
+         .setFontWeight("bold").setBackground("#0f172a").setFontColor("#ffffff");
+    sheet.setFrozenRows(1);
   } else {
-    // Always overwrite row 1 with current HEADERS — keeps columns aligned after schema changes
-    const range = sheet.getRange(1, 1, 1, HEADERS.length);
-    range.setValues([HEADERS]);
+    // Keep columns aligned after schema changes but skip re-formatting
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
   }
-  sheet.getRange(1, 1, 1, HEADERS.length)
-       .setFontWeight("bold").setBackground("#0f172a").setFontColor("#ffffff");
-  sheet.setFrozenRows(1);
 }
 
 function jsonOut(obj) {
