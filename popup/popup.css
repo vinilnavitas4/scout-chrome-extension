@@ -293,65 +293,6 @@ body {
   cursor: pointer;
 }
 
-/* ── Settings section ── */
-.settings-section {
-  border-top: 1px solid #f1f5f9;
-  padding: 10px 16px 12px;
-}
-
-.settings-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #94a3b8;
-  margin-bottom: 6px;
-}
-
-.settings-row {
-  display: flex;
-  gap: 6px;
-}
-
-.settings-row input {
-  flex: 1;
-  padding: 6px 8px;
-  border: 1px solid #e2e8f0;
-  border-radius: 5px;
-  font-size: 11px;
-  color: #0f172a;
-  min-width: 0;
-}
-
-.settings-row input:focus {
-  outline: none;
-  border-color: #38bdf8;
-}
-
-.settings-row button {
-  padding: 6px 12px;
-  background: #0f172a;
-  color: white;
-  border: none;
-  border-radius: 5px;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.settings-row button:hover {
-  background: #1e293b;
-}
-
-.settings-hint {
-  font-size: 10px;
-  margin-top: 4px;
-  min-height: 14px;
-}
-
-.settings-hint.ok    { color: #16a34a; }
-.settings-hint.error { color: #dc2626; }
 
 /* ── Footer ── */
 .footer {

@@ -180,35 +180,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // ── ADD_CANDIDATE — post to Google Sheets via Apps Script ─────────────────
+  // ── ADD_CANDIDATE — post to SCOUT backend → JazzHR ──────────────────────
   // Async IIFE prevents Chrome from killing the SW mid-fetch (MV3 requirement).
   if (type === "ADD_CANDIDATE") {
     (async () => {
       try {
-        const { sheetsUrl } = await chrome.storage.local.get(["sheetsUrl"]);
-        if (!sheetsUrl) {
-          sendResponse({ ok: false, error: "No Google Sheets URL configured. Add it in extension settings." });
-          return;
-        }
-
-        console.log("[SCOUT] Sending to:", sheetsUrl);
-        const r = await fetch(sheetsUrl, {
-          method:   "POST",
-          headers:  { "Content-Type": "text/plain" },
-          body:     JSON.stringify(payload),
-          redirect: "follow"
+        const { job_id, candidate } = payload;
+        const r = await fetch(`${BASE_URL}/api/scout/candidates`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ job_id, candidate }),
         });
         const text = await r.text();
         let data;
         try { data = JSON.parse(text); }
-        catch (_) { sendResponse({ ok: false, error: `Non-JSON response (${r.status}): ${text.slice(0, 120)}` }); return; }
-        if (data.status === "success") {
+        catch (_) { sendResponse({ ok: false, error: `Non-JSON (${r.status}): ${text.slice(0, 120)}` }); return; }
+        if (data.ok) {
+          console.log("[SCOUT] Candidate added:", data.applicant?.prospect_id);
           sendResponse({ ok: true, status: "added" });
         } else {
-          sendResponse({ ok: false, error: data.message || "Apps Script returned error." });
+          sendResponse({ ok: false, error: data.error || `API error (${r.status})` });
         }
       } catch (e) {
-        console.error("[SCOUT] Fetch error:", e.message);
+        console.error("[SCOUT] ADD_CANDIDATE error:", e.message);
         sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
       }
     })();

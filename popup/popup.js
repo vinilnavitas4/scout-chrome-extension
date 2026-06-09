@@ -10,32 +10,20 @@ const scoreCircle    = document.getElementById('score-circle');
 const scoreNumber    = document.getElementById('score-number');
 const scoreLabel     = document.getElementById('score-label');
 const scoreRationale = document.getElementById('score-rationale');
-const addBtn            = document.getElementById('add-btn');
-const statusEl          = document.getElementById('status');
+const addBtn         = document.getElementById('add-btn');
+const statusEl       = document.getElementById('status');
 const mockDuplicate  = document.getElementById('mock-duplicate');
 const mainView       = document.getElementById('main-view');
 const emptyView      = document.getElementById('empty-view');
-const sheetUrlInput      = document.getElementById('sheet-url');
-const saveUrlBtn         = document.getElementById('save-url-btn');
-const urlHint            = document.getElementById('url-hint');
 
-let candidate    = null;
-let selectedJd   = null;
+let candidate       = null;
+let selectedJd      = null;
 let selectedJdTitle = null;
-let currentScore = null;   // { score, label, rationale } from last GET_SCORE
+let currentScore    = null;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 window.addEventListener('DOMContentLoaded', async () => {
-  // Load saved Apps Script URL
-  chrome.storage.local.get('sheetsUrl', ({ sheetsUrl }) => {
-    if (sheetsUrl) {
-      sheetUrlInput.value = sheetsUrl;
-      urlHint.textContent = 'URL saved';
-      urlHint.className   = 'settings-hint ok';
-    }
-  });
-
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const url = tab.url || '';
 
@@ -68,8 +56,8 @@ window.addEventListener('DOMContentLoaded', async () => {
 // ── Profile card ──────────────────────────────────────────────────────────────
 
 function renderProfile(p) {
-  profileName.textContent  = p.name    || '—';
-  profileTitle.textContent = p.title   || '—';
+  profileName.textContent  = p.name     || '—';
+  profileTitle.textContent = p.title    || '—';
   profileLoc.textContent   = p.location || '—';
   profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
   profileCard.classList.add('show');
@@ -103,10 +91,10 @@ jdSelect.addEventListener('change', () => {
   requestScore(jdId);
 });
 
-// ── Score display ─────────────────────────────────────────────────────────────
+// ── Score ─────────────────────────────────────────────────────────────────────
 
 function requestScore(jdId) {
-  addBtn.disabled = true; // prevent stale score being submitted while new one loads
+  addBtn.disabled = true;
   showStatus('Scoring…', 'loading');
   chrome.runtime.sendMessage(
     { type: 'GET_SCORE', payload: { jd_id: jdId, candidate } },
@@ -136,15 +124,13 @@ function renderScore(data) {
   resetAddButton();
 }
 
-// ── Add to SCOUT → Google Sheets ─────────────────────────────────────────────
+// ── Add to SCOUT → backend API ────────────────────────────────────────────────
 
 addBtn.addEventListener('click', () => {
   if (mockDuplicate.checked) { renderDuplicateState(); return; }
 
   const payload = {
-    source:     candidate.source,
-    jd_id:      selectedJd,
-    jd_title:   selectedJdTitle,
+    job_id: selectedJd,
     candidate: {
       name:             candidate.name,
       title:            candidate.title,
@@ -157,40 +143,26 @@ addBtn.addEventListener('click', () => {
       experience:       candidate.experience || [],
       about:            candidate.about      || '',
       education:        candidate.education  || [],
-      openToWork:       candidate.openToWork || false
-    },
-    score:       currentScore?.score,
-    score_label: currentScore?.label,
-    rationale:   currentScore?.rationale
+      openToWork:       candidate.openToWork || false,
+      source:           candidate.source,
+      score:            currentScore?.score,
+      score_label:      currentScore?.label,
+      rationale:        currentScore?.rationale,
+    }
   };
 
   addBtn.disabled = true;
-  showStatus('Saving to Google Sheets…', 'loading');
+  showStatus('Adding to SCOUT…', 'loading');
 
   chrome.runtime.sendMessage({ type: 'ADD_CANDIDATE', payload }, (res) => {
     statusEl.classList.remove('show');
     if (res?.ok) {
-      addBtn.textContent = 'Saved to Sheet ✓';
+      addBtn.textContent = 'Added to SCOUT ✓';
       addBtn.className   = 'btn btn-success';
     } else {
-      showStatus(res?.error || 'Failed to save.', 'error');
+      showStatus(res?.error || 'Failed to add.', 'error');
       addBtn.disabled = false;
     }
-  });
-});
-
-// ── Settings: save Apps Script URL ───────────────────────────────────────────
-
-saveUrlBtn.addEventListener('click', () => {
-  const url = sheetUrlInput.value.trim();
-  if (!url.startsWith('https://script.google.com')) {
-    urlHint.textContent = 'Must be a script.google.com URL';
-    urlHint.className   = 'settings-hint error';
-    return;
-  }
-  chrome.storage.local.set({ sheetsUrl: url }, () => {
-    urlHint.textContent = 'Saved!';
-    urlHint.className   = 'settings-hint ok';
   });
 });
 
