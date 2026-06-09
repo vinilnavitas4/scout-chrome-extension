@@ -195,8 +195,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try { data = JSON.parse(text); }
         catch (_) { sendResponse({ ok: false, error: `Non-JSON (${r.status}): ${text.slice(0, 120)}` }); return; }
         if (data.ok) {
-          console.log("[SCOUT] Candidate added:", data.applicant?.prospect_id);
-          sendResponse({ ok: true, status: "added" });
+          console.log("[SCOUT] Candidate added:", data.applicant?.id || data.applicant?.prospect_id);
+          sendResponse({ ok: true, status: "added", jazzhr_url: data.jazzhr_url || "" });
         } else {
           sendResponse({ ok: false, error: data.error || `API error (${r.status})` });
         }

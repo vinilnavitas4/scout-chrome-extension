@@ -305,6 +305,13 @@ body {
 }
 
 .status.show { display: block; }
+
+.jazzhr-link {
+  color: #16a34a;
+  font-weight: 600;
+  text-decoration: none;
+}
+.jazzhr-link:hover { text-decoration: underline; }
 .status.info    { background: #f0f9ff; color: #0284c7; }
 .status.ok      { background: #f0fdf4; color: #16a34a; }
 .status.error   { background: #fef2f2; color: #dc2626; }

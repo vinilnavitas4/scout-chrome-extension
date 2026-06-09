@@ -209,6 +209,9 @@ addBtn.addEventListener('click', () => {
     if (res?.ok) {
       addBtn.textContent = 'Added to SCOUT ✓';
       addBtn.className   = 'btn btn-success';
+      if (res.jazzhr_url) {
+        showJazzHRLink(res.jazzhr_url);
+      }
     } else {
       showStatus(res?.error || 'Failed to add.', 'error');
       addBtn.disabled = false;
@@ -240,4 +243,15 @@ function resetAddButton() {
 function showStatus(msg, type) {
   statusEl.textContent = msg;
   statusEl.className   = `status ${type} show`;
+}
+
+function showJazzHRLink(url) {
+  const a = document.createElement('a');
+  a.href      = url;
+  a.target    = '_blank';
+  a.className = 'jazzhr-link';
+  a.textContent = 'View in JazzHR →';
+  statusEl.textContent = '';
+  statusEl.appendChild(a);
+  statusEl.className = 'status ok show';
 }
