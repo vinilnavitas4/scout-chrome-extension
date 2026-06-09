@@ -2,13 +2,13 @@
 
 **Navitas AI Labs** · Built by intern · Part of the SCOUT Recruiting Agent platform
 
-A standalone Chrome extension that overlays AI-powered fit scores on Dice.com and LinkedIn candidate profiles, and pushes selected candidates to the SCOUT platform with one click.
+A standalone Chrome extension that overlays AI-powered fit scores on LinkedIn candidate profiles, and pushes selected candidates to the SCOUT platform with one click.
 
 ---
 
 ## What It Does
 
-1. Recruiter opens a candidate profile on **Dice.com** or **LinkedIn**
+1. Recruiter opens a candidate profile on **LinkedIn**
 2. Extension popup opens — recruiter selects an active **Job Description** from dropdown
 3. Extension reads the profile (name, title, skills, location, experience) from the page
 4. Sends parsed profile + selected JD to **SCOUT backend API** → receives a **fit score (0–100)** + rationale
@@ -25,7 +25,6 @@ A standalone Chrome extension that overlays AI-powered fit scores on Dice.com an
 Chrome Extension (this repo)
     │
     ├── content_scripts/
-    │   ├── dice.js        ← parses Dice.com profile DOM
     │   └── linkedin.js    ← parses LinkedIn profile DOM
     │
     ├── popup/
@@ -55,12 +54,11 @@ Chrome Extension (this repo)
 **Day 1–2 · Setup + Manifest**
 - [ ] Repo setup, Manifest V3 scaffold
 - [ ] Permissions: `activeTab`, `storage`, `scripting`
-- [ ] Host permissions: `https://www.dice.com/*`, `https://www.linkedin.com/*`
+- [ ] Host permissions: `https://www.linkedin.com/*`
 - [ ] Basic popup HTML/CSS + background service worker scaffold
 
 **Day 3–4 · Content Scripts — Profile Parsing**
-- [ ] Dice.com content script — extract: name, title, location, skills, years experience from DOM
-- [ ] LinkedIn content script — same fields from LinkedIn profile DOM
+- [ ] LinkedIn content script — extract: name, title, location, skills, years experience from DOM
 - [ ] `console.log` parsed object to verify, store in `chrome.storage.session`
 
 **Day 5 · Popup UI + Dummy Score**
@@ -70,7 +68,7 @@ Chrome Extension (this repo)
 - [ ] "Add to SCOUT" button → `console.log` payload (no API call yet)
 - [ ] "Already exists" mock state for UI testing
 
-**✅ End of Week 1:** Extension installs, loads on Dice + LinkedIn, parses profile, shows score, button works — fully offline.
+**✅ End of Week 1:** Extension installs, loads on LinkedIn, parses profile, shows score, button works — fully offline.
 
 ---
 
@@ -91,13 +89,13 @@ Chrome Extension (this repo)
 
 **Day 4 · Add to SCOUT → Live**
 - [ ] Replace `console.log` with `POST /api/candidates`
-- [ ] Payload includes source tag: `"dice"` or `"linkedin"`
+- [ ] Payload includes source tag: `"linkedin"`
 - [ ] Success → "Added ✅" | Duplicate → "Already in SCOUT — view record →"
 
 **Day 5 · Polish + Test**
 - [ ] Error states — API down, parse failed, timeout
 - [ ] Loading spinners
-- [ ] Test on 5 real Dice + 5 LinkedIn profiles
+- [ ] Test on 10 real LinkedIn profiles
 - [ ] Package `.zip` for internal distribution
 
 **✅ End of Week 2:** Fully integrated. Recruiter opens profile → selects JD → sees live score → clicks Add to SCOUT → candidate lands in SCOUT + JazzHR.
@@ -129,7 +127,7 @@ Use these hardcoded values while SCOUT APIs are being built.
 ### Dummy Candidate Payload (what Add to SCOUT will send)
 ```json
 {
-  "source": "dice",
+  "source": "linkedin",
   "jd_id": "jd_001",
   "candidate": {
     "name": "John Smith",

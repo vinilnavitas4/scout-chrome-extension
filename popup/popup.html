@@ -11,7 +11,10 @@
       <div class="header-logo">SCOUT</div>
       <div class="header-sub">Navitas AI Labs · Candidate Fit Scorer</div>
     </div>
-    <span class="source-badge" id="source-badge">—</span>
+    <div class="header-right">
+      <span class="source-badge" id="source-badge">—</span>
+      <button class="close-btn" id="close-btn" title="Close">✕</button>
+    </div>
   </div>
 
   <div id="main-view">
@@ -24,6 +27,10 @@
         <div class="profile-meta">
           <span id="profile-location"></span>
           <span id="profile-exp"></span>
+        </div>
+        <div class="profile-contact">
+          <a class="profile-email" id="profile-email"></a>
+          <a class="profile-phone" id="profile-phone"></a>
         </div>
       </div>
 
@@ -76,7 +83,7 @@
   <div id="empty-view" style="display:none">
     <div class="empty-state">
       <strong>No candidate profile detected</strong>
-      <p>Open a candidate profile on<br><b>Dice.com</b> or <b>LinkedIn</b> to use SCOUT.</p>
+      <p>Open a candidate profile on<br><b>LinkedIn</b> to use SCOUT.</p>
     </div>
   </div>
 

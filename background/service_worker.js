@@ -1,5 +1,11 @@
 const BASE_URL = "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
+// Open the side panel when the toolbar icon is clicked.
+// Side panel stays open across outside clicks (unlike an action popup).
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((e) => console.error("[SCOUT] setPanelBehavior:", e.message));
+
 // In-memory cache: job_id → { title, requirements }
 // Pre-populated after GET_JDS so GET_SCORE is instant.
 const jobCache = new Map();
