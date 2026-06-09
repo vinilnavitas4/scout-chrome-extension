@@ -43,18 +43,49 @@ window.addEventListener('DOMContentLoaded', async () => {
   profileCard.classList.add('show');
 
   // Load profile and jobs in parallel
-  chrome.tabs.sendMessage(tab.id, { action: 'getProfile' }, (response) => {
+  const script = onDice ? 'content_scripts/dice.js' : 'content_scripts/linkedin.js';
+  requestProfile(tab.id, script);
+
+  loadJds();
+});
+
+// ── Profile loading (with auto-inject fallback) ───────────────────────────────
+
+function requestProfile(tabId, scriptFile) {
+  chrome.tabs.sendMessage(tabId, { action: 'getProfile' }, (response) => {
     if (chrome.runtime.lastError || !response?.profile) {
-      renderProfile(null);
-      showStatus('Could not read profile. Refresh the page and try again.', 'error');
+      // Content script not in this tab yet — inject it now, then retry once
+      chrome.scripting.executeScript(
+        { target: { tabId }, files: [scriptFile] },
+        () => {
+          if (chrome.runtime.lastError) {
+            renderProfile(null);
+            showStatus('Could not inject script. Try refreshing the page.', 'error');
+            return;
+          }
+          // Give the script a moment to register its listener
+          setTimeout(() => {
+            chrome.tabs.sendMessage(tabId, { action: 'getProfile' }, (res2) => {
+              if (chrome.runtime.lastError || !res2?.profile) {
+                renderProfile(null);
+                showStatus('Could not read profile. Try refreshing the page.', 'error');
+                return;
+              }
+              candidate = res2.profile;
+              renderProfile(candidate);
+              // If JD was already selected before profile loaded, score now
+              if (selectedJd) requestScore(selectedJd);
+            });
+          }, 300);
+        }
+      );
       return;
     }
     candidate = response.profile;
     renderProfile(candidate);
+    if (selectedJd) requestScore(selectedJd);
   });
-
-  loadJds();
-});
+}
 
 // ── Profile card ──────────────────────────────────────────────────────────────
 
