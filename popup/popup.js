@@ -176,8 +176,20 @@ function renderScore(data) {
 
 // ── Add to SCOUT → backend API ────────────────────────────────────────────────
 
+const jazzhrBtn = document.getElementById('jazzhr-btn');
+
 addBtn.addEventListener('click', () => {
   if (mockDuplicate.checked) { renderDuplicateState(); return; }
+
+  // Validation
+  if (!candidate) {
+    showStatus('Profile not loaded yet. Wait a moment and try again.', 'error');
+    return;
+  }
+  if (!selectedJd) {
+    showStatus('Please select a Job Description first.', 'error');
+    return;
+  }
 
   const payload = {
     job_id: selectedJd,
@@ -202,6 +214,7 @@ addBtn.addEventListener('click', () => {
   };
 
   addBtn.disabled = true;
+  jazzhrBtn.style.display = 'none';
   showStatus('Adding to SCOUT…', 'loading');
 
   chrome.runtime.sendMessage({ type: 'ADD_CANDIDATE', payload }, (res) => {
@@ -210,7 +223,8 @@ addBtn.addEventListener('click', () => {
       addBtn.textContent = 'Added to SCOUT ✓';
       addBtn.className   = 'btn btn-success';
       if (res.jazzhr_url) {
-        showJazzHRLink(res.jazzhr_url);
+        jazzhrBtn.href         = res.jazzhr_url;
+        jazzhrBtn.style.display = 'flex';
       }
     } else {
       showStatus(res?.error || 'Failed to add.', 'error');
@@ -245,13 +259,3 @@ function showStatus(msg, type) {
   statusEl.className   = `status ${type} show`;
 }
 
-function showJazzHRLink(url) {
-  const a = document.createElement('a');
-  a.href      = url;
-  a.target    = '_blank';
-  a.className = 'jazzhr-link';
-  a.textContent = 'View in JazzHR →';
-  statusEl.textContent = '';
-  statusEl.appendChild(a);
-  statusEl.className = 'status ok show';
-}
