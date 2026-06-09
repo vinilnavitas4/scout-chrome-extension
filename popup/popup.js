@@ -12,15 +12,18 @@ const scoreNumber    = document.getElementById('score-number');
 const scoreLabel     = document.getElementById('score-label');
 const scoreRationale = document.getElementById('score-rationale');
 const addBtn         = document.getElementById('add-btn');
+const jazzhrBtn      = document.getElementById('jazzhr-btn');
 const statusEl       = document.getElementById('status');
 const mockDuplicate  = document.getElementById('mock-duplicate');
 const mainView       = document.getElementById('main-view');
 const emptyView      = document.getElementById('empty-view');
+const matchSection   = document.getElementById('match-section');
 
-let candidate       = null;
+let candidate       = null;   // set when profile fetch completes
 let selectedJd      = null;
 let selectedJdTitle = null;
 let currentScore    = null;
+let profilePending  = true;   // true while profile fetch is in flight
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -40,8 +43,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   sourceBadge.textContent = onDice ? 'Dice.com' : 'LinkedIn';
   if (onDice) sourceBadge.classList.add('dice');
 
-  showStatus('Reading profile…', 'loading');
+  // Show JD dropdown immediately — don't block on profile
+  matchSection.style.display = 'block';
+  loadJds();
 
+  // Fetch profile in background; score fires automatically when both ready
   const script = onDice ? 'content_scripts/dice.js' : 'content_scripts/linkedin.js';
   requestProfile(tab.id, script);
 });
@@ -51,52 +57,60 @@ window.addEventListener('DOMContentLoaded', async () => {
 function requestProfile(tabId, scriptFile) {
   chrome.tabs.sendMessage(tabId, { action: 'getProfile' }, (response) => {
     if (chrome.runtime.lastError || !response?.profile) {
-      // Content script not in this tab yet — inject it now, then retry once
       chrome.scripting.executeScript(
         { target: { tabId }, files: [scriptFile] },
         () => {
           if (chrome.runtime.lastError) {
-            renderProfile(null);
-            showStatus('Could not inject script. Try refreshing the page.', 'error');
+            onProfileFailed('Could not inject script. Try refreshing the page.');
             return;
           }
-          // Give the script a moment to register its listener
           setTimeout(() => {
             chrome.tabs.sendMessage(tabId, { action: 'getProfile' }, (res2) => {
               if (chrome.runtime.lastError || !res2?.profile) {
-                renderProfile(null);
-                showStatus('Could not read profile. Try refreshing the page.', 'error');
+                onProfileFailed('Could not read profile. Try refreshing the page.');
                 return;
               }
-              candidate = res2.profile;
-              renderProfile(candidate);
-              // If JD was already selected before profile loaded, score now
-              if (selectedJd) requestScore(selectedJd);
+              onProfileLoaded(res2.profile);
             });
           }, 300);
         }
       );
       return;
     }
-    candidate = response.profile;
-    renderProfile(candidate);
-    if (selectedJd) requestScore(selectedJd);
+    onProfileLoaded(response.profile);
   });
+}
+
+function onProfileLoaded(profile) {
+  candidate     = profile;
+  profilePending = false;
+  renderProfile(profile);
+  // If user already picked a JD while profile was loading → score now
+  if (selectedJd) {
+    showStatus('Matching profile to selected JD…', 'loading');
+    requestScore(selectedJd);
+  }
+}
+
+function onProfileFailed(msg) {
+  profilePending = false;
+  // Only show error if user has already selected a JD (otherwise silent)
+  if (selectedJd) {
+    showStatus(msg, 'error');
+    addBtn.disabled = true;
+  }
 }
 
 // ── Profile card ──────────────────────────────────────────────────────────────
 
 function renderProfile(p) {
-  if (!p) return; // error already shown — keep match-section hidden
   profileName.textContent  = p.name     || '—';
   profileTitle.textContent = p.title    || '';
   profileLoc.textContent   = p.location || '';
   profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
   profileCard.classList.add('show');
-  statusEl.classList.remove('show');
-  // Profile confirmed — reveal JD dropdown and Add button, then load jobs
-  document.getElementById('match-section').style.display = 'block';
-  loadJds();
+  // Clear any "matching" status that was shown while waiting
+  if (!selectedJd) statusEl.classList.remove('show');
 }
 
 // ── JD dropdown ───────────────────────────────────────────────────────────────
@@ -107,12 +121,10 @@ function loadJds() {
 
   chrome.runtime.sendMessage({ type: 'GET_JDS' }, (res) => {
     jdSpinner.classList.remove('show');
-
     if (!res?.ok) {
       jdSelect.innerHTML = '<option value="">Failed to load jobs</option>';
       return;
     }
-
     jdSelect.innerHTML = '<option value="">— Choose a JD —</option>';
     res.data.forEach(jd => {
       const opt = document.createElement('option');
@@ -131,14 +143,24 @@ jdSelect.addEventListener('change', () => {
     scoreCard.classList.remove('show');
     addBtn.disabled = true;
     currentScore = null;
+    statusEl.classList.remove('show');
     return;
   }
+
   selectedJd      = jdId;
   selectedJdTitle = jdSelect.selectedOptions[0]?.dataset.title || jdId;
+  scoreCard.classList.remove('show');
+  addBtn.disabled = true;
 
-  // Only score once we have the candidate profile
   if (candidate) {
+    // Profile already loaded — score immediately
     requestScore(jdId);
+  } else if (profilePending) {
+    // Profile still loading — show holding message, score fires in onProfileLoaded
+    showStatus('Reading profile… will score when ready.', 'loading');
+  } else {
+    // Profile fetch already failed
+    showStatus('Could not read profile. Try refreshing the page.', 'error');
   }
 });
 
@@ -147,7 +169,7 @@ jdSelect.addEventListener('change', () => {
 function requestScore(jdId) {
   addBtn.disabled = true;
   scoreCard.classList.remove('show');
-  showStatus('Scoring…', 'loading');
+  showStatus('Matching profile to JD…', 'loading');
 
   chrome.runtime.sendMessage(
     { type: 'GET_SCORE', payload: { jd_id: jdId, candidate } },
@@ -179,14 +201,11 @@ function renderScore(data) {
 
 // ── Add to SCOUT → backend API ────────────────────────────────────────────────
 
-const jazzhrBtn = document.getElementById('jazzhr-btn');
-
 addBtn.addEventListener('click', () => {
   if (mockDuplicate.checked) { renderDuplicateState(); return; }
 
-  // Validation
   if (!candidate) {
-    showStatus('Profile not loaded yet. Wait a moment and try again.', 'error');
+    showStatus('Profile not loaded yet — wait and try again.', 'error');
     return;
   }
   if (!selectedJd) {
@@ -226,7 +245,7 @@ addBtn.addEventListener('click', () => {
       addBtn.textContent = 'Added to SCOUT ✓';
       addBtn.className   = 'btn btn-success';
       if (res.jazzhr_url) {
-        jazzhrBtn.href         = res.jazzhr_url;
+        jazzhrBtn.href          = res.jazzhr_url;
         jazzhrBtn.style.display = 'flex';
       }
     } else {
@@ -261,4 +280,3 @@ function showStatus(msg, type) {
   statusEl.textContent = msg;
   statusEl.className   = `status ${type} show`;
 }
-
