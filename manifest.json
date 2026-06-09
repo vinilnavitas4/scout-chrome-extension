@@ -7,13 +7,7 @@
   "host_permissions": [
     "https://www.dice.com/*",
     "https://www.linkedin.com/*",
-<<<<<<< HEAD
-    "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io/*",
-    "https://www.signalhire.com/*"
-=======
-    "https://script.google.com/*",
-    "https://script.googleusercontent.com/*"
->>>>>>> c0f9b2425017707ebdfcdd9c88eef68d3a73661a
+    "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io/*"
   ],
   "content_scripts": [
     {

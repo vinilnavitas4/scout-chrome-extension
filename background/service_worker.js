@@ -3,6 +3,7 @@ const BASE_URL = "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azu
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, payload } = message;
 
+  // ── GET_JDS — fetch live jobs from SCOUT backend ──────────────────────────
   if (type === "GET_JDS") {
     fetch(`${BASE_URL}/api/scout/jobs`)
       .then(r => r.json())
@@ -21,39 +22,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // ── ADD_CANDIDATE — post to SCOUT backend → JazzHR ───────────────────────
+  // Async IIFE keeps Chrome from killing the SW mid-fetch (MV3 requirement).
   if (type === "ADD_CANDIDATE") {
-<<<<<<< HEAD
-    const { jd_id, candidate, source } = payload;
-    const body = JSON.stringify({ job_id: jd_id, candidate: { ...candidate, source } });
-    console.log("[SCOUT] ADD_CANDIDATE body:", body);
-
-    fetch(`${BASE_URL}/api/scout/candidates`, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body
-    })
-      .then(async r => {
-=======
-    // Use async IIFE so Chrome tracks the entire chain as active work,
-    // preventing the service worker from being killed mid-fetch (MV3 pitfall).
     (async () => {
       try {
-        const { sheetsUrl } = await chrome.storage.local.get(["sheetsUrl"]);
-        if (!sheetsUrl) {
-          sendResponse({ ok: false, error: "No Google Sheets URL configured. Add it in extension settings." });
-          return;
-        }
+        const { jd_id, candidate, source } = payload;
+        const body = JSON.stringify({ job_id: jd_id, candidate: { ...candidate, source } });
+        console.log("[SCOUT] ADD_CANDIDATE body:", body);
 
-        console.log("[SCOUT] Sending to:", sheetsUrl);
-        console.log("[SCOUT] Payload:", JSON.stringify(payload, null, 2));
-        const r = await fetch(sheetsUrl, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain" },
-          body: JSON.stringify(payload),
-          redirect: "follow"
+        const r = await fetch(`${BASE_URL}/api/scout/candidates`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
         });
-        console.log("[SCOUT] HTTP status:", r.status, r.url);
->>>>>>> c0f9b2425017707ebdfcdd9c88eef68d3a73661a
         const text = await r.text();
         console.log("[SCOUT] ADD_CANDIDATE status:", r.status, "body:", text);
         let data;
@@ -65,17 +47,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } else {
           sendResponse({ ok: false, error: data.error || data.message || `API error (${r.status})` });
         }
-      })
-      .catch(e => {
+      } catch (e) {
         console.error("[SCOUT] ADD_CANDIDATE fetch error:", e.message);
         sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
-<<<<<<< HEAD
-      });
-    return true;
-=======
       }
     })();
     return true; // keep channel open for async response
->>>>>>> c0f9b2425017707ebdfcdd9c88eef68d3a73661a
   }
 });
