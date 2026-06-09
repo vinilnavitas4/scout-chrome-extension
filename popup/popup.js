@@ -40,8 +40,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   sourceBadge.textContent = onDice ? 'Dice.com' : 'LinkedIn';
   if (onDice) sourceBadge.classList.add('dice');
 
-  profileCard.classList.add('show');
-
   // Load profile and jobs in parallel
   const script = onDice ? 'content_scripts/dice.js' : 'content_scripts/linkedin.js';
   requestProfile(tab.id, script);
@@ -90,16 +88,12 @@ function requestProfile(tabId, scriptFile) {
 // ── Profile card ──────────────────────────────────────────────────────────────
 
 function renderProfile(p) {
-  if (!p) {
-    profileName.textContent  = '—';
-    profileTitle.textContent = '';
-    profileLoc.textContent   = '';
-    return;
-  }
+  if (!p) return; // keep card hidden on failure
   profileName.textContent  = p.name     || '—';
   profileTitle.textContent = p.title    || '';
   profileLoc.textContent   = p.location || '';
   profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
+  profileCard.classList.add('show');
 }
 
 // ── JD dropdown ───────────────────────────────────────────────────────────────
