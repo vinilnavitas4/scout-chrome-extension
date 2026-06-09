@@ -27,37 +27,41 @@
         </div>
       </div>
 
-      <!-- JD dropdown -->
-      <div class="jd-section">
-        <div class="section-label">Match to Job Description</div>
-        <div class="jd-wrap">
-          <select class="jd-select" id="jd-select" disabled>
-            <option value="">Loading jobs…</option>
-          </select>
-          <span class="jd-spinner" id="jd-spinner"></span>
-        </div>
-      </div>
-
-      <!-- Score card -->
-      <div class="score-card" id="score-card">
-        <div class="score-circle" id="score-circle">
-          <span class="score-number" id="score-number">—</span>
-          <small>/100</small>
-        </div>
-        <div class="score-info">
-          <div class="score-label" id="score-label">—</div>
-          <div class="score-rationale" id="score-rationale">—</div>
-        </div>
-      </div>
-
-      <button class="btn btn-primary" id="add-btn" disabled>Add to SCOUT</button>
-
       <div class="status" id="status"></div>
 
-      <!-- Shown after successful add -->
-      <a class="btn btn-jazzhr" id="jazzhr-btn" target="_blank" style="display:none">
-        View in JazzHR →
-      </a>
+      <!-- Hidden until profile is confirmed loaded -->
+      <div id="match-section" style="display:none">
+
+        <!-- JD dropdown -->
+        <div class="jd-section">
+          <div class="section-label">Match to Job Description</div>
+          <div class="jd-wrap">
+            <select class="jd-select" id="jd-select" disabled>
+              <option value="">Loading jobs…</option>
+            </select>
+            <span class="jd-spinner" id="jd-spinner"></span>
+          </div>
+        </div>
+
+        <!-- Score card -->
+        <div class="score-card" id="score-card">
+          <div class="score-circle" id="score-circle">
+            <span class="score-number" id="score-number">—</span>
+            <small>/100</small>
+          </div>
+          <div class="score-info">
+            <div class="score-label" id="score-label">—</div>
+            <div class="score-rationale" id="score-rationale">—</div>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="add-btn" disabled>Add to SCOUT</button>
+
+        <a class="btn btn-jazzhr" id="jazzhr-btn" target="_blank" style="display:none">
+          View in JazzHR →
+        </a>
+
+      </div>
     </div>
 
     <div class="dev-bar">
