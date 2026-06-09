@@ -80,6 +80,41 @@ jdSelect.addEventListener('change', () => {
   }
   selectedJd      = jdId;
   selectedJdTitle = jdSelect.selectedOptions[0]?.dataset.title || jdId;
+<<<<<<< HEAD
+=======
+  requestScore(jdId);
+});
+
+// ── Score display ─────────────────────────────────────────────────────────────
+
+function requestScore(jdId) {
+  addBtn.disabled = true; // prevent stale score being submitted while new one loads
+  showStatus('Scoring…', 'loading');
+  chrome.runtime.sendMessage(
+    { type: 'GET_SCORE', payload: { jd_id: jdId, candidate } },
+    (res) => {
+      statusEl.classList.remove('show');
+      if (!res?.ok) { showStatus('Score request failed.', 'error'); return; }
+      currentScore = res.data;
+      renderScore(currentScore);
+    }
+  );
+}
+
+function renderScore(data) {
+  const { score, label, rationale } = data;
+  scoreNumber.textContent    = score;
+  scoreLabel.textContent     = label;
+  scoreRationale.textContent = rationale;
+
+  scoreCircle.className = 'score-circle';
+  if      (score >= 80) scoreCircle.classList.add('excellent');
+  else if (score >= 65) scoreCircle.classList.add('good');
+  else if (score >= 45) scoreCircle.classList.add('fair');
+  else                  scoreCircle.classList.add('poor');
+
+  scoreCard.classList.add('show');
+>>>>>>> c0f9b2425017707ebdfcdd9c88eef68d3a73661a
   addBtn.disabled = false;
   resetAddButton();
 });

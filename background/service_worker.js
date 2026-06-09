@@ -22,6 +22,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (type === "ADD_CANDIDATE") {
+<<<<<<< HEAD
     const { jd_id, candidate, source } = payload;
     const body = JSON.stringify({ job_id: jd_id, candidate: { ...candidate, source } });
     console.log("[SCOUT] ADD_CANDIDATE body:", body);
@@ -32,6 +33,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       body
     })
       .then(async r => {
+=======
+    // Use async IIFE so Chrome tracks the entire chain as active work,
+    // preventing the service worker from being killed mid-fetch (MV3 pitfall).
+    (async () => {
+      try {
+        const { sheetsUrl } = await chrome.storage.local.get(["sheetsUrl"]);
+        if (!sheetsUrl) {
+          sendResponse({ ok: false, error: "No Google Sheets URL configured. Add it in extension settings." });
+          return;
+        }
+
+        console.log("[SCOUT] Sending to:", sheetsUrl);
+        console.log("[SCOUT] Payload:", JSON.stringify(payload, null, 2));
+        const r = await fetch(sheetsUrl, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: JSON.stringify(payload),
+          redirect: "follow"
+        });
+        console.log("[SCOUT] HTTP status:", r.status, r.url);
+>>>>>>> c0f9b2425017707ebdfcdd9c88eef68d3a73661a
         const text = await r.text();
         console.log("[SCOUT] ADD_CANDIDATE status:", r.status, "body:", text);
         let data;
@@ -47,7 +69,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(e => {
         console.error("[SCOUT] ADD_CANDIDATE fetch error:", e.message);
         sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
+<<<<<<< HEAD
       });
     return true;
+=======
+      }
+    })();
+    return true; // keep channel open for async response
+>>>>>>> c0f9b2425017707ebdfcdd9c88eef68d3a73661a
   }
 });

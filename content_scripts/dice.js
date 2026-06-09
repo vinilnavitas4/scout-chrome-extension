@@ -202,6 +202,7 @@ function extractProfile() {
     title,
     location,
     skills,
+    experience,
     experience_years,
     profileUrl: window.location.href.split('?')[0]
   };
