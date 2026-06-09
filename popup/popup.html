@@ -14,25 +14,29 @@
     <span class="source-badge" id="source-badge">—</span>
   </div>
 
-  <!-- Main content: shown when on a supported profile page -->
   <div id="main-view">
     <div class="body">
 
-      <!-- Profile card -->
+      <!-- Profile card (skeleton until loaded) -->
       <div class="profile-card" id="profile-card">
-        <div class="profile-name" id="profile-name">—</div>
-        <div class="profile-title" id="profile-title">—</div>
+        <div class="profile-name" id="profile-name"><span class="skel skel-name"></span></div>
+        <div class="profile-title" id="profile-title"><span class="skel skel-title"></span></div>
         <div class="profile-meta">
-          <span id="profile-location">—</span>
-          <span id="profile-exp">—</span>
+          <span id="profile-location"><span class="skel skel-meta"></span></span>
+          <span id="profile-exp"></span>
         </div>
       </div>
 
       <!-- JD dropdown -->
-      <div class="section-label">Select Job Description</div>
-      <select class="jd-select" id="jd-select">
-        <option value="">— Choose a JD —</option>
-      </select>
+      <div class="jd-section">
+        <div class="section-label">Match to Job Description</div>
+        <div class="jd-wrap">
+          <select class="jd-select" id="jd-select" disabled>
+            <option value="">Loading jobs…</option>
+          </select>
+          <span class="jd-spinner" id="jd-spinner"></span>
+        </div>
+      </div>
 
       <!-- Score card -->
       <div class="score-card" id="score-card">
@@ -46,13 +50,11 @@
         </div>
       </div>
 
-      <!-- Add to SCOUT button -->
       <button class="btn btn-primary" id="add-btn" disabled>Add to SCOUT</button>
 
       <div class="status" id="status"></div>
     </div>
 
-    <!-- Dev mock toolbar -->
     <div class="dev-bar">
       <span>DEV</span>
       <label>
@@ -60,10 +62,8 @@
         Mock "Already in SCOUT"
       </label>
     </div>
-
   </div>
 
-  <!-- Empty state: shown when not on a candidate profile page -->
   <div id="empty-view" style="display:none">
     <div class="empty-state">
       <strong>No candidate profile detected</strong>

@@ -88,7 +88,29 @@ body {
   color: #94a3b8;
 }
 
+/* ── Skeleton loaders ── */
+.skel {
+  display: inline-block;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+}
+
+.skel-name  { width: 140px; height: 14px; }
+.skel-title { width: 100px; height: 11px; margin-top: 4px; }
+.skel-meta  { width: 80px;  height: 10px; }
+
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 /* ── JD Dropdown ── */
+.jd-section {
+  margin-bottom: 14px;
+}
+
 .section-label {
   font-size: 11px;
   font-weight: 600;
@@ -98,25 +120,57 @@ body {
   margin-bottom: 6px;
 }
 
+.jd-wrap {
+  position: relative;
+}
+
 .jd-select {
   width: 100%;
-  padding: 8px 10px;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
+  padding: 9px 32px 9px 12px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
   font-size: 13px;
   color: #0f172a;
   background: #fff;
   cursor: pointer;
-  margin-bottom: 14px;
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 10px center;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .jd-select:focus {
   outline: none;
   border-color: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.15);
+}
+
+.jd-select:disabled {
+  background-color: #f8fafc;
+  color: #94a3b8;
+  cursor: default;
+}
+
+/* Spinner shown while jobs are loading */
+.jd-spinner {
+  display: none;
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  border: 2px solid #e2e8f0;
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.jd-spinner.show { display: block; }
+
+@keyframes spin {
+  to { transform: translateY(-50%) rotate(360deg); }
 }
 
 /* ── Score card ── */

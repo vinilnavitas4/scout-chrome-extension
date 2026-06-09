@@ -5,6 +5,7 @@ const profileLoc     = document.getElementById('profile-location');
 const profileExp     = document.getElementById('profile-exp');
 const sourceBadge    = document.getElementById('source-badge');
 const jdSelect       = document.getElementById('jd-select');
+const jdSpinner      = document.getElementById('jd-spinner');
 const scoreCard      = document.getElementById('score-card');
 const scoreCircle    = document.getElementById('score-circle');
 const scoreNumber    = document.getElementById('score-number');
@@ -39,42 +40,60 @@ window.addEventListener('DOMContentLoaded', async () => {
   sourceBadge.textContent = onDice ? 'Dice.com' : 'LinkedIn';
   if (onDice) sourceBadge.classList.add('dice');
 
-  showStatus('Reading profile…', 'loading');
+  profileCard.classList.add('show');
 
+  // Load profile and jobs in parallel
   chrome.tabs.sendMessage(tab.id, { action: 'getProfile' }, (response) => {
     if (chrome.runtime.lastError || !response?.profile) {
+      renderProfile(null);
       showStatus('Could not read profile. Refresh the page and try again.', 'error');
       return;
     }
     candidate = response.profile;
     renderProfile(candidate);
-    loadJds();
-    statusEl.classList.remove('show');
   });
+
+  loadJds();
 });
 
 // ── Profile card ──────────────────────────────────────────────────────────────
 
 function renderProfile(p) {
+  if (!p) {
+    profileName.textContent  = '—';
+    profileTitle.textContent = '';
+    profileLoc.textContent   = '';
+    return;
+  }
   profileName.textContent  = p.name     || '—';
-  profileTitle.textContent = p.title    || '—';
-  profileLoc.textContent   = p.location || '—';
+  profileTitle.textContent = p.title    || '';
+  profileLoc.textContent   = p.location || '';
   profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
-  profileCard.classList.add('show');
 }
 
 // ── JD dropdown ───────────────────────────────────────────────────────────────
 
 function loadJds() {
+  jdSpinner.classList.add('show');
+  jdSelect.disabled = true;
+
   chrome.runtime.sendMessage({ type: 'GET_JDS' }, (res) => {
-    if (!res?.ok) return;
+    jdSpinner.classList.remove('show');
+
+    if (!res?.ok) {
+      jdSelect.innerHTML = '<option value="">Failed to load jobs</option>';
+      return;
+    }
+
+    jdSelect.innerHTML = '<option value="">— Choose a JD —</option>';
     res.data.forEach(jd => {
       const opt = document.createElement('option');
       opt.value = jd.id;
       opt.dataset.title = jd.title;
-      opt.textContent = `${jd.title} · ${jd.client}`;
+      opt.textContent = jd.client ? `${jd.title}  ·  ${jd.client}` : jd.title;
       jdSelect.appendChild(opt);
     });
+    jdSelect.disabled = false;
   });
 }
 
@@ -88,19 +107,25 @@ jdSelect.addEventListener('change', () => {
   }
   selectedJd      = jdId;
   selectedJdTitle = jdSelect.selectedOptions[0]?.dataset.title || jdId;
-  requestScore(jdId);
+
+  // Only score once we have the candidate profile
+  if (candidate) {
+    requestScore(jdId);
+  }
 });
 
 // ── Score ─────────────────────────────────────────────────────────────────────
 
 function requestScore(jdId) {
   addBtn.disabled = true;
+  scoreCard.classList.remove('show');
   showStatus('Scoring…', 'loading');
+
   chrome.runtime.sendMessage(
     { type: 'GET_SCORE', payload: { jd_id: jdId, candidate } },
     (res) => {
       statusEl.classList.remove('show');
-      if (!res?.ok) { showStatus('Score request failed.', 'error'); return; }
+      if (!res?.ok) { showStatus('Score failed — ' + (res?.error || 'unknown error'), 'error'); return; }
       currentScore = res.data;
       renderScore(currentScore);
     }
@@ -166,7 +191,7 @@ addBtn.addEventListener('click', () => {
   });
 });
 
-// ── Mock: duplicate state ─────────────────────────────────────────────────────
+// ── Mock ──────────────────────────────────────────────────────────────────────
 
 mockDuplicate.addEventListener('change', () => {
   if (mockDuplicate.checked && selectedJd) renderDuplicateState();
