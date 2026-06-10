@@ -22,7 +22,12 @@ const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
 const closeBtn       = document.getElementById('close-btn');
 
-closeBtn.addEventListener('click', () => window.close());
+// Side panels don't respond to window.close() — use chrome.sidePanel API
+closeBtn.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    if (tab) chrome.sidePanel.setOptions({ tabId: tab.id, enabled: false });
+  });
+});
 
 let candidate       = null;   // set when profile fetch completes
 let selectedJd      = null;
@@ -191,6 +196,7 @@ function requestScore(jdId) {
   const version = scoreVersion;
 
   addBtn.disabled = true;
+  scoreCard.classList.remove('show');
   showStatus('Matching profile to JD…', 'loading');
 
   chrome.runtime.sendMessage(
