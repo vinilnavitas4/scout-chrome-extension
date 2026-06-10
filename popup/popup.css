@@ -5,7 +5,8 @@
 }
 
 body {
-  width: 360px;
+  width: 100%;
+  min-width: 300px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 13px;
   background: #fff;
@@ -35,6 +36,12 @@ body {
   margin-top: 2px;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .source-badge {
   font-size: 10px;
   font-weight: 600;
@@ -44,9 +51,21 @@ body {
   color: #7dd3fc;
 }
 
-.source-badge.dice {
-  background: #1e3a20;
-  color: #86efac;
+.close-btn {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.close-btn:hover {
+  background: #1e293b;
+  color: #f1f5f9;
 }
 
 /* ── Body ── */
@@ -86,6 +105,28 @@ body {
   margin-top: 6px;
   font-size: 11px;
   color: #94a3b8;
+}
+
+.profile-contact {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.profile-email,
+.profile-phone {
+  font-size: 11px;
+  color: #0284c7;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.profile-email:hover,
+.profile-phone:hover {
+  text-decoration: underline;
 }
 
 /* ── Skeleton loaders ── */

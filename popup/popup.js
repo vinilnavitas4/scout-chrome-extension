@@ -3,6 +3,8 @@ const profileName    = document.getElementById('profile-name');
 const profileTitle   = document.getElementById('profile-title');
 const profileLoc     = document.getElementById('profile-location');
 const profileExp     = document.getElementById('profile-exp');
+const profileEmail   = document.getElementById('profile-email');
+const profilePhone   = document.getElementById('profile-phone');
 const sourceBadge    = document.getElementById('source-badge');
 const jdSelect       = document.getElementById('jd-select');
 const jdSpinner      = document.getElementById('jd-spinner');
@@ -18,12 +20,21 @@ const mockDuplicate  = document.getElementById('mock-duplicate');
 const mainView       = document.getElementById('main-view');
 const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
+const closeBtn       = document.getElementById('close-btn');
+
+// Side panels don't respond to window.close() — use chrome.sidePanel API
+closeBtn.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    if (tab) chrome.sidePanel.setOptions({ tabId: tab.id, enabled: false });
+  });
+});
 
 let candidate       = null;   // set when profile fetch completes
 let selectedJd      = null;
 let selectedJdTitle = null;
 let currentScore    = null;
 let profilePending  = true;   // true while profile fetch is in flight
+let scoreVersion    = 0;      // incremented on each new score request to discard stale AI responses
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -31,25 +42,22 @@ window.addEventListener('DOMContentLoaded', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const url = tab.url || '';
 
-  const onDice     = url.includes('dice.com');
   const onLinkedIn = url.includes('linkedin.com/in/');
 
-  if (!onDice && !onLinkedIn) {
+  if (!onLinkedIn) {
     mainView.style.display = 'none';
     emptyView.style.display = 'block';
     return;
   }
 
-  sourceBadge.textContent = onDice ? 'Dice.com' : 'LinkedIn';
-  if (onDice) sourceBadge.classList.add('dice');
+  sourceBadge.textContent = 'LinkedIn';
 
   // Show JD dropdown immediately — don't block on profile
   matchSection.style.display = 'block';
   loadJds();
 
   // Fetch profile in background; score fires automatically when both ready
-  const script = onDice ? 'content_scripts/dice.js' : 'content_scripts/linkedin.js';
-  requestProfile(tab.id, script);
+  requestProfile(tab.id, 'content_scripts/linkedin.js');
 });
 
 // ── Profile loading (with auto-inject fallback) ───────────────────────────────
@@ -108,6 +116,22 @@ function renderProfile(p) {
   profileTitle.textContent = p.title    || '';
   profileLoc.textContent   = p.location || '';
   profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
+
+  if (p.email) {
+    profileEmail.textContent = p.email;
+    profileEmail.href = `mailto:${p.email}`;
+    profileEmail.style.display = 'block';
+  } else {
+    profileEmail.style.display = 'none';
+  }
+  if (p.phone) {
+    profilePhone.textContent = p.phone;
+    profilePhone.href = `tel:${p.phone.replace(/[^\d+]/g, '')}`;
+    profilePhone.style.display = 'block';
+  } else {
+    profilePhone.style.display = 'none';
+  }
+
   profileCard.classList.add('show');
   // Clear any "matching" status that was shown while waiting
   if (!selectedJd) statusEl.classList.remove('show');
@@ -143,6 +167,7 @@ jdSelect.addEventListener('change', () => {
     scoreCard.classList.remove('show');
     addBtn.disabled = true;
     currentScore = null;
+    scoreVersion++;
     statusEl.classList.remove('show');
     return;
   }
@@ -167,6 +192,9 @@ jdSelect.addEventListener('change', () => {
 // ── Score ─────────────────────────────────────────────────────────────────────
 
 function requestScore(jdId) {
+  scoreVersion++;
+  const version = scoreVersion;
+
   addBtn.disabled = true;
   scoreCard.classList.remove('show');
   showStatus('Matching profile to JD…', 'loading');
@@ -174,6 +202,7 @@ function requestScore(jdId) {
   chrome.runtime.sendMessage(
     { type: 'GET_SCORE', payload: { jd_id: jdId, candidate } },
     (res) => {
+      if (version !== scoreVersion) return; // stale — user changed JD
       statusEl.classList.remove('show');
       if (!res?.ok) { showStatus('Score failed — ' + (res?.error || 'unknown error'), 'error'); return; }
       currentScore = res.data;
