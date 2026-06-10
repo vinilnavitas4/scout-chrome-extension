@@ -11,13 +11,118 @@ chrome.sidePanel
 const jobCache = new Map();
 
 // ── Skill matching ────────────────────────────────────────────────────────────
+// Semantic-ish matching without a model: alias expansion + fuzzy token overlap.
+// Each alias group lists terms that mean the same thing. A skill matches a
+// requirement if they share an alias group, contain each other, or have high
+// token overlap (handles word-order / abbreviation differences).
+
+const ALIAS_GROUPS = [
+  ["ml", "machine learning", "ml engineering", "mle"],
+  ["ai", "artificial intelligence"],
+  ["dl", "deep learning", "neural networks", "nn"],
+  ["nlp", "natural language processing", "text mining"],
+  ["llm", "large language model", "large language models", "gpt", "generative ai", "genai"],
+  ["cv", "computer vision", "image processing"],
+  ["etl", "elt", "data pipeline", "data pipelines", "data engineering", "data integration", "ingestion"],
+  ["ci/cd", "cicd", "continuous integration", "continuous delivery", "continuous deployment", "build pipeline"],
+  ["k8s", "kubernetes", "container orchestration"],
+  ["iac", "infrastructure as code", "terraform", "cloudformation"],
+  ["js", "javascript", "ecmascript", "node", "node.js", "nodejs"],
+  ["ts", "typescript"],
+  ["py", "python"],
+  ["cs", "c#", "csharp", ".net", "dotnet"],
+  ["cpp", "c++"],
+  ["golang", "go"],
+  ["db", "database", "databases", "rdbms"],
+  ["sql", "postgres", "postgresql", "mysql", "tsql", "t-sql", "relational database"],
+  ["nosql", "mongodb", "mongo", "documentdb", "dynamodb"],
+  ["rest", "restful", "rest api", "rest apis", "web api", "web services"],
+  ["api", "apis", "interface"],
+  ["microservices", "micro services", "service oriented", "soa"],
+  ["aws", "amazon web services"],
+  ["gcp", "google cloud", "google cloud platform"],
+  ["azure", "microsoft azure"],
+  ["viz", "data visualization", "dashboards", "dashboard", "bi", "business intelligence", "power bi", "tableau", "looker"],
+  ["devops", "sre", "site reliability"],
+  ["frontend", "front end", "front-end", "ui", "client side"],
+  ["backend", "back end", "back-end", "server side"],
+  ["fullstack", "full stack", "full-stack"],
+  ["spark", "apache spark", "pyspark"],
+  ["kafka", "apache kafka", "event streaming", "streaming"],
+  ["airflow", "apache airflow", "workflow orchestration"],
+  ["scrum", "agile", "kanban", "sprint"],
+  ["clearance", "ts/sci", "top secret", "secret clearance", "security clearance"],
+  ["scikit", "scikit-learn", "sklearn"],
+  ["tensorflow", "tf", "keras"],
+  ["pytorch", "torch"],
+  ["rag", "retrieval augmented generation", "retrieval-augmented generation"],
+];
+
+const STOPWORDS = new Set(["and", "or", "of", "the", "a", "an", "with", "for", "in", "to", "experience"]);
+
+function normalizeSkill(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9+#./\s-]/g, " ")  // keep +, #, ., / (c++, c#, ci/cd, node.js)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Map every alias term → its group index, for O(1) group lookup.
+const ALIAS_INDEX = (() => {
+  const m = new Map();
+  ALIAS_GROUPS.forEach((group, i) => group.forEach(term => m.set(normalizeSkill(term), i)));
+  return m;
+})();
+
+// Group indices a normalized skill belongs to (direct hit or substring of an alias term).
+function aliasGroupsOf(norm) {
+  const groups = new Set();
+  if (ALIAS_INDEX.has(norm)) groups.add(ALIAS_INDEX.get(norm));
+  for (const [term, i] of ALIAS_INDEX) {
+    if (norm === term) { groups.add(i); continue; }
+    // token-boundary containment so "ml" doesn't hit "html"
+    const re = new RegExp(`(^|[^a-z0-9])${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`);
+    if (re.test(norm)) groups.add(i);
+  }
+  return groups;
+}
+
+// True only if `needle` appears in `hay` on token boundaries (so "java" ∉ "javascript",
+// but "rest api" ∈ "rest api development").
+function containsToken(hay, needle) {
+  const re = new RegExp(`(^|[^a-z0-9])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`);
+  return re.test(hay);
+}
+
+function tokenSet(norm) {
+  return new Set(norm.split(" ").filter(w => w.length > 1 && !STOPWORDS.has(w)));
+}
+
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const w of a) if (b.has(w)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+function pairMatch(a, b) {
+  const na = normalizeSkill(a), nb = normalizeSkill(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  // shared alias group → semantic equivalence (ML ↔ machine learning)
+  const ga = aliasGroupsOf(na), gb = aliasGroupsOf(nb);
+  for (const g of ga) if (gb.has(g)) return true;
+  // token-boundary containment (so "java" ∉ "javascript")
+  if (na.length >= 3 && containsToken(nb, na)) return true;
+  if (nb.length >= 3 && containsToken(na, nb)) return true;
+  // fuzzy: high word overlap (handles "data pipeline" ↔ "pipeline data eng")
+  if (jaccard(tokenSet(na), tokenSet(nb)) >= 0.5) return true;
+  return false;
+}
 
 function skillMatch(candidateSkills, targetSkill) {
-  const t = targetSkill.toLowerCase().trim();
-  return candidateSkills.some(cs => {
-    const c = cs.toLowerCase().trim();
-    return c.includes(t) || t.includes(c);
-  });
+  return (candidateSkills || []).some(cs => pairMatch(cs, targetSkill));
 }
 
 // ── Parse "What You'll Need" section → structured requirements ────────────────
