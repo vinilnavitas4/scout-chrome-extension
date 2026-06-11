@@ -273,6 +273,69 @@ body {
   line-height: 1.5;
 }
 
+/* ── Resume upload ── */
+.resume-upload {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1.5px dashed #e2e8f0;
+  border-radius: 8px;
+}
+
+.resume-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.resume-hint {
+  font-weight: 400;
+  color: #94a3b8;
+}
+
+.resume-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.resume-pick-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  background: #e2e8f0;
+  color: #0f172a;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.resume-pick-btn:hover { background: #cbd5e1; }
+
+.resume-name {
+  font-size: 11px;
+  color: #64748b;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-clear {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.resume-clear:hover { color: #dc2626; background: #fef2f2; }
+
 /* ── Buttons ── */
 .btn {
   width: 100%;
