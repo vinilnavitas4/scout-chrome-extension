@@ -3,11 +3,18 @@
   "name": "SCOUT — Candidate Fit Scorer",
   "version": "1.0",
   "description": "AI-powered fit scores on LinkedIn. Push candidates to SCOUT with one click.",
-  "permissions": ["activeTab", "storage", "scripting", "sidePanel"],
+  "permissions": ["activeTab", "storage", "scripting", "sidePanel", "offscreen"],
   "host_permissions": [
     "https://www.linkedin.com/*",
-    "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io/*"
+    "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io/*",
+    "https://huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*",
+    "https://cdn-lfs-us-1.huggingface.co/*",
+    "https://cdn.jsdelivr.net/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "content_scripts": [
     {
       "matches": ["https://www.linkedin.com/in/*"],
