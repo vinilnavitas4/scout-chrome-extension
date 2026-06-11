@@ -10,228 +10,10 @@ chrome.sidePanel
 // Pre-populated after GET_JDS so GET_SCORE is instant.
 const jobCache = new Map();
 
-// ── Skill matching ────────────────────────────────────────────────────────────
-// Semantic-ish matching without a model: alias expansion + fuzzy token overlap.
-// Each alias group lists terms that mean the same thing. A skill matches a
-// requirement if they share an alias group, contain each other, or have high
-// token overlap (handles word-order / abbreviation differences).
-
-// Each inner array = one equivalence set. Every term must be UNIQUE across all
-// groups — a term repeated in two groups gets overwritten in ALIAS_INDEX
-// (last group wins), silently breaking the earlier link.
-const ALIAS_GROUPS = [
-  // ── AI / ML / Data Science ──────────────────────────────────────────────
-  ["ml", "machine learning", "ml engineering", "mle", "ml engineer", "statistical learning"],
-  ["ai", "artificial intelligence", "cognitive computing"],
-  ["dl", "deep learning", "neural networks", "nn", "dnn"],
-  ["nlp", "natural language processing", "text mining", "text analytics", "nlu"],
-  ["llm", "large language model", "large language models", "gpt", "generative ai", "genai", "foundation models"],
-  ["cv", "computer vision", "image processing", "image recognition", "object detection"],
-  ["rag", "retrieval augmented generation", "retrieval-augmented generation", "vector search", "semantic search"],
-  ["mlops", "ml ops", "model deployment", "model serving", "ml lifecycle"],
-  ["data science", "data scientist", "predictive modeling", "predictive analytics", "statistical modeling"],
-  ["scikit", "scikit-learn", "sklearn"],
-  ["tensorflow", "tf", "keras"],
-  ["pytorch", "torch"],
-  ["pandas", "numpy", "scipy"],
-  ["llmops", "prompt engineering", "fine-tuning", "fine tuning"],
-
-  // ── Data Engineering / Big Data ─────────────────────────────────────────
-  ["etl", "elt", "data pipeline", "data pipelines", "data engineering", "data integration", "ingestion", "data ingestion"],
-  ["spark", "apache spark", "pyspark"],
-  ["kafka", "apache kafka", "event streaming", "streaming", "stream processing"],
-  ["airflow", "apache airflow", "workflow orchestration", "dag orchestration"],
-  ["dbt", "data build tool", "data transformation"],
-  ["hadoop", "hdfs", "mapreduce", "hive"],
-  ["flink", "apache flink"],
-  ["nifi", "apache nifi"],
-  ["databricks", "lakehouse"],
-  ["snowflake", "snowflake data cloud"],
-  ["data warehouse", "data warehousing", "dwh", "redshift", "bigquery", "synapse"],
-  ["data lake", "delta lake"],
-  ["data modeling", "dimensional modeling", "star schema", "data architecture"],
-  ["data governance", "data quality", "master data management", "mdm"],
-
-  // ── Databases ───────────────────────────────────────────────────────────
-  ["db", "database", "databases", "rdbms"],
-  ["sql", "postgres", "postgresql", "mysql", "tsql", "t-sql", "relational database", "sql server", "mssql", "mariadb"],
-  ["nosql", "mongodb", "mongo", "documentdb", "document database"],
-  ["dynamodb", "key-value store"],
-  ["oracle", "oracle db", "pl/sql", "plsql"],
-  ["cassandra", "wide column", "scylladb"],
-  ["redis", "in-memory cache", "memcached", "caching"],
-  ["elasticsearch", "elastic", "opensearch", "lucene", "solr"],
-  ["neo4j", "graph database", "graphdb"],
-
-  // ── Languages ───────────────────────────────────────────────────────────
-  ["js", "javascript", "ecmascript", "es6", "node", "node.js", "nodejs"],
-  ["ts", "typescript"],
-  ["py", "python"],
-  ["java", "jvm", "jdk"],
-  ["cs", "c#", "csharp", ".net", "dotnet", "dotnet core", ".net core", "asp.net", "asp.net core"],
-  ["cpp", "c++"],
-  ["clang", "c language", "ansi c"],
-  ["golang", "go"],
-  ["rust", "rustlang"],
-  ["ruby", "ruby on rails", "rails"],
-  ["php", "php8"],
-  ["kotlin"],
-  ["swift", "swiftui"],
-  ["scala"],
-  ["r", "rstats", "r language"],
-  ["matlab"],
-  ["perl"],
-  ["dart"],
-  ["bash", "shell", "shell scripting", "shell script", "sh", "zsh"],
-  ["powershell", "ps1"],
-  ["groovy"],
-
-  // ── Web Frameworks / Frontend ───────────────────────────────────────────
-  ["react", "reactjs", "react.js"],
-  ["angular", "angularjs", "angular.js"],
-  ["vue", "vuejs", "vue.js"],
-  ["svelte", "sveltekit"],
-  ["next", "next.js", "nextjs"],
-  ["express", "express.js", "expressjs"],
-  ["django"],
-  ["flask"],
-  ["fastapi"],
-  ["spring", "spring boot", "springboot", "spring framework", "spring mvc"],
-  ["jquery"],
-  ["html", "html5", "markup"],
-  ["css", "css3", "scss", "sass", "less", "tailwind", "styling"],
-  ["webpack", "vite", "rollup", "esbuild", "bundler"],
-
-  // ── Mobile ──────────────────────────────────────────────────────────────
-  ["android", "android sdk"],
-  ["ios", "iphone", "ipados"],
-  ["react native", "rn"],
-  ["flutter"],
-  ["xamarin", "maui"],
-  ["mobile", "mobile development", "mobile dev", "app development"],
-
-  // ── Cloud ───────────────────────────────────────────────────────────────
-  ["aws", "amazon web services", "ec2", "s3", "lambda"],
-  ["gcp", "google cloud", "google cloud platform"],
-  ["azure", "microsoft azure"],
-  ["cloud", "cloud computing", "cloud native", "multi-cloud", "hybrid cloud"],
-  ["serverless", "faas", "function as a service"],
-
-  // ── Containers / Orchestration / IaC ────────────────────────────────────
-  ["docker", "containers", "containerization", "podman", "oci"],
-  ["k8s", "kubernetes", "container orchestration", "eks", "aks", "gke", "openshift"],
-  ["helm", "helm charts"],
-  ["iac", "infrastructure as code"],
-  ["terraform", "tf modules"],
-  ["ansible", "playbooks"],
-  ["puppet"],
-  ["chef"],
-  ["cloudformation", "cfn"],
-  ["pulumi"],
-
-  // ── CI/CD / DevOps / SRE ────────────────────────────────────────────────
-  ["ci/cd", "cicd", "continuous integration", "continuous delivery", "continuous deployment", "build pipeline", "deployment pipeline"],
-  ["jenkins"],
-  ["gitlab ci", "gitlab-ci"],
-  ["github actions", "gh actions"],
-  ["circleci", "circle ci"],
-  ["argocd", "argo cd", "gitops"],
-  ["devops", "dev ops"],
-  ["sre", "site reliability", "site reliability engineering"],
-  ["monitoring", "observability", "prometheus", "grafana", "datadog", "new relic", "apm"],
-  ["logging", "elk", "elk stack", "splunk", "logstash", "kibana"],
-
-  // ── APIs / Architecture ─────────────────────────────────────────────────
-  ["rest", "restful", "rest api", "rest apis", "web api", "web services"],
-  ["api", "apis", "interface", "endpoints"],
-  ["graphql", "apollo"],
-  ["grpc", "protobuf", "protocol buffers"],
-  ["soap", "wsdl"],
-  ["microservices", "micro services", "service oriented", "soa", "distributed systems"],
-  ["event driven", "event-driven", "pub/sub", "pubsub", "event sourcing"],
-  ["message queue", "rabbitmq", "sqs", "activemq", "message broker", "mq"],
-  ["websocket", "websockets", "socket.io"],
-
-  // ── Version Control ─────────────────────────────────────────────────────
-  ["git", "version control", "scm", "source control"],
-  ["github"],
-  ["gitlab"],
-  ["bitbucket"],
-  ["svn", "subversion"],
-
-  // ── OS / Systems ────────────────────────────────────────────────────────
-  ["linux", "unix", "ubuntu", "rhel", "centos", "debian"],
-  ["windows", "windows server"],
-  ["macos", "osx"],
-
-  // ── BI / Visualization ──────────────────────────────────────────────────
-  ["viz", "data visualization", "dashboards", "dashboard"],
-  ["bi", "business intelligence"],
-  ["power bi", "powerbi", "dax", "power query"],
-  ["tableau"],
-  ["looker", "lookml"],
-  ["qlik", "qlikview", "qliksense"],
-  ["ssrs", "ssis", "ssas"],
-
-  // ── Microsoft / Office / Low-code ───────────────────────────────────────
-  ["power apps", "powerapps"],
-  ["power automate", "flow", "power platform"],
-  ["sharepoint", "spo"],
-  ["excel", "spreadsheets", "vba"],
-  ["dynamics", "dynamics 365", "d365"],
-
-  // ── Testing / QA ────────────────────────────────────────────────────────
-  ["qa", "quality assurance", "testing", "test automation", "automated testing"],
-  ["selenium", "webdriver"],
-  ["cypress"],
-  ["playwright"],
-  ["junit", "testng"],
-  ["pytest", "unittest"],
-  ["jest", "mocha", "jasmine", "vitest"],
-  ["tdd", "test driven development", "test-driven development"],
-  ["bdd", "behavior driven development", "cucumber", "gherkin"],
-
-  // ── Security / Compliance ───────────────────────────────────────────────
-  ["clearance", "ts/sci", "top secret", "secret clearance", "security clearance", "ts sci", "public trust"],
-  ["cybersecurity", "cyber security", "infosec", "information security", "security engineering"],
-  ["pentesting", "penetration testing", "ethical hacking", "red team", "offensive security"],
-  ["siem", "security monitoring", "soc", "security operations"],
-  ["iam", "identity and access management", "rbac", "sso", "oauth", "okta", "active directory", "ldap"],
-  ["zero trust", "zta"],
-  ["owasp", "appsec", "application security", "secure coding"],
-  ["compliance", "fisma", "fedramp", "nist", "soc2", "soc 2", "iso 27001", "hipaa", "pci", "gdpr"],
-  ["encryption", "cryptography", "pki", "tls", "ssl"],
-  ["disa", "stigs", "stig", "hardening"],
-
-  // ── Networking ──────────────────────────────────────────────────────────
-  ["networking", "tcp/ip", "tcpip", "dns", "dhcp", "routing", "switching"],
-  ["vpn", "ipsec"],
-  ["load balancing", "load balancer", "nginx", "haproxy", "reverse proxy"],
-  ["cdn", "content delivery network", "cloudflare"],
-
-  // ── Methodologies / Process ─────────────────────────────────────────────
-  ["scrum", "agile", "kanban", "sprint", "sprints", "scrum master"],
-  ["waterfall", "sdlc"],
-  ["safe", "scaled agile"],
-  ["pmp", "project management", "project manager"],
-  ["product management", "product owner", "po"],
-
-  // ── Roles / Stack ───────────────────────────────────────────────────────
-  ["frontend", "front end", "front-end", "ui", "client side", "client-side"],
-  ["backend", "back end", "back-end", "server side", "server-side"],
-  ["fullstack", "full stack", "full-stack"],
-  ["ux", "user experience", "ui/ux", "ux design", "figma", "wireframing"],
-  ["ba", "business analyst", "business analysis", "requirements gathering"],
-  ["dba", "database administrator", "database administration"],
-  ["architect", "solution architect", "software architect", "enterprise architect"],
-
-  // ── Project / Collaboration Tools ───────────────────────────────────────
-  ["jira", "atlassian"],
-  ["confluence", "wiki"],
-  ["servicenow", "snow", "itsm"],
-];
-
-const STOPWORDS = new Set(["and", "or", "of", "the", "a", "an", "with", "for", "in", "to", "experience"]);
+// -- Skill matching (semantic, embedding-based) -------------------------------
+// Matching is done by cosine similarity over all-MiniLM-L6-v2 embeddings (see
+// computeScore / the offscreen doc). normalizeSkill only cleans phrases before
+// they are embedded and used as cache keys.
 
 function normalizeSkill(s) {
   return String(s || "")
@@ -241,99 +23,106 @@ function normalizeSkill(s) {
     .trim();
 }
 
-// Map every alias term → its group index, for O(1) group lookup.
-const ALIAS_INDEX = (() => {
-  const m = new Map();
-  ALIAS_GROUPS.forEach((group, i) => group.forEach(term => m.set(normalizeSkill(term), i)));
-  return m;
-})();
+// Abbreviation/synonym pairs MiniLM scores BELOW threshold on short phrases
+// (measured: "k8s"~"kubernetes" 0.47, "llm"~"large language models" 0.16).
+// Canonicalize before comparing/embedding so these match deterministically.
+const SKILL_ALIASES = new Map([
+  ["k8s", "kubernetes"],
+  ["amazon web services", "aws"],
+  ["google cloud platform", "gcp"],
+  ["google cloud", "gcp"],
+  ["large language models", "llm"],
+  ["large language model", "llm"],
+  ["llms", "llm"],
+  ["machine learning", "ml"],
+  ["artificial intelligence", "ai"],
+  ["postgres", "postgresql"],
+  ["js", "javascript"],
+  ["ts", "typescript"],
+  ["nodejs", "node.js"],
+  ["node", "node.js"],
+  ["reactjs", "react"],
+  ["react.js", "react"],
+  ["vuejs", "vue"],
+  ["vue.js", "vue"],
+  ["angularjs", "angular"],
+  ["golang", "go"],
+  ["dotnet", ".net"],
+  ["springboot", "spring boot"],
+  ["restful", "rest"],
+  ["restful api", "rest"],
+  ["restful apis", "rest"],
+  ["rest api", "rest"],
+  ["rest apis", "rest"],
+  ["continuous integration", "ci/cd"],
+  ["continuous integration/continuous delivery", "ci/cd"],
+  ["ci cd", "ci/cd"],
+]);
 
-// Group indices a normalized skill belongs to (direct hit or substring of an alias term).
-function aliasGroupsOf(norm) {
-  const groups = new Set();
-  if (ALIAS_INDEX.has(norm)) groups.add(ALIAS_INDEX.get(norm));
-  for (const [term, i] of ALIAS_INDEX) {
-    if (norm === term) { groups.add(i); continue; }
-    // token-boundary containment so "ml" doesn't hit "html"
-    const re = new RegExp(`(^|[^a-z0-9])${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`);
-    if (re.test(norm)) groups.add(i);
-  }
-  return groups;
-}
-
-// True only if `needle` appears in `hay` on token boundaries (so "java" ∉ "javascript",
-// but "rest api" ∈ "rest api development").
-function containsToken(hay, needle) {
-  const re = new RegExp(`(^|[^a-z0-9])${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`);
-  return re.test(hay);
-}
-
-function tokenSet(norm) {
-  return new Set(norm.split(" ").filter(w => w.length > 1 && !STOPWORDS.has(w)));
-}
-
-function jaccard(a, b) {
-  if (!a.size || !b.size) return 0;
-  let inter = 0;
-  for (const w of a) if (b.has(w)) inter++;
-  return inter / (a.size + b.size - inter);
-}
-
-function pairMatch(a, b) {
-  const na = normalizeSkill(a), nb = normalizeSkill(b);
-  if (!na || !nb) return false;
-  if (na === nb) return true;
-  // shared alias group → semantic equivalence (ML ↔ machine learning)
-  const ga = aliasGroupsOf(na), gb = aliasGroupsOf(nb);
-  for (const g of ga) if (gb.has(g)) return true;
-  // token-boundary containment (so "java" ∉ "javascript")
-  if (na.length >= 3 && containsToken(nb, na)) return true;
-  if (nb.length >= 3 && containsToken(na, nb)) return true;
-  // fuzzy: high word overlap (handles "data pipeline" ↔ "pipeline data eng")
-  if (jaccard(tokenSet(na), tokenSet(nb)) >= 0.5) return true;
-  return false;
-}
-
-function skillMatch(candidateSkills, targetSkill) {
-  return (candidateSkills || []).some(cs => pairMatch(cs, targetSkill));
+function canonicalSkill(s) {
+  const n = normalizeSkill(s);
+  return SKILL_ALIASES.get(n) || n;
 }
 
 // ── Parse "What You'll Need" section → structured requirements ────────────────
 
+const TOOL_KEYWORDS = [
+  "AWS","Azure","GCP","Docker","Kubernetes","Terraform","Jenkins","CI/CD","Linux","Ansible","Helm",
+  "Java","Python","JavaScript","TypeScript","React","Angular","Vue","Spring Boot","Node.js","Flask","Django","FastAPI",".NET","C#","C++","Go","Rust","GraphQL",
+  "SQL","Power BI","Power Apps","Power Automate","SharePoint","DAX","Power Query","Spark","ETL","Kafka","dbt","Airflow","Databricks","Snowflake","Tableau","Looker","MongoDB","PostgreSQL","MySQL","Redis","Elasticsearch","Neo4j",
+  "LLM","GPT","OpenAI","LangChain","TensorFlow","PyTorch","Scikit","RAG",
+  "Top Secret","TS/SCI","Secret clearance","FISMA","FedRAMP","NIST","DISA","STIGs",
+  "REST","API","Microservices","Git","Maven","Hibernate","JUnit","Selenium","Agile","Scrum","Jira","ServiceNow","Salesforce","AEM"
+];
+
+// Short keywords that double as common English words — match case-sensitively
+// so "trusted" doesn't hit Rust, "go through" doesn't hit Go, etc.
+const CASE_SENSITIVE_KEYWORDS = new Set(["Go","Rust","React","Spark","Helm","DAX","RAG","Secret clearance"]);
+
+// Whole-word keyword scan (allows trailing plural "s"/"es"). Substring scanning is
+// what caused "Rust"⊂"trusted", "Git"⊂"digital", "REST"⊂"Reston" false positives.
+function findKeywords(text) {
+  if (!text) return [];
+  const found = [];
+  for (const kw of TOOL_KEYWORDS) {
+    const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?<![A-Za-z0-9])${esc}(?:e?s)?(?![A-Za-z0-9+#])`, CASE_SENSITIVE_KEYWORDS.has(kw) ? "" : "i");
+    if (re.test(text) && !found.includes(kw)) found.push(kw);
+  }
+  return found;
+}
+
+// Slice `text` from heading `startRe` up to the next known heading. JD text from
+// the backend is a single line with apostrophes stripped ("What You ll Need :"),
+// so headings — not newlines — are the only reliable section boundaries.
+const NEXT_HEADING_RE = /Set\s+Yourself\s+Apart|Clearance\s*:|About\s+Navitas|What\s+We\s+Offer|Equal\s+Opportunity|Who\s+We\s+Are|Benefits\s*:/i;
+function sliceSection(text, startRe) {
+  const start = text.search(startRe);
+  if (start === -1) return "";
+  const tail = text.slice(start);
+  // Skip past the heading itself (~20 chars) before looking for the next heading.
+  const endRel = tail.slice(20).search(NEXT_HEADING_RE);
+  return endRel === -1 ? tail : tail.slice(0, endRel + 20);
+}
+
 function parseRequirements(description) {
-  const needMatch = description.match(/What\s+You(?:'|'|ll\s+)?['s\s]*Need\s*[:\-]?([\s\S]*?)(?:\n\s*(?:Clearance|About|What\s+We|Equal|$)|$)/i);
-  const section = needMatch ? needMatch[1] : description;
+  const text = description || "";
 
-  const required_skills  = [];
-  const preferred_skills = [];
-  let   required_years   = 0;
+  const needSection      = sliceSection(text, /What\s+You\s*'?\s*ll?\s*'?\s*Need/i) || text;
+  const preferredSection = sliceSection(text, /Set\s+Yourself\s+Apart/i);
 
-  const yearsMatch = section.match(/(\d+)\+?\s*years?\s+of\s+experience/i);
+  // "5+ years of experience", "5+ years in software engineering", "15+ years of progressive experience"
+  let required_years = 0;
+  const yearsMatch = needSection.match(/(\d+)\+?\s*years?\b/i);
   if (yearsMatch) required_years = parseInt(yearsMatch[1], 10);
 
-  const preferredMatch = section.match(/Preferred[^:]*:([\s\S]*?)(?:\n\s*(?:\S+:|\n)|$)/i);
-  if (preferredMatch) {
-    const tokens = preferredMatch[1].split(/[,\n]+/).map(s => s.replace(/^[\s\-\*]+/, '').trim()).filter(s => s.length > 2 && s.length < 60);
-    preferred_skills.push(...tokens);
-  }
+  // Some JDs (e.g. architect roles) list only soft skills under "Need" — fall
+  // back to scanning the whole description so we still have something to score.
+  let required_skills = findKeywords(needSection);
+  if (required_skills.length === 0) required_skills = findKeywords(text);
+  const preferred_skills = findKeywords(preferredSection).filter(k => !required_skills.includes(k));
 
-  const toolKeywords = [
-    "AWS","Azure","GCP","Docker","Kubernetes","Terraform","Jenkins","CI/CD","Linux","Ansible","Helm",
-    "Java","Python","JavaScript","TypeScript","React","Angular","Spring Boot","Node.js","FastAPI",".NET","C#","C++","Go","Rust",
-    "SQL","Power BI","Power Apps","Power Automate","SharePoint","DAX","Power Query","Spark","ETL","Kafka","dbt","Airflow","Databricks","Snowflake","Tableau","Looker","MongoDB","PostgreSQL","MySQL","Redis","Elasticsearch",
-    "LLM","GPT","OpenAI","LangChain","TensorFlow","PyTorch","Scikit","RAG",
-    "Top Secret","TS/SCI","Secret","Clearance","FISMA","FedRAMP","NIST","DISA","STIGs",
-    "REST","API","Microservices","Git","Maven","Hibernate","JUnit","Agile","Scrum"
-  ];
-
-  const sectionLower = section.toLowerCase();
-  for (const kw of toolKeywords) {
-    if (sectionLower.includes(kw.toLowerCase()) && !required_skills.includes(kw) && !preferred_skills.includes(kw)) {
-      required_skills.push(kw);
-    }
-  }
-
-  const specificMatch = section.match(/Specific\s+tools[^:]*:([\s\S]*?)(?:\n\s*(?:[A-Z]|\n)|$)/i);
+  const specificMatch = needSection.match(/Specific\s+tools[^:]*:([\s\S]*?)(?:\n\s*(?:[A-Z]|\n)|$)/i);
   if (specificMatch) {
     const extras = specificMatch[1].split(/[,\n]+/).map(s => s.replace(/^[\s\-\*]+/, '').trim()).filter(s => s.length > 1 && s.length < 60);
     for (const e of extras) {
@@ -344,9 +133,56 @@ function parseRequirements(description) {
   return { required_skills, preferred_skills, required_years };
 }
 
+// ── Semantic skill matching via embeddings (offscreen model) ──────────────────
+// The offscreen document runs all-MiniLM-L6-v2. We send every skill phrase, get a
+// normalized vector back, and call two skills a match if their cosine ≥ threshold.
+// No string-match fallback: if the model can't load, scoring fails loudly.
+
+const SIM_THRESHOLD = 0.55; // tuned for all-MiniLM: related skills ~0.6+, unrelated <0.4
+
+let creatingOffscreen = null; // de-dupe concurrent createDocument calls
+async function ensureOffscreen() {
+  if (await chrome.offscreen.hasDocument()) return;
+  if (!creatingOffscreen) {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: "offscreen/offscreen.html",
+      reasons: ["WORKERS"],
+      justification: "Run local embedding model for semantic skill matching.",
+    });
+  }
+  try { await creatingOffscreen; } finally { creatingOffscreen = null; }
+}
+
+// Embed a batch of phrases → array of vectors (same order). Throws on model failure.
+// Retries while the offscreen doc spins up: createDocument resolves before the
+// module (transformers bundle) evaluates, so the first sendMessage can hit
+// "Receiving end does not exist".
+async function embed(texts) {
+  await ensureOffscreen();
+  let lastErr;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const res = await chrome.runtime.sendMessage({ target: "offscreen-embed", texts });
+      if (!res?.ok) throw new Error(res?.error || "embedding failed");
+      return res.vectors;
+    } catch (e) {
+      lastErr = e;
+      if (!/Receiving end does not exist|message port closed/i.test(e.message)) throw e;
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+  throw lastErr;
+}
+
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+
 // ── Score candidate against requirements ──────────────────────────────────────
 
-function computeScore(requirements, jobTitle, candidate) {
+async function computeScore(requirements, jobTitle, candidate) {
   const { required_skills, preferred_skills, required_years } = requirements;
   const cSkills  = candidate.skills || [];
   const expYears = candidate.experience_years || 0;
@@ -355,9 +191,61 @@ function computeScore(requirements, jobTitle, candidate) {
     return { score: 50, label: "Fair Fit", rationale: "Could not extract skills from JD to score." };
   }
 
-  const matchedReq  = required_skills.filter(s => skillMatch(cSkills, s));
-  const matchedPref = preferred_skills.filter(s => skillMatch(cSkills, s));
-  const missingReq  = required_skills.filter(s => !skillMatch(cSkills, s));
+  // Embed every unique skill phrase (JD + candidate) in one batch, build text→vector map.
+  // embed() throws if the model is unavailable — let it propagate to the GET_SCORE handler.
+  const vecMap = new Map();
+  const uniq = [...new Set(
+    [...required_skills, ...preferred_skills, ...cSkills].map(canonicalSkill).filter(Boolean)
+  )];
+  const vectors = await embed(uniq);
+  uniq.forEach((t, i) => vecMap.set(t, vectors[i]));
+
+  // Token set of a canonicalized phrase, for lexical containment checks.
+  function tokenSet(s) {
+    return new Set(canonicalSkill(s).split(/[\s/.+#-]+/).filter(t => t.length > 1));
+  }
+
+  // True if `target` matches any candidate skill. Lexical first (alias-canonical
+  // exact or token containment — catches abbreviations/variants MiniLM scores
+  // below threshold, e.g. "k8s"≈"Kubernetes", "AWS"≈"Amazon Web Services"),
+  // then semantic cosine ≥ threshold as fallback.
+  function isMatch(target) {
+    const tn = canonicalSkill(target);
+    if (!tn) return false; // unembeddable phrase (empty after normalize)
+    const tTok = tokenSet(target);
+    const tv = vecMap.get(tn);
+    return cSkills.some(cs => {
+      const cn = canonicalSkill(cs);
+      if (!cn) return false;
+      // Exact normalized match.
+      if (cn === tn) return true;
+      // Token containment: one phrase's tokens ⊆ the other's (e.g. "react" ⊆ "react.js").
+      const cTok = tokenSet(cs);
+      if (tTok.size && cTok.size) {
+        const [small, big] = tTok.size <= cTok.size ? [tTok, cTok] : [cTok, tTok];
+        if ([...small].every(t => big.has(t))) return true;
+      }
+      // Semantic fallback.
+      const cv = vecMap.get(cn);
+      return tv && cv && cosine(tv, cv) >= SIM_THRESHOLD;
+    });
+  }
+
+  const matchedReq  = required_skills.filter(isMatch);
+  const matchedPref = preferred_skills.filter(isMatch);
+  const missingReq  = required_skills.filter(s => !isMatch(s));
+
+  // Debug: full scoring inputs/outputs — compare across browsers when scores diverge.
+  console.log("[SCOUT] computeScore inputs:", {
+    candidateSkills: cSkills,
+    expYears,
+    required_skills,
+    preferred_skills,
+    required_years,
+    matchedReq,
+    matchedPref,
+    missingReq,
+  });
 
   const reqWeight  = required_skills.length  ? (matchedReq.length  / required_skills.length)  * 60 : 0;
   const prefWeight = preferred_skills.length ? (matchedPref.length / preferred_skills.length) * 15 : 15;
@@ -413,6 +301,7 @@ async function prefetchJobDescriptions(jobs) {
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.target === "offscreen-embed") return; // handled by the offscreen doc
   const { type, payload } = message;
 
   // ── GET_JDS — fetch active jobs, then pre-warm description cache ──────────
@@ -453,7 +342,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           jobCache.set(jd_id, cached);
         }
 
-        const result = computeScore(cached.requirements, cached.title, candidate);
+        const result = await computeScore(cached.requirements, cached.title, candidate);
         console.log("[SCOUT] Score:", result, "(cache hit:", jobCache.has(jd_id), ")");
         sendResponse({ ok: true, data: result });
       } catch (e) {
@@ -478,9 +367,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         let data;
         try { data = JSON.parse(text); }
         catch (_) { sendResponse({ ok: false, error: `Non-JSON (${r.status}): ${text.slice(0, 120)}` }); return; }
-        if (data.ok) {
-          console.log("[SCOUT] Candidate added:", data.applicant?.id || data.applicant?.prospect_id);
+        const jazzhrError = data.applicant?._error;
+        const jazzhrId    = data.applicant?.id || data.applicant?.prospect_id;
+        if (data.ok && !jazzhrError && jazzhrId) {
+          console.log("[SCOUT] Candidate added:", jazzhrId);
           sendResponse({ ok: true, status: "added", jazzhr_url: data.jazzhr_url || "" });
+        } else if (data.ok) {
+          // Backend reports ok but JazzHR rejected the candidate (e.g. missing email)
+          sendResponse({ ok: false, error: jazzhrError || "JazzHR did not create the candidate." });
         } else {
           sendResponse({ ok: false, error: data.error || `API error (${r.status})` });
         }
