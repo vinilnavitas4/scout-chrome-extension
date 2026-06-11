@@ -301,7 +301,12 @@ async function prefetchJobDescriptions(jobs) {
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.target === "offscreen-embed") return; // handled by the offscreen doc
+  // Relay MODEL_READY from offscreen → all popup tabs so the loading status clears.
+  if (message?.target === "sw" && message?.type === "MODEL_READY") {
+    chrome.runtime.sendMessage({ type: "MODEL_READY" }).catch(() => {});
+    return;
+  }
+  if (message?.target === "offscreen-embed" || message?.target === "offscreen-embed-status") return;
   const { type, payload } = message;
 
   // ── GET_JDS — fetch active jobs, then pre-warm description cache ──────────
@@ -316,7 +321,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           client: j.internal_code || [j.city, j.state].filter(Boolean).join(", ") || j.type || ""
         }));
         sendResponse({ ok: true, data: jobs });
-        // Pre-fetch descriptions in background — don't await, popup already has the list
+        // Warm up the offscreen model + pre-fetch JD descriptions in parallel.
+        // Neither is awaited — popup already has the job list.
+        ensureOffscreen().catch(() => {});
         prefetchJobDescriptions(jobs);
       } catch (e) {
         console.error("[SCOUT] GET_JDS error:", e.message);

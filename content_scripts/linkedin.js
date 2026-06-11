@@ -494,16 +494,6 @@ async function extractContactInfo() {
         console.log('[SCOUT] contact info via fetch:', got);
         return got;
       }
-      // DOM parse found nothing — contact data often sits in embedded JSON
-      // (SDUI/voyager payload) rather than rendered markup. Scan the raw HTML.
-      const rawEmail = (html.match(new RegExp(EMAIL_RE.source, 'g')) || [])
-        .find(e => !/linkedin\.com$/i.test(e.split('@')[1] || ''));
-      const rawPhone = (html.match(/"(?:phoneNumber|number)"\s*:\s*"(\+?[\d\s\-().]{7,18})"/) || [])[1] || '';
-      if (rawEmail || rawPhone) {
-        const got2 = { email: rawEmail || '', phone: rawPhone.trim() };
-        console.log('[SCOUT] contact info via raw HTML scan:', got2);
-        return got2;
-      }
       console.log('[SCOUT] fetch returned no contact fields, falling back to modal');
     } else {
       console.log('[SCOUT] fetch status', res.status, '— falling back to modal');
@@ -516,20 +506,20 @@ async function extractContactInfo() {
   console.log('[SCOUT] Clicking contact-info overlay');
   contactLink.click();
 
-  // Wait up to 10s for the CONTACT modal specifically. Generic dialog selectors
-  // alone match pre-existing overlays (messaging, search) and fire instantly,
-  // so generic dialogs only count if their text looks like contact info.
-  const looksLikeContactDialog = (el) => /contact|email|phone/i.test(el.textContent || '');
+  // Wait up to 10s for any modal/dialog or mailto link to appear
   await new Promise(resolve => {
     let polls = 0;
     const timer = setInterval(() => {
       polls++;
       const ready = document.querySelector('a[href^="mailto:"]') ||
+                    document.querySelector('dialog[open]') ||
                     document.querySelector('[data-sdui-screen*="ContactDetails"]') ||
                     document.querySelector('[componentkey*="ContactInfo"]') ||
+                    document.querySelector('[role="dialog"]') ||
+                    document.querySelector('[aria-modal="true"]') ||
+                    document.querySelector('[data-test-modal]') ||
                     document.querySelector('section.pv-contact-info') ||
-                    document.querySelector('input[type="email"]') ||
-                    [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog);
+                    document.querySelector('input[type="email"]');
       if (ready || polls > 40) { clearInterval(timer); resolve(); }
     }, 250);
   });
@@ -547,11 +537,9 @@ async function extractContactInfo() {
   const emailRe = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 
   // Scope to the contact-info overlay so we don't grab page numbers (follower counts etc).
-  // Generic dialogs qualify only if their text looks contact-related — otherwise we'd
-  // scope to an unrelated overlay (messaging etc.) and scan nothing useful.
-  const ctx = document.querySelector('[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], section.pv-contact-info')
-    || [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog)
-    || document.body;
+  const ctx = document.querySelector(
+    '[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]'
+  ) || document.body;
   console.log('[SCOUT] modal ctx tag:', ctx === document.body ? 'BODY (no modal found)' : ctx.tagName + ' ' + (ctx.getAttribute('componentkey') || ctx.getAttribute('role') || ''));
 
   // Strategy 1: mailto link (other's profile — most reliable)
