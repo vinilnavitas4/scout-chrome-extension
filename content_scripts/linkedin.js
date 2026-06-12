@@ -580,21 +580,46 @@ async function extractContactInfo() {
   console.log('[SCOUT] Clicking contact-info overlay');
   contactLink.click();
 
-  // Wait up to 10s for the CONTACT modal specifically. Generic dialog selectors
-  // alone match pre-existing overlays (messaging, search) and fire instantly,
-  // so generic dialogs only count if their text looks like contact info.
+  // Phase 1: wait up to 10s for the CONTACT modal container. Generic dialog
+  // selectors alone match pre-existing overlays (messaging, search) and fire
+  // instantly, so generic dialogs only count if their text looks like contact info.
   const looksLikeContactDialog = (el) => /contact|email|phone/i.test(el.textContent || '');
+  const findContactContainer = () =>
+    document.querySelector('[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], section.pv-contact-info') ||
+    document.querySelector('a[href^="mailto:"]')?.closest('dialog, [role="dialog"], [aria-modal="true"]') ||
+    [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog) ||
+    null;
   await new Promise(resolve => {
     let polls = 0;
     const timer = setInterval(() => {
       polls++;
-      const ready = document.querySelector('a[href^="mailto:"]') ||
-        document.querySelector('[data-sdui-screen*="ContactDetails"]') ||
-        document.querySelector('[componentkey*="ContactInfo"]') ||
-        document.querySelector('section.pv-contact-info') ||
-        document.querySelector('input[type="email"]') ||
-        [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog);
-      if (ready || polls > 40) { clearInterval(timer); resolve(); }
+      if (findContactContainer() || polls > 40) { clearInterval(timer); resolve(); }
+    }, 250);
+  });
+
+  // Phase 2: the container appears as an empty shell first ("Contact info"
+  // title only) and its fields stream in via AJAX. Wait until real fields
+  // render — mailto / email input / the always-present "Profile" linkedin.com
+  // link / phone digits or an email-shaped string — or until the container's
+  // text stops growing for 3 consecutive polls (profiles with no email/phone).
+  // Up to 8s.
+  await new Promise(resolve => {
+    let polls = 0;
+    let lastLen = -1;
+    let stable = 0;
+    const timer = setInterval(() => {
+      polls++;
+      const c = findContactContainer();
+      if (c) {
+        const hasFields =
+          c.querySelector('a[href^="mailto:"], input[type="email"], a[href*="linkedin.com/in/"]') ||
+          /\b(phone|email)\b[\s\S]{0,80}?\d{6,}|@[a-z0-9.\-]+\.[a-z]{2,}/i.test(c.textContent || '');
+        const len = (c.textContent || '').length;
+        stable = (len === lastLen) ? stable + 1 : 0;
+        lastLen = len;
+        if (hasFields || stable >= 3) { clearInterval(timer); resolve(); return; }
+      }
+      if (polls > 32) { clearInterval(timer); resolve(); }
     }, 250);
   });
 
@@ -611,11 +636,8 @@ async function extractContactInfo() {
   const emailRe = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 
   // Scope to the contact-info overlay so we don't grab page numbers (follower counts etc).
-  // Generic dialogs qualify only if their text looks contact-related — otherwise we'd
-  // scope to an unrelated overlay (messaging etc.) and scan nothing useful.
-  const ctx = document.querySelector('[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], section.pv-contact-info')
-    || [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog)
-    || document.body;
+  // Same finder as the readiness polls above, so we scrape the element we waited on.
+  const ctx = findContactContainer() || document.body;
   console.log('[SCOUT] modal ctx tag:', ctx === document.body ? 'BODY (no modal found)' : ctx.tagName + ' ' + (ctx.getAttribute('componentkey') || ctx.getAttribute('role') || ''));
 
   // Strategy 1: mailto link (other's profile — most reliable)
