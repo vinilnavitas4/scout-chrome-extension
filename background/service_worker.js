@@ -6,6 +6,12 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((e) => console.error("[SCOUT] setPanelBehavior:", e.message));
 
+// storage.session is extension-pages-only by default — the content script's
+// auto-extraction cache writes silently fail without this.
+chrome.storage.session
+  .setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" })
+  .catch((e) => console.error("[SCOUT] setAccessLevel:", e.message));
+
 // In-memory cache: job_id → { title, requirements }
 // Pre-populated after GET_JDS so GET_SCORE is instant.
 const jobCache = new Map();
@@ -298,16 +304,132 @@ async function prefetchJobDescriptions(jobs) {
   console.log(`[SCOUT] Pre-cached ${jobCache.size} job descriptions`);
 }
 
+// ── Floating panel window ──────────────────────────────────────────────────────
+// Gesture-free alternative to sidePanel.open(): a small popup-type window showing
+// the same popup.html, pinned to the source tab via ?tabId=. Stateless reuse —
+// scan existing popup windows instead of caching an id, so it survives SW restarts.
+
+// Window id persists in storage.session so it survives SW restarts; the
+// getAll URL scan is a fallback in case the stored id is gone or stale.
+async function findFloatingPanel() {
+  const { scout_float_win } = await chrome.storage.session.get("scout_float_win");
+  if (scout_float_win != null) {
+    try {
+      const win = await chrome.windows.get(scout_float_win, { populate: true });
+      return { win, tab: (win.tabs || [])[0] };
+    } catch (_) {
+      await chrome.storage.session.remove("scout_float_win"); // window already gone
+    }
+  }
+  const base = chrome.runtime.getURL("popup/popup.html");
+  const wins = await chrome.windows.getAll({ populate: true, windowTypes: ["popup"] });
+  for (const w of wins) {
+    const t = (w.tabs || [])[0];
+    if (t && (t.url || t.pendingUrl || "").startsWith(base)) return { win: w, tab: t };
+  }
+  return null;
+}
+
+async function openFloatingPanel(tabId) {
+  const url = chrome.runtime.getURL(`popup/popup.html?tabId=${tabId}`);
+  const existing = await findFloatingPanel();
+  if (existing && existing.tab) {
+    if ((existing.tab.url || existing.tab.pendingUrl) !== url) {
+      await chrome.tabs.update(existing.tab.id, { url });
+    } else {
+      // Same profile re-extracted (e.g. page reload missed CLOSE_FLOAT):
+      // navigation to an identical URL is a no-op, so force a reload to
+      // re-read the fresh result from session storage.
+      await chrome.tabs.reload(existing.tab.id);
+    }
+    await chrome.windows.update(existing.win.id, { focused: true, drawAttention: true });
+    await chrome.storage.session.set({ scout_float_win: existing.win.id });
+    return;
+  }
+  const win = await chrome.windows.create({ url, type: "popup", width: 420, height: 720, focused: true });
+  await chrome.storage.session.set({ scout_float_win: win.id });
+}
+
+async function closeFloatingPanel() {
+  const existing = await findFloatingPanel();
+  await chrome.storage.session.remove("scout_float_win");
+  if (existing) await chrome.windows.remove(existing.win.id);
+}
+
+chrome.windows.onRemoved.addListener(async (id) => {
+  const { scout_float_win } = await chrome.storage.session.get("scout_float_win");
+  if (scout_float_win === id) await chrome.storage.session.remove("scout_float_win");
+});
+
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.target === "offscreen-embed") return; // handled by the offscreen doc
   const { type, payload } = message;
 
+  // ── OPEN_PANEL — open the side panel for the sender's tab ─────────────────
+  // Works when the message rides a user gesture (transient activation, e.g.
+  // SPA navigation right after a click). Without a gesture sidePanel.open()
+  // rejects — fall back to a floating popup window, which needs no gesture.
+  if (type === "OPEN_PANEL") {
+    const tabId = sender.tab?.id;
+    if (tabId == null) { sendResponse({ ok: false, error: "no tab" }); return; }
+    chrome.sidePanel.open({ tabId }).then(
+      () => sendResponse({ ok: true }),
+      async () => {
+        try {
+          // Side panel already open? It shows the result itself — a floating
+          // window on top would duplicate the UI.
+          const panels = await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] });
+          if (panels.length) { sendResponse({ ok: true }); return; }
+          await openFloatingPanel(tabId);
+          sendResponse({ ok: true, floating: true });
+        } catch (e) {
+          sendResponse({ ok: false, error: e.message });
+        }
+      }
+    );
+    return true;
+  }
+
+  // ── CLOSE_FLOAT — close only the floating panel window (page reload cleanup) ─
+  if (type === "CLOSE_FLOAT") {
+    closeFloatingPanel().then(
+      () => sendResponse({ ok: true }),
+      (e) => sendResponse({ ok: false, error: e.message })
+    );
+    return true;
+  }
+
+  // ── CLOSE_PANEL — close the side panel everywhere, then re-arm the icon ───
+  if (type === "CLOSE_PANEL") {
+    (async () => {
+      try {
+        // Floating fallback window (if any) closes too — same button serves both.
+        await closeFloatingPanel().catch(() => {});
+        // Disabling the panel closes any open instance; re-enable shortly after
+        // so the toolbar icon can open it again.
+        await chrome.sidePanel.setOptions({ enabled: false });
+        setTimeout(() => {
+          chrome.sidePanel
+            .setOptions({ enabled: true, path: "popup/popup.html" })
+            .catch((e) => console.error("[SCOUT] panel re-enable:", e.message));
+        }, 250);
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
   // ── GET_JDS — fetch active jobs, then pre-warm description cache ──────────
   if (type === "GET_JDS") {
     (async () => {
       try {
+        // fresh = user hit refresh: drop cached JD requirements so the next
+        // GET_SCORE re-fetches and re-parses descriptions from the backend.
+        if (message.fresh) jobCache.clear();
         const r    = await fetch(`${BASE_URL}/api/scout/jobs`);
         const data = await r.json();
         const jobs = (data.jobs || []).map(j => ({

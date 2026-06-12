@@ -68,6 +68,18 @@ body {
   color: #f1f5f9;
 }
 
+#refresh-btn { font-size: 15px; }
+
+#refresh-btn.spinning {
+  animation: refresh-spin 0.9s linear infinite;
+  pointer-events: none;
+  color: #38bdf8;
+}
+
+@keyframes refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ── Body ── */
 .body {
   padding: 14px 16px;

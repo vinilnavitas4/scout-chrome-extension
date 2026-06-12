@@ -49,6 +49,15 @@ function findSectionByHeading(headingText) {
   return null;
 }
 
+// Skills section finder — heading lookup first, then layout-specific anchors
+// (classic LinkedIn uses a <div id="skills"> anchor inside the section).
+function findSkillsSection() {
+  return findSectionByHeading('Skills')
+      || document.querySelector('#skills')?.closest('section')
+      || document.querySelector('a[href*="/details/skills"]')?.closest('section')
+      || null;
+}
+
 function getSectionItems(section) {
   const expItems = section.querySelectorAll('div[componentkey^="entity-collection-item"]');
   if (expItems.length > 0) return Array.from(expItems);
@@ -309,11 +318,11 @@ function extractProfile() {
     }
   }
 
-  const skillSection = findSectionByHeading('Skills');
+  const skillSection = findSkillsSection();
   if (skillSection) {
-    // New LinkedIn layout: skill componentkeys (confirmed from real DOM)
+    // New LinkedIn layout: skill componentkeys (prefix occasionally changes — match loosely)
     const skillItems = Array.from(
-      skillSection.querySelectorAll('div[componentkey^="com.linkedin.sdui.profile.skill"]')
+      skillSection.querySelectorAll('div[componentkey*="profile.skill" i]')
     ).filter(el => {
       const ck = el.getAttribute('componentkey') || '';
       return !ck.endsWith('-divider') && el.querySelector('p');
@@ -324,12 +333,24 @@ function extractProfile() {
       addSkill(item.querySelector('p')?.innerText);
     });
 
+    // Classic layout: skill name is a bold hoverable link per list row
+    if (skills.length === 0) {
+      skillSection.querySelectorAll(
+        'a[data-field="skill_card_skill_topic"] span[aria-hidden="true"], ' +
+        '.hoverable-link-text.t-bold span[aria-hidden="true"]'
+      ).forEach(el => addSkill(el.innerText));
+    }
+
     // Old layout fallback
     if (skills.length === 0) {
       skillSection.querySelectorAll('.t-bold span[aria-hidden="true"]').forEach(el =>
         addSkill(el.innerText)
       );
     }
+
+    console.log(`[SCOUT] Skills section found, extracted ${skills.length} from main page`);
+  } else {
+    console.warn('[SCOUT] Skills section NOT found on page');
   }
 
   // Skills — Source 2: Experience skill-association links
@@ -369,11 +390,11 @@ function extractProfile() {
 // Clicks "Show all skills" → extracts from the modal that renders in-place in the live DOM.
 // The detail page is client-rendered (no componentkeys in fetched HTML), so fetch won't work.
 async function expandAndExtractAllSkills(profile) {
-  const skillSection = findSectionByHeading('Skills');
+  const skillSection = findSkillsSection();
   if (!skillSection) return;
 
   const showAllBtn = skillSection.querySelector(
-    'a[aria-label="Show all skills"], a[aria-label*="skills" i][href*="/details/skills"]'
+    'a[aria-label="Show all skills"], a[aria-label*="skills" i][href*="/details/skills"], a[href*="/details/skills"]'
   );
   if (!showAllBtn) {
     console.warn('[SCOUT] No "Show all skills" button found');
@@ -382,20 +403,29 @@ async function expandAndExtractAllSkills(profile) {
 
   const seen = new Set(profile.skills.map(s => s.toLowerCase()));
 
+  function tryAdd(raw) {
+    const skill = (raw || '').trim().split('\n')[0].trim();
+    if (skill && skill.length < 80 &&
+        !skill.toLowerCase().includes('show all') &&
+        !skill.toLowerCase().includes('endorse') &&
+        !seen.has(skill.toLowerCase())) {
+      seen.add(skill.toLowerCase());
+      profile.skills.push(skill);
+    }
+  }
+
   function harvest() {
-    document.querySelectorAll('div[componentkey^="com.linkedin.sdui.profile.skill"]').forEach(el => {
+    // SDUI overlay items
+    document.querySelectorAll('div[componentkey*="profile.skill" i]').forEach(el => {
       if ((el.getAttribute('componentkey') || '').endsWith('-divider')) return;
       const p = el.querySelector('p');
-      if (!p) return;
-      const skill = (p.innerText || p.textContent || '').trim().split('\n')[0].trim();
-      if (skill && skill.length < 80 &&
-          !skill.toLowerCase().includes('show all') &&
-          !skill.toLowerCase().includes('endorse') &&
-          !seen.has(skill.toLowerCase())) {
-        seen.add(skill.toLowerCase());
-        profile.skills.push(skill);
-      }
+      if (p) tryAdd(p.innerText || p.textContent);
     });
+    // Classic /details/skills page items
+    document.querySelectorAll(
+      'a[data-field="skill_page_skill_topic"] span[aria-hidden="true"], ' +
+      '.pvs-list__paged-list-item .hoverable-link-text.t-bold span[aria-hidden="true"]'
+    ).forEach(el => tryAdd(el.innerText));
   }
 
   showAllBtn.click();
@@ -418,13 +448,43 @@ async function expandAndExtractAllSkills(profile) {
 
       if (stable >= 4 || polls >= 30) {
         clearInterval(timer);
-        // Close the skills overlay
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
-        console.log(`[SCOUT] expandAndExtractAllSkills: ${profile.skills.length} total skills`);
         resolve();
       }
     }, 500);
   });
+
+  await closeOverlay();
+  console.log(`[SCOUT] expandAndExtractAllSkills: ${profile.skills.length} total skills`);
+}
+
+// Close whatever overlay we opened (skills "Show all" / contact-info modal).
+// Synthetic Escape alone is unreliable: LinkedIn's handlers often ignore
+// untrusted key events, and on the classic layout the click navigates to a
+// /details/ or /overlay/ route instead of opening a modal.
+async function closeOverlay() {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // Only true modals — skip bare [role="dialog"] (matches the persistent messaging bubble)
+    const modal = document.querySelector('dialog[open], [aria-modal="true"], .artdeco-modal');
+    if (!modal) break;
+    const dismissBtn =
+      modal.querySelector('button[aria-label*="dismiss" i], button[aria-label*="close" i], .artdeco-modal__dismiss') ||
+      modal.closest('.artdeco-modal-overlay')?.querySelector('.artdeco-modal__dismiss');
+    if (dismissBtn) {
+      dismissBtn.click();
+    } else {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  // Click navigated to an overlay/detail route instead of opening a modal → go back
+  if (/\/(overlay|details)\//.test(window.location.pathname)) {
+    history.back();
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  const left = document.querySelector('dialog[open], [aria-modal="true"], .artdeco-modal');
+  console.log('[SCOUT] closeOverlay:', left ? 'overlay still present' : 'closed');
 }
 
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
@@ -468,15 +528,15 @@ async function extractContactInfo() {
       const timer = setInterval(() => {
         polls++;
         contactLink = document.querySelector('a[href*="overlay/contact-info"]');
-        if (contactLink || polls >= 24) { clearInterval(timer); resolve(); }
+        if (contactLink || polls >= 40) { clearInterval(timer); resolve(); }
       }, 150);
     });
     console.log('[SCOUT] contact link poll result:', contactLink ? 'found' : 'not found');
   }
 
   if (!contactLink) {
-    console.log('[SCOUT] No contact-info link found after 3.6s poll');
-    return { email: '', phone: '' };
+    console.log('[SCOUT] No contact-info link found after 6s poll');
+    return { email: '', phone: '', sawOverlay: false };
   }
 
   // Strategy A (preferred): fetch the overlay route — it returns server-rendered
@@ -492,7 +552,7 @@ async function extractContactInfo() {
       const got = parseContactFrom(scope);
       if (got.email || got.phone) {
         console.log('[SCOUT] contact info via fetch:', got);
-        return got;
+        return { ...got, sawOverlay: true };
       }
       // DOM parse found nothing — contact data often sits in embedded JSON
       // (SDUI/voyager payload) rather than rendered markup. Scan the raw HTML.
@@ -500,7 +560,7 @@ async function extractContactInfo() {
         .find(e => !/linkedin\.com$/i.test(e.split('@')[1] || ''));
       const rawPhone = (html.match(/"(?:phoneNumber|number)"\s*:\s*"(\+?[\d\s\-().]{7,18})"/) || [])[1] || '';
       if (rawEmail || rawPhone) {
-        const got2 = { email: rawEmail || '', phone: rawPhone.trim() };
+        const got2 = { email: rawEmail || '', phone: rawPhone.trim(), sawOverlay: true };
         console.log('[SCOUT] contact info via raw HTML scan:', got2);
         return got2;
       }
@@ -513,29 +573,57 @@ async function extractContactInfo() {
   }
 
   // Strategy B (fallback): click the link, scrape the live modal.
+  // Re-query first — the topcard re-renders during the fetch attempt and can
+  // detach the node found earlier; clicking a detached node is a no-op, the
+  // modal never opens, and the 10s poll below times out with blank results.
+  contactLink = document.querySelector('a[href*="overlay/contact-info"]') || contactLink;
   console.log('[SCOUT] Clicking contact-info overlay');
   contactLink.click();
 
-  // Wait up to 10s for the CONTACT modal specifically. Generic dialog selectors
-  // alone match pre-existing overlays (messaging, search) and fire instantly,
-  // so generic dialogs only count if their text looks like contact info.
+  // Phase 1: wait up to 10s for the CONTACT modal container. Generic dialog
+  // selectors alone match pre-existing overlays (messaging, search) and fire
+  // instantly, so generic dialogs only count if their text looks like contact info.
   const looksLikeContactDialog = (el) => /contact|email|phone/i.test(el.textContent || '');
+  const findContactContainer = () =>
+    document.querySelector('[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], section.pv-contact-info') ||
+    document.querySelector('a[href^="mailto:"]')?.closest('dialog, [role="dialog"], [aria-modal="true"]') ||
+    [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog) ||
+    null;
   await new Promise(resolve => {
     let polls = 0;
     const timer = setInterval(() => {
       polls++;
-      const ready = document.querySelector('a[href^="mailto:"]') ||
-                    document.querySelector('[data-sdui-screen*="ContactDetails"]') ||
-                    document.querySelector('[componentkey*="ContactInfo"]') ||
-                    document.querySelector('section.pv-contact-info') ||
-                    document.querySelector('input[type="email"]') ||
-                    [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog);
-      if (ready || polls > 40) { clearInterval(timer); resolve(); }
+      if (findContactContainer() || polls > 40) { clearInterval(timer); resolve(); }
     }, 250);
   });
 
-  // Extra settle time for AJAX content inside modal
-  await new Promise(r => setTimeout(r, 600));
+  // Phase 2: container exists but its CONTENT loads via AJAX — the shell with
+  // just the "Contact info" title appears first. Wait until actual fields render
+  // (mailto / phone digits / the always-present "Profile" linkedin.com link), or
+  // until the text stops growing for 3 consecutive polls (covers profiles whose
+  // overlay has no email/phone). Up to 8s.
+  await new Promise(resolve => {
+    let polls = 0;
+    let lastLen = -1;
+    let stable = 0;
+    const timer = setInterval(() => {
+      polls++;
+      const c = findContactContainer();
+      if (c) {
+        const hasFields =
+          c.querySelector('a[href^="mailto:"], input[type="email"], a[href*="linkedin.com/in/"]') ||
+          /\b(phone|email)\b[\s\S]{0,80}?\d{6,}|@[a-z0-9.\-]+\.[a-z]{2,}/i.test(c.textContent || '');
+        const len = (c.textContent || '').length;
+        stable = (len === lastLen) ? stable + 1 : 0;
+        lastLen = len;
+        if (hasFields || stable >= 3) { clearInterval(timer); resolve(); return; }
+      }
+      if (polls > 32) { clearInterval(timer); resolve(); }
+    }, 250);
+  });
+
+  // Short settle so a just-rendered field's siblings (phone under email) finish too
+  await new Promise(r => setTimeout(r, 400));
 
   console.log('[SCOUT] modal URL:', window.location.href.includes('contact-info') ? 'has contact-info' : 'no contact-info in URL');
   console.log('[SCOUT] modal dialogs:', document.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]').length);
@@ -547,11 +635,8 @@ async function extractContactInfo() {
   const emailRe = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 
   // Scope to the contact-info overlay so we don't grab page numbers (follower counts etc).
-  // Generic dialogs qualify only if their text looks contact-related — otherwise we'd
-  // scope to an unrelated overlay (messaging etc.) and scan nothing useful.
-  const ctx = document.querySelector('[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], section.pv-contact-info')
-    || [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog)
-    || document.body;
+  // Same finder as the readiness polls above, so we scrape the element we waited on.
+  const ctx = findContactContainer() || document.body;
   console.log('[SCOUT] modal ctx tag:', ctx === document.body ? 'BODY (no modal found)' : ctx.tagName + ' ' + (ctx.getAttribute('componentkey') || ctx.getAttribute('role') || ''));
 
   // Strategy 1: mailto link (other's profile — most reliable)
@@ -618,10 +703,12 @@ async function extractContactInfo() {
   }
 
   console.log('[SCOUT] contact info result:', { email, phone });
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
-  await new Promise(r => setTimeout(r, 300));
+  await closeOverlay();
 
-  return { email, phone };
+  // sawOverlay=false means we never located a contact container (modal didn't
+  // open or hadn't rendered) — caller may retry. true with blank fields means
+  // the profile genuinely lists no email/phone, so retrying is pointless.
+  return { email, phone, sawOverlay: ctx !== document.body };
 }
 
 function scrollAndExtract() {
@@ -686,26 +773,108 @@ function scrollAndExtract() {
   });
 }
 
+// Single extraction pipeline, deduped per profile (slug, not full URL — the
+// extraction itself visits /details/skills and /overlay/contact-info routes,
+// which must not look like a new profile). The auto-run on page load and the
+// panel's getProfile share the same in-flight promise, so the panel gets an
+// instant (or already-running) result instead of starting over.
+let extractionPromise = null;
+let extractedSlug = '';
+let extractionSettled = false;
+
+function profileSlug(url) {
+  const m = (url || '').match(/linkedin\.com\/in\/([^\/?#]+)/i);
+  return m ? m[1].toLowerCase() : '';
+}
+
+// Ask the SW to open the side panel. sidePanel.open() needs a user gesture;
+// if none is active (cold page load), arm a one-time listener so the user's
+// next click/keypress on the page opens it.
+function requestPanelOpen() {
+  chrome.runtime.sendMessage({ type: 'OPEN_PANEL' }, (res) => {
+    void chrome.runtime.lastError;
+    if (res?.ok) return;
+    const onInteract = () => {
+      window.removeEventListener('pointerdown', onInteract, true);
+      window.removeEventListener('keydown', onInteract, true);
+      chrome.runtime.sendMessage({ type: 'OPEN_PANEL' }, () => void chrome.runtime.lastError);
+    };
+    window.addEventListener('pointerdown', onInteract, true);
+    window.addEventListener('keydown', onInteract, true);
+  });
+}
+
+function runExtraction(force = false) {
+  const slug = profileSlug(window.location.href);
+  if (extractionPromise && extractedSlug === slug) {
+    // Same profile: reuse unless forced — and never restart a run in flight,
+    // two parallel scroll/overlay routines would fight each other.
+    if (!force || !extractionSettled) return extractionPromise;
+  }
+  extractedSlug = slug;
+  extractionSettled = false;
+  extractionPromise = (async () => {
+    const profile = await scrollAndExtract();
+
+    // Contact info FIRST — while still on the main profile. The skills
+    // "Show all" click can navigate to /details/skills and lose the
+    // contact-info link, leaving email/phone blank.
+    let contact = await extractContactInfo();
+    if (!contact.email && !contact.phone && !contact.sawOverlay) {
+      // Never found the link/modal — topcard likely mid-re-render (lazy reload
+      // after scroll, or the side panel opening reflowed the page). One retry
+      // after the layout settles. Skipped when the overlay WAS found but empty:
+      // that's a profile with no public contact info, not a timing miss.
+      console.log('[SCOUT] contact info overlay never found — retrying once');
+      await new Promise(r => setTimeout(r, 1500));
+      contact = await extractContactInfo();
+    }
+    profile.email = contact.email;
+    profile.phone = contact.phone;
+
+    if (!profile.about) {
+      profile.about = await fetchAbout();
+    }
+
+    await expandAndExtractAllSkills(profile);
+
+    console.log('[SCOUT] LinkedIn parsed:', profile);
+    chrome.storage.session.set({ scout_candidate: profile });
+    // Extraction finished — surface the result in the side panel.
+    requestPanelOpen();
+    return profile;
+  })().finally(() => { extractionSettled = true; });
+  return extractionPromise;
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getProfile') {
-    scrollAndExtract().then(async profile => {
-      // Contact info FIRST — while still on the main profile. The skills
-      // "Show all" click can navigate to /details/skills and lose the
-      // contact-info link, leaving email/phone blank.
-      const { email, phone } = await extractContactInfo();
-      profile.email = email;
-      profile.phone = phone;
-
-      if (!profile.about) {
-        profile.about = await fetchAbout();
-      }
-
-      await expandAndExtractAllSkills(profile);
-
-      console.log('[SCOUT] LinkedIn parsed:', profile);
-      chrome.storage.session.set({ scout_candidate: profile });
-      sendResponse({ profile });
-    });
+    runExtraction(!!request.force).then(profile => sendResponse({ profile }));
   }
   return true;
 });
+
+// Auto-start: extract as soon as the profile page loads, and again on SPA
+// navigation between profiles — the panel then finds the result ready.
+// window flag guards against double timers if the script is injected twice.
+if (!window.__scoutAutoWatch) {
+  window.__scoutAutoWatch = true;
+  // Page (re)load: close any stale floating panel from the previous page —
+  // a fresh one opens when this load's extraction completes.
+  chrome.runtime.sendMessage({ type: 'CLOSE_FLOAT' }, () => void chrome.runtime.lastError);
+  setTimeout(() => runExtraction(), 1500);
+  let lastSlug = profileSlug(window.location.href);
+  setInterval(() => {
+    const slug = profileSlug(window.location.href);
+    // Slug change only — sub-routes the extraction itself visits
+    // (/details/skills, /overlay/contact-info) keep the same slug.
+    if (slug && slug !== lastSlug) {
+      lastSlug = slug;
+      console.log('[SCOUT] Profile navigation detected, re-extracting:', slug);
+      // New profile: drop the old profile's floating panel right away —
+      // a fresh one opens when this profile's extraction completes.
+      chrome.runtime.sendMessage({ type: 'CLOSE_FLOAT' }, () => void chrome.runtime.lastError);
+      runExtraction();
+    }
+  }, 1000);
+}
