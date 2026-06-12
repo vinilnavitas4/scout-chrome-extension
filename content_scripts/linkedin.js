@@ -53,9 +53,9 @@ function findSectionByHeading(headingText) {
 // (classic LinkedIn uses a <div id="skills"> anchor inside the section).
 function findSkillsSection() {
   return findSectionByHeading('Skills')
-      || document.querySelector('#skills')?.closest('section')
-      || document.querySelector('a[href*="/details/skills"]')?.closest('section')
-      || null;
+    || document.querySelector('#skills')?.closest('section')
+    || document.querySelector('a[href*="/details/skills"]')?.closest('section')
+    || null;
 }
 
 function getSectionItems(section) {
@@ -165,9 +165,9 @@ async function fetchAbout() {
         const data = JSON.parse(script.textContent || '');
         const desc = data.description || data['@graph']?.find(n => n.description)?.description;
         if (desc) return desc;
-      } catch(_) {}
+      } catch (_) { }
     }
-  } catch(e) {
+  } catch (e) {
     console.log('[SCOUT] fetchAbout error:', e.message);
   }
   return '';
@@ -182,7 +182,7 @@ function extractEducation() {
     const ps = editLink ? editLink.querySelectorAll('p') : item.querySelectorAll('p');
     const school = ps[0]?.innerText.trim() || '';
     const degree = ps[1]?.innerText.trim() || '';
-    const dates  = ps[2]?.innerText.trim() || '';
+    const dates = ps[2]?.innerText.trim() || '';
     if (school) education.push({ school, degree, dates });
   });
   return education;
@@ -310,9 +310,9 @@ function extractProfile() {
   function addSkill(raw) {
     const s = (raw || '').trim().split('\n')[0].trim();
     if (s && s.length < 80 && s.length > 1 &&
-        !s.toLowerCase().includes('show all') &&
-        !s.toLowerCase().includes('endorse') &&
-        !seen.has(s.toLowerCase())) {
+      !s.toLowerCase().includes('show all') &&
+      !s.toLowerCase().includes('endorse') &&
+      !seen.has(s.toLowerCase())) {
       seen.add(s.toLowerCase());
       skills.push(s);
     }
@@ -406,9 +406,9 @@ async function expandAndExtractAllSkills(profile) {
   function tryAdd(raw) {
     const skill = (raw || '').trim().split('\n')[0].trim();
     if (skill && skill.length < 80 &&
-        !skill.toLowerCase().includes('show all') &&
-        !skill.toLowerCase().includes('endorse') &&
-        !seen.has(skill.toLowerCase())) {
+      !skill.toLowerCase().includes('show all') &&
+      !skill.toLowerCase().includes('endorse') &&
+      !seen.has(skill.toLowerCase())) {
       seen.add(skill.toLowerCase());
       profile.skills.push(skill);
     }
@@ -560,7 +560,7 @@ async function extractContactInfo() {
         .find(e => !/linkedin\.com$/i.test(e.split('@')[1] || ''));
       const rawPhone = (html.match(/"(?:phoneNumber|number)"\s*:\s*"(\+?[\d\s\-().]{7,18})"/) || [])[1] || '';
       if (rawEmail || rawPhone) {
-        const got2 = { email: rawEmail || '', phone: rawPhone.trim(), sawOverlay: true };
+        const got2 = { email: rawEmail || '', phone: rawPhone.trim() };
         console.log('[SCOUT] contact info via raw HTML scan:', got2);
         return got2;
       }
@@ -580,45 +580,21 @@ async function extractContactInfo() {
   console.log('[SCOUT] Clicking contact-info overlay');
   contactLink.click();
 
-  // Phase 1: wait up to 10s for the CONTACT modal container. Generic dialog
-  // selectors alone match pre-existing overlays (messaging, search) and fire
-  // instantly, so generic dialogs only count if their text looks like contact info.
+  // Wait up to 10s for the CONTACT modal specifically. Generic dialog selectors
+  // alone match pre-existing overlays (messaging, search) and fire instantly,
+  // so generic dialogs only count if their text looks like contact info.
   const looksLikeContactDialog = (el) => /contact|email|phone/i.test(el.textContent || '');
-  const findContactContainer = () =>
-    document.querySelector('[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], section.pv-contact-info') ||
-    document.querySelector('a[href^="mailto:"]')?.closest('dialog, [role="dialog"], [aria-modal="true"]') ||
-    [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog) ||
-    null;
   await new Promise(resolve => {
     let polls = 0;
     const timer = setInterval(() => {
       polls++;
-      if (findContactContainer() || polls > 40) { clearInterval(timer); resolve(); }
-    }, 250);
-  });
-
-  // Phase 2: container exists but its CONTENT loads via AJAX — the shell with
-  // just the "Contact info" title appears first. Wait until actual fields render
-  // (mailto / phone digits / the always-present "Profile" linkedin.com link), or
-  // until the text stops growing for 3 consecutive polls (covers profiles whose
-  // overlay has no email/phone). Up to 8s.
-  await new Promise(resolve => {
-    let polls = 0;
-    let lastLen = -1;
-    let stable = 0;
-    const timer = setInterval(() => {
-      polls++;
-      const c = findContactContainer();
-      if (c) {
-        const hasFields =
-          c.querySelector('a[href^="mailto:"], input[type="email"], a[href*="linkedin.com/in/"]') ||
-          /\b(phone|email)\b[\s\S]{0,80}?\d{6,}|@[a-z0-9.\-]+\.[a-z]{2,}/i.test(c.textContent || '');
-        const len = (c.textContent || '').length;
-        stable = (len === lastLen) ? stable + 1 : 0;
-        lastLen = len;
-        if (hasFields || stable >= 3) { clearInterval(timer); resolve(); return; }
-      }
-      if (polls > 32) { clearInterval(timer); resolve(); }
+      const ready = document.querySelector('a[href^="mailto:"]') ||
+        document.querySelector('[data-sdui-screen*="ContactDetails"]') ||
+        document.querySelector('[componentkey*="ContactInfo"]') ||
+        document.querySelector('section.pv-contact-info') ||
+        document.querySelector('input[type="email"]') ||
+        [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog);
+      if (ready || polls > 40) { clearInterval(timer); resolve(); }
     }, 250);
   });
 
@@ -635,8 +611,11 @@ async function extractContactInfo() {
   const emailRe = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 
   // Scope to the contact-info overlay so we don't grab page numbers (follower counts etc).
-  // Same finder as the readiness polls above, so we scrape the element we waited on.
-  const ctx = findContactContainer() || document.body;
+  // Generic dialogs qualify only if their text looks contact-related — otherwise we'd
+  // scope to an unrelated overlay (messaging etc.) and scan nothing useful.
+  const ctx = document.querySelector('[data-sdui-screen*="ContactDetails"], [componentkey*="ContactInfo"], section.pv-contact-info')
+    || [...document.querySelectorAll('dialog[open], [role="dialog"], [aria-modal="true"], [data-test-modal]')].find(looksLikeContactDialog)
+    || document.body;
   console.log('[SCOUT] modal ctx tag:', ctx === document.body ? 'BODY (no modal found)' : ctx.tagName + ' ' + (ctx.getAttribute('componentkey') || ctx.getAttribute('role') || ''));
 
   // Strategy 1: mailto link (other's profile — most reliable)

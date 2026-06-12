@@ -47,6 +47,19 @@ let selectedJdTitle = null;
 let currentScore    = null;
 let profilePending  = true;   // true while profile fetch is in flight
 let scoreVersion    = 0;      // incremented on each new score request to discard stale AI responses
+let modelReady      = false;  // true once offscreen ML model finishes loading
+
+// Listen for MODEL_READY from the service worker (relayed from offscreen doc).
+// If a score is in progress, update the status message to stop saying "loading model".
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "MODEL_READY") {
+    modelReady = true;
+    // If we're currently waiting on a score, update the status to the normal message
+    if (statusEl.classList.contains('show') && statusEl.textContent.includes('model')) {
+      showStatus('Matching profile to JD…', 'loading');
+    }
+  }
+});
 
 // ── Init + tab watching ───────────────────────────────────────────────────────
 
@@ -274,7 +287,7 @@ function requestScore(jdId) {
 
   addBtn.disabled = true;
   scoreCard.classList.remove('show');
-  showStatus('Matching profile to JD…', 'loading');
+  showStatus(modelReady ? 'Matching profile to JD…' : 'Loading AI model (first time only)…', 'loading');
 
   chrome.runtime.sendMessage(
     { type: 'GET_SCORE', payload: { jd_id: jdId, candidate } },

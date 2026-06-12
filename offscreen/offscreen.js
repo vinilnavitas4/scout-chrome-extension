@@ -18,17 +18,33 @@ env.backends.onnx.wasm.wasmPaths =
 env.backends.onnx.wasm.numThreads = 1;
 
 // Lazily build the feature-extraction pipeline once; reuse across messages.
+// Tracks whether the model has fully loaded so the SW can surface a loading state.
 let extractorPromise = null;
+let modelReady = false;
+
 function getExtractor() {
   if (!extractorPromise) {
     extractorPromise = pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
-      dtype: "q8", // 8-bit quantized — ~smaller download, fine for short skill phrases
+      dtype: "q8", // 8-bit quantized — smaller download, fine for short skill phrases
+    }).then(ext => {
+      modelReady = true;
+      // Notify the SW so the popup can clear any "loading model" status.
+      chrome.runtime.sendMessage({ target: "sw", type: "MODEL_READY" }).catch(() => {});
+      return ext;
     });
   }
   return extractorPromise;
 }
 
+// Warm up the model immediately so the first score request doesn't pay the
+// download cost — model files are cached in browser Cache Storage after this.
+getExtractor().catch(() => {});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.target === "offscreen-embed-status") {
+    sendResponse({ ok: true, ready: modelReady });
+    return true;
+  }
   if (message?.target !== "offscreen-embed") return; // not for us
   (async () => {
     try {
