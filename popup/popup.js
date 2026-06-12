@@ -17,6 +17,10 @@ const addBtn         = document.getElementById('add-btn');
 const jazzhrBtn      = document.getElementById('jazzhr-btn');
 const statusEl       = document.getElementById('status');
 const mockDuplicate  = document.getElementById('mock-duplicate');
+const resumeUpload   = document.getElementById('resume-upload');
+const resumeFile     = document.getElementById('resume-file');
+const resumeName     = document.getElementById('resume-name');
+const resumeClear    = document.getElementById('resume-clear');
 const mainView       = document.getElementById('main-view');
 const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
@@ -48,6 +52,28 @@ let currentScore    = null;
 let profilePending  = true;   // true while profile fetch is in flight
 let scoreVersion    = 0;      // incremented on each new score request to discard stale AI responses
 let modelReady      = false;  // true once offscreen ML model finishes loading
+let resumeB64       = '';     // base64-encoded resume file if recruiter attached one
+
+// ── Resume file picker ────────────────────────────────────────────────────────
+
+resumeFile.addEventListener('change', () => {
+  const file = resumeFile.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    resumeB64 = e.target.result.split(',')[1] || '';
+    resumeName.textContent = file.name;
+    resumeClear.style.display = 'inline';
+  };
+  reader.readAsDataURL(file);
+});
+
+resumeClear.addEventListener('click', () => {
+  resumeB64 = '';
+  resumeFile.value = '';
+  resumeName.textContent = 'No file chosen';
+  resumeClear.style.display = 'none';
+});
 
 // Listen for MODEL_READY from the service worker (relayed from offscreen doc).
 // If a score is in progress, update the status message to stop saying "loading model".
@@ -314,6 +340,7 @@ function renderScore(data) {
   else                  scoreCircle.classList.add('poor');
 
   scoreCard.classList.add('show');
+  resumeUpload.style.display = 'block';
   addBtn.disabled = false;
   resetAddButton();
 }
@@ -333,7 +360,8 @@ addBtn.addEventListener('click', () => {
   }
 
   const payload = {
-    job_id: selectedJd,
+    job_id:    selectedJd,
+    resume_b64: resumeB64 || undefined,
     candidate: {
       name:             candidate.name,
       title:            candidate.title,
@@ -363,6 +391,7 @@ addBtn.addEventListener('click', () => {
     if (res?.ok) {
       addBtn.textContent = 'Added to SCOUT ✓';
       addBtn.className   = 'btn btn-success';
+      resumeUpload.style.display = 'none';
       if (res.jazzhr_url) {
         jazzhrBtn.href          = res.jazzhr_url;
         jazzhrBtn.style.display = 'flex';

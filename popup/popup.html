@@ -63,6 +63,17 @@
           </div>
         </div>
 
+        <!-- Optional resume upload — appears once score is ready -->
+        <div class="resume-upload" id="resume-upload" style="display:none">
+          <div class="resume-label">Attach Resume <span class="resume-hint">optional · PDF / DOC / DOCX</span></div>
+          <div class="resume-row">
+            <label class="resume-pick-btn" for="resume-file">Choose file</label>
+            <span class="resume-name" id="resume-name">No file chosen</span>
+            <button class="resume-clear" id="resume-clear" style="display:none" title="Remove">✕</button>
+          </div>
+          <input type="file" id="resume-file" accept=".pdf,.doc,.docx,.odt,.rtf,.txt" style="display:none" />
+        </div>
+
         <button class="btn btn-primary" id="add-btn" disabled>Add to SCOUT</button>
 
         <a class="btn btn-jazzhr" id="jazzhr-btn" target="_blank" style="display:none">

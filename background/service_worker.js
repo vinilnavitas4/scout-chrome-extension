@@ -486,11 +486,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === "ADD_CANDIDATE") {
     (async () => {
       try {
-        const { job_id, candidate } = payload;
+        const { job_id, candidate, resume_b64 } = payload;
         const r = await fetch(`${BASE_URL}/api/scout/candidates`, {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ job_id, candidate }),
+          body:    JSON.stringify({ job_id, candidate, resume_b64 }),
         });
         const text = await r.text();
         let data;
