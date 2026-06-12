@@ -497,12 +497,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try { data = JSON.parse(text); }
         catch (_) { sendResponse({ ok: false, error: `Non-JSON (${r.status}): ${text.slice(0, 120)}` }); return; }
         const jazzhrError = data.applicant?._error;
-        const jazzhrId    = data.applicant?.id || data.applicant?.prospect_id;
+        const jazzhrId    = data.applicant?.id || data.applicant?.prospect_id || data.applicant_id;
         if (data.ok && !jazzhrError && jazzhrId) {
           console.log("[SCOUT] Candidate added:", jazzhrId);
-          sendResponse({ ok: true, status: "added", jazzhr_url: data.jazzhr_url || "" });
+          sendResponse({
+            ok:           true,
+            status:       "added",
+            jazzhr_url:   data.jazzhr_url || "",
+            applicant_id: jazzhrId,
+          });
         } else if (data.ok) {
-          // Backend reports ok but JazzHR rejected the candidate (e.g. missing email)
           sendResponse({ ok: false, error: jazzhrError || "JazzHR did not create the candidate." });
         } else {
           sendResponse({ ok: false, error: data.error || `API error (${r.status})` });
@@ -510,6 +514,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (e) {
         console.error("[SCOUT] ADD_CANDIDATE error:", e.message);
         sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
+      }
+    })();
+    return true;
+  }
+
+  // ── INITIATE_CALL — trigger Vapi AI phone screen ──────────────────────────
+  if (type === "INITIATE_CALL") {
+    (async () => {
+      try {
+        const r = await fetch(`${BASE_URL}/api/scout/initiate-call`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify(payload),
+        });
+        const data = await r.json();
+        sendResponse(data.ok
+          ? { ok: true, call_id: data.call_id, status: data.status }
+          : { ok: false, error: data.error || "Call initiation failed" }
+        );
+      } catch (e) {
+        console.error("[SCOUT] INITIATE_CALL error:", e.message);
+        sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
+      }
+    })();
+    return true;
+  }
+
+  // ── GET_CALL_STATUS — poll for call result after initiation ───────────────
+  if (type === "GET_CALL_STATUS") {
+    (async () => {
+      try {
+        const { applicant_id } = payload;
+        const r    = await fetch(`${BASE_URL}/api/scout/calls/${applicant_id}`);
+        const data = await r.json();
+        sendResponse(data);
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
       }
     })();
     return true;

@@ -26,6 +26,10 @@ const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
 const closeBtn       = document.getElementById('close-btn');
 const refreshBtn     = document.getElementById('refresh-btn');
+const vapiSection    = document.getElementById('vapi-section');
+const vapiBtn        = document.getElementById('vapi-btn');
+const vapiStatusEl   = document.getElementById('vapi-status');
+const vapiResultEl   = document.getElementById('vapi-result');
 
 // Close the side panel. window.close() works in the side panel on recent Chrome;
 // the SW fallback (disable → re-enable) covers versions where it's a no-op.
@@ -53,6 +57,8 @@ let profilePending  = true;   // true while profile fetch is in flight
 let scoreVersion    = 0;      // incremented on each new score request to discard stale AI responses
 let modelReady      = false;  // true once offscreen ML model finishes loading
 let resumeB64       = '';     // base64-encoded resume file if recruiter attached one
+let addedApplicantId = null;  // JazzHR prospect_id set after successful add
+let callPollTimer    = null;  // setInterval id for call-status polling
 
 // ── Resume file picker ────────────────────────────────────────────────────────
 
@@ -396,6 +402,9 @@ addBtn.addEventListener('click', () => {
         jazzhrBtn.href          = res.jazzhr_url;
         jazzhrBtn.style.display = 'flex';
       }
+      // Show Vapi call button — enabled only if candidate has a phone number
+      addedApplicantId = res.applicant_id || null;
+      showVapiSection(addedApplicantId);
     } else {
       showStatus(res?.error || 'Failed to add.', 'error');
       addBtn.disabled = false;
@@ -420,6 +429,147 @@ function resetAddButton() {
   addBtn.textContent = 'Add to SCOUT';
   addBtn.className   = 'btn btn-primary';
   addBtn.disabled    = !selectedJd;
+}
+
+// ── Vapi AI phone screen ──────────────────────────────────────────────────────
+
+function showVapiSection(applicantId) {
+  if (!vapiSection) return;
+  vapiSection.style.display = 'block';
+
+  const phone = candidate?.phone || '';
+  if (!phone) {
+    vapiBtn.disabled    = true;
+    vapiBtn.textContent = '📞 Call with AI (no phone number)';
+    return;
+  }
+  vapiBtn.disabled    = false;
+  vapiBtn.textContent = '📞 Call with AI';
+}
+
+vapiBtn.addEventListener('click', async () => {
+  if (!candidate || !addedApplicantId || !selectedJd) return;
+
+  const phone = candidate.phone || '';
+  if (!phone) {
+    vapiStatusEl.textContent = 'No phone number on this profile.';
+    vapiStatusEl.style.display = 'block';
+    return;
+  }
+
+  vapiBtn.disabled    = true;
+  vapiBtn.classList.add('calling');
+  vapiBtn.textContent = '📞 Calling…';
+  vapiStatusEl.textContent   = 'Initiating AI phone screen…';
+  vapiStatusEl.style.display = 'block';
+  vapiResultEl.style.display = 'none';
+
+  chrome.runtime.sendMessage({
+    type: 'INITIATE_CALL',
+    payload: {
+      applicant_id:   addedApplicantId,
+      job_id:         selectedJd,
+      phone:          phone,
+      candidate_name: candidate.name || '',
+      job_title:      selectedJdTitle || '',
+    },
+  }, (res) => {
+    if (!res?.ok) {
+      vapiBtn.classList.remove('calling');
+      vapiBtn.disabled    = false;
+      vapiBtn.textContent = '📞 Call with AI';
+      vapiStatusEl.textContent = '✕ ' + (res?.error || 'Call failed to start');
+      return;
+    }
+    vapiStatusEl.textContent = '📱 Call placed — waiting for candidate to answer…';
+    startCallPoll(addedApplicantId);
+  });
+});
+
+function startCallPoll(applicantId) {
+  if (callPollTimer) clearInterval(callPollTimer);
+  let attempts = 0;
+  const MAX_ATTEMPTS = 60; // 5 min at 5s intervals
+
+  callPollTimer = setInterval(() => {
+    attempts++;
+    chrome.runtime.sendMessage(
+      { type: 'GET_CALL_STATUS', payload: { applicant_id: applicantId } },
+      (res) => {
+        if (!res?.ok || !res.call) return;
+        const call = res.call;
+
+        if (call.status === 'initiated' || call.status === 'in_progress') {
+          vapiStatusEl.textContent = call.status === 'in_progress'
+            ? '🎙 In progress…'
+            : '📱 Ringing…';
+          return;
+        }
+
+        // Terminal state — stop polling
+        clearInterval(callPollTimer);
+        callPollTimer = null;
+        vapiBtn.classList.remove('calling');
+        vapiBtn.disabled    = false;
+        vapiBtn.textContent = '📞 Call again';
+        vapiStatusEl.style.display = 'none';
+        renderCallResult(call);
+      }
+    );
+
+    if (attempts >= MAX_ATTEMPTS) {
+      clearInterval(callPollTimer);
+      callPollTimer = null;
+      vapiBtn.classList.remove('calling');
+      vapiBtn.disabled    = false;
+      vapiBtn.textContent = '📞 Call with AI';
+      vapiStatusEl.textContent = 'Timed out waiting for call result.';
+    }
+  }, 5000);
+}
+
+function renderCallResult(call) {
+  const statusLabels = {
+    completed: 'Call Completed',
+    no_answer: 'No Answer',
+    failed:    'Call Failed',
+  };
+  const label = statusLabels[call.status] || call.status;
+
+  let html = `
+    <div class="vapi-result-label">AI Phone Screen Result</div>
+    <span class="vapi-result-badge ${call.status}">${label}</span>
+  `;
+
+  if (call.summary) {
+    html += `<div class="vapi-summary">${escapeHtml(call.summary)}</div>`;
+  }
+
+  const data = call.structured_data || {};
+  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== '');
+  if (entries.length > 0) {
+    html += '<div class="vapi-captured">';
+    for (const [key, val] of entries) {
+      const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      html += `
+        <div class="vapi-captured-row">
+          <span class="vapi-captured-key">${escapeHtml(label)}</span>
+          <span class="vapi-captured-val">${escapeHtml(String(val))}</span>
+        </div>`;
+    }
+    html += '</div>';
+  }
+
+  vapiResultEl.innerHTML = html;
+  vapiResultEl.style.display = 'block';
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
