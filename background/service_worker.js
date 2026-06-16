@@ -639,9 +639,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // a separate login (JazzHR has email-OTP MFA so we can't log in server-side).
         let jazzhr_token = "";
         try {
-          const cookie = await chrome.cookies.get({ url: "https://api.jazz.co", name: "sandcastle_ticket" });
+          const cookie = await Promise.race([
+            chrome.cookies.get({ url: "https://api.jazz.co/", name: "sandcastle_ticket" }),
+            new Promise(resolve => setTimeout(() => resolve(null), 1500)),
+          ]);
           jazzhr_token = cookie?.value || "";
-        } catch (_) { /* cookies permission not yet granted — non-fatal */ }
+        } catch (_) { /* cookies permission unavailable — non-fatal */ }
 
         const r = await fetch(`${BASE_URL}/api/scout/initiate-call`, {
           method:  "POST",
