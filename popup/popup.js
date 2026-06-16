@@ -490,8 +490,8 @@ addBtn.addEventListener('click', () => {
       skills:           candidate.skills,
       experience_years: candidate.experience_years,
       profileUrl:       candidate.profileUrl,
-      email:            candidate.email      || '',
-      phone:            candidate.phone      || '',
+      email:            (candidate.email || '').trim(),
+      phone:            normalizePhone(candidate.phone),
       experience:       candidate.experience || [],
       about:            candidate.about      || '',
       education:        candidate.education  || [],
@@ -692,4 +692,14 @@ function escapeHtml(s) {
 function showStatus(msg, type) {
   statusEl.textContent = msg;
   statusEl.className   = `status ${type} show`;
+}
+
+// Clean a phone string for the backend/JazzHR: drop "(Mobile)" tags and any
+// punctuation/spacing, keep digits and a leading +. Empty if no digits.
+function normalizePhone(s) {
+  if (!s) return '';
+  const t      = String(s).replace(/\((mobile|home|work|cell)\)/ig, '').trim();
+  const hasPlus = /^\s*\+/.test(t);
+  const digits  = t.replace(/\D/g, '');
+  return digits ? (hasPlus ? '+' : '') + digits : '';
 }
