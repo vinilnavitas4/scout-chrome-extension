@@ -439,20 +439,12 @@ function showVapiSection(applicantId) {
   if (!vapiSection) return;
   vapiSection.style.display = 'block';
 
+  vapiBtn.disabled    = false;
+  vapiBtn.textContent = '📞 Call with AI';
+
   const phone = candidate?.phone || '';
-  if (!phone) {
-    vapiPhoneRow.style.display  = 'block';
-    vapiPhoneInput.value        = '';
-    vapiBtn.textContent         = '📞 Call with AI';
-    vapiBtn.disabled            = true;  // enabled once number typed
-    vapiPhoneInput.addEventListener('input', () => {
-      vapiBtn.disabled = vapiPhoneInput.value.trim().length < 7;
-    }, { once: false });
-  } else {
-    vapiPhoneRow.style.display = 'none';
-    vapiBtn.disabled           = false;
-    vapiBtn.textContent        = '📞 Call with AI';
-  }
+  vapiPhoneRow.style.display = phone ? 'none' : 'block';
+  if (!phone) vapiPhoneInput.value = '';
 }
 
 vapiBtn.addEventListener('click', async () => {
@@ -460,7 +452,9 @@ vapiBtn.addEventListener('click', async () => {
 
   const phone = (candidate.phone || vapiPhoneInput?.value || '').trim();
   if (!phone) {
-    vapiStatusEl.textContent   = 'Enter a phone number above.';
+    vapiPhoneRow.style.display = 'block';
+    vapiPhoneInput.focus();
+    vapiStatusEl.textContent   = 'Enter a phone number to call.';
     vapiStatusEl.style.display = 'block';
     return;
   }
