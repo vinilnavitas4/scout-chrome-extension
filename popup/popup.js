@@ -58,6 +58,8 @@ let profilePending  = true;   // true while profile fetch is in flight
 let scoreVersion    = 0;      // incremented on each new score request to discard stale AI responses
 let modelReady      = false;  // true once offscreen ML model finishes loading
 let resumeB64       = '';     // base64-encoded resume file if recruiter attached one
+let resumeFileName  = '';     // original filename — JazzHR needs it to attach the resume
+let resumeMime      = '';     // file MIME type, sent alongside the base64
 let resumeText      = '';     // plain text parsed from the attached resume (for skill re-scoring)
 let addedApplicantId = null;  // JazzHR prospect_id set after successful add
 let callPollTimer    = null;  // setInterval id for call-status polling
@@ -74,8 +76,10 @@ resumeFile.addEventListener('change', async () => {
   resumeName.textContent = file.name;
   resumeClear.style.display = 'inline';
 
-  // 1. Base64 copy for the backend (unchanged — backend does its own parse).
-  resumeB64 = await fileToB64(file);
+  // 1. Base64 + metadata for the backend → JazzHR resume attachment.
+  resumeB64      = await fileToB64(file);
+  resumeFileName = file.name || 'resume';
+  resumeMime     = file.type || '';
 
   // 2. Parse résumé text once — reused for contact fill + skill re-scoring.
   showStatus('Reading résumé…', 'loading');
@@ -100,6 +104,8 @@ resumeFile.addEventListener('change', async () => {
 
 resumeClear.addEventListener('click', () => {
   resumeB64 = '';
+  resumeFileName = '';
+  resumeMime = '';
   resumeText = '';
   resumeFile.value = '';
   resumeName.textContent = 'No file chosen';
@@ -481,8 +487,10 @@ addBtn.addEventListener('click', () => {
   }
 
   const payload = {
-    job_id:    selectedJd,
-    resume_b64: resumeB64 || undefined,
+    job_id:      selectedJd,
+    resume_b64:  resumeB64 || undefined,
+    resume_name: resumeB64 ? resumeFileName : undefined,
+    resume_mime: resumeB64 ? resumeMime : undefined,
     candidate: {
       name:             candidate.name,
       title:            candidate.title,
