@@ -58,6 +58,21 @@ function findSkillsSection() {
     || null;
 }
 
+// Experience section finder — heading lookup, then anchors. Mirrors the skills
+// finder so the section is located even when the heading text/structure differs
+// across LinkedIn layouts (the cause of experience missing on some devices).
+function findExperienceSection() {
+  return findSectionByHeading('Experience')
+    || document.querySelector('#experience')?.closest('section')
+    || document.querySelector('a[href*="/details/experience"]')?.closest('section')
+    || null;
+}
+
+// Broad date/duration detector — months ("Jan 2020"), bare years ("2020"),
+// ranges ("2020 - Present"), durations ("3 yrs 2 mos"), or "Present". Used to
+// pick the dates line; the narrow month-only regex missed year-only layouts.
+const DATE_RE = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\b(?:19|20)\d{2}\b|\bPresent\b|\d+\s*yr|\d+\s*mo/i;
+
 function getSectionItems(section) {
   const expItems = section.querySelectorAll('div[componentkey^="entity-collection-item"]');
   if (expItems.length > 0) return Array.from(expItems);
@@ -199,17 +214,23 @@ function calcExperienceYears(experience) {
   }
   if (totalMonths > 0) return Math.round(totalMonths / 12 * 10) / 10;
 
-  // Fallback: earliest start year → now
-  let earliest = null;
+  // Fallback: earliest start year → latest end year (or now if a role is ongoing).
+  // Using latest end (not always "now") avoids over-counting profiles whose roles
+  // all ended in the past — a layout difference seen on some devices.
+  let earliest = null, latest = null, ongoing = false;
   const now = new Date().getFullYear();
   for (const exp of experience) {
-    const m = (exp.dates || '').match(/\b(19|20)(\d{2})\b/);
-    if (m) {
-      const y = parseInt(m[0]);
+    const d = exp.dates || '';
+    if (/present/i.test(d)) ongoing = true;
+    for (const ym of d.match(/\b(?:19|20)\d{2}\b/g) || []) {
+      const y = parseInt(ym, 10);
       if (!earliest || y < earliest) earliest = y;
+      if (!latest   || y > latest)   latest = y;
     }
   }
-  return earliest ? now - earliest : null;
+  if (!earliest) return null;
+  const end = ongoing ? now : (latest || now);
+  return Math.max(end - earliest, 0);
 }
 
 function extractProfile() {
@@ -256,9 +277,9 @@ function extractProfile() {
 
   // Experience
   const experience = [];
-  const expSection = findSectionByHeading('Experience');
+  const expSection = findExperienceSection();
   if (expSection) {
-    const dateRe = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}|\bPresent\b/i;
+    const dateRe = DATE_RE;
 
     for (const item of expSection.querySelectorAll('div[componentkey^="entity-collection-item"]')) {
       // Company name: first <p> in header area (not inside the roles ul)
@@ -294,10 +315,12 @@ function extractProfile() {
     // Fallback: old approach for profiles without entity-collection-item componentkeys
     if (experience.length === 0) {
       getSectionItems(expSection).forEach(item => {
-        const ps = item.querySelectorAll('p');
+        const ps = Array.from(item.querySelectorAll('p'));
         const title = ps[0]?.innerText.trim() || '';
         const company = ps[1]?.innerText.trim() || '';
-        const dates = ps[2]?.innerText.trim() || '';
+        // Don't assume ps[2] is the date line — scan for the first date-like <p>.
+        const dateP = ps.find(p => DATE_RE.test(p.innerText.trim()));
+        const dates = dateP ? dateP.innerText.trim() : (ps[2]?.innerText.trim() || '');
         if (title) experience.push({ title, company, dates });
       });
     }
@@ -490,22 +513,63 @@ async function closeOverlay() {
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 const cleanPhone = (s) => (s || '').replace(/\((mobile|home|work|cell)\)/ig, '').trim();
 
+// Image/asset filenames look like emails to EMAIL_RE — "icon@2x.png" has
+// local="icon", domain="2x.png". Reject these so an asset reference in the
+// overlay (e.g. "entity-circle-pile-chat@2x.png") is never taken as the email.
+const ASSET_EXT = /\.(png|jpe?g|gif|svg|webp|ico|bmp|css|m?js|json|woff2?|ttf|otf|eot|map|pdf|mp4|webm|avif)$/i;
+function isLikelyEmail(e) {
+  if (!e || !e.includes('@')) return false;
+  if (ASSET_EXT.test(e)) return false;     // image/font/asset filename
+  if (/@\d+x\b/i.test(e)) return false;    // retina marker "@2x", "@3x"
+  const domain = e.split('@')[1] || '';
+  return domain.includes('.') && EMAIL_RE.test(e);
+}
+
+// Extract a clean email from a text blob. Skips asset filenames, and handles the
+// SDUI layout (seen on some devices) where the field label is glued to the
+// address with no separator — "Emailjohn@x.com" — by stripping a leading label
+// token. Returns the first *plausible* email so an asset match in the same blob
+// doesn't shadow the real address.
+function cleanEmail(text) {
+  const all = (text || '').match(new RegExp(EMAIL_RE.source, 'g')) || [];
+  for (let e of all) {
+    const stripped = e.replace(/^(?:e-?mail(?:address)?|contactinfo|contact)/i, '');
+    if (stripped !== e && stripped.includes('@') && EMAIL_RE.test(stripped)) {
+      e = stripped.match(EMAIL_RE)[0];
+    }
+    if (isLikelyEmail(e)) return e;
+  }
+  return '';
+}
+
+// Pick the cleanest email under `root`. Prefers a mailto link, then the leaf
+// element whose entire text IS an email (avoids grabbing a parent's glued
+// "label+address" text), falling back to the first match anywhere.
+function pickEmail(root) {
+  const mailto = root.querySelector('a[href^="mailto:"]');
+  if (mailto) {
+    const e = cleanEmail(mailto.getAttribute('href').replace(/^mailto:/, ''));
+    if (e) return e;
+  }
+  let fallback = '';
+  for (const el of root.querySelectorAll('a, span, p, li, dd')) {
+    const text = (el.innerText || el.textContent || '').trim();
+    if (!text || text.length > 120 || text.includes('linkedin.com')) continue;
+    const e = cleanEmail(text);   // '' for asset filenames / invalid
+    if (!e) continue;
+    // Leaf whose whole text is the email = cleanest, no label glue possible.
+    if (text.replace(EMAIL_RE, '').trim() === '') return e;
+    if (!fallback) fallback = e;
+  }
+  return fallback;
+}
+
 // Parse email + phone out of a contact-info DOM/Document (server HTML or live modal).
 function parseContactFrom(root) {
   let email = '';
   let phone = '';
 
-  const mailtoEl = root.querySelector('a[href^="mailto:"]');
-  if (mailtoEl) email = mailtoEl.getAttribute('href').replace('mailto:', '').trim();
-
-  if (!email) {
-    for (const el of root.querySelectorAll('a, span, p, li')) {
-      const text = (el.textContent || '').trim();
-      if (EMAIL_RE.test(text) && !text.includes('linkedin.com') && text.length < 120) {
-        email = text.match(EMAIL_RE)[0]; break;
-      }
-    }
-  }
+  email = pickEmail(root);
 
   // Phone: find label <p>"Phone" → sibling value <p> (e.g. "9154262710 (Mobile)")
   for (const label of root.querySelectorAll('p, h3, h4, dt, span, label')) {
@@ -557,7 +621,7 @@ async function extractContactInfo() {
       // DOM parse found nothing — contact data often sits in embedded JSON
       // (SDUI/voyager payload) rather than rendered markup. Scan the raw HTML.
       const rawEmail = (html.match(new RegExp(EMAIL_RE.source, 'g')) || [])
-        .find(e => !/linkedin\.com$/i.test(e.split('@')[1] || ''));
+        .find(e => isLikelyEmail(e) && !/linkedin\.com$/i.test(e.split('@')[1] || ''));
       const rawPhone = (html.match(/"(?:phoneNumber|number)"\s*:\s*"(\+?[\d\s\-().]{7,18})"/) || [])[1] || '';
       if (rawEmail || rawPhone) {
         const got2 = { email: rawEmail || '', phone: rawPhone.trim() };
@@ -633,35 +697,22 @@ async function extractContactInfo() {
 
   let email = '';
   let phone = '';
-  const emailRe = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 
   // Scope to the contact-info overlay so we don't grab page numbers (follower counts etc).
   // Same finder as the readiness polls above, so we scrape the element we waited on.
   const ctx = findContactContainer() || document.body;
   console.log('[SCOUT] modal ctx tag:', ctx === document.body ? 'BODY (no modal found)' : ctx.tagName + ' ' + (ctx.getAttribute('componentkey') || ctx.getAttribute('role') || ''));
 
-  // Strategy 1: mailto link (other's profile — most reliable)
-  const mailtoEl = ctx.querySelector('a[href^="mailto:"]') || document.querySelector('a[href^="mailto:"]');
-  if (mailtoEl) {
-    email = mailtoEl.getAttribute('href').replace('mailto:', '').trim();
-    console.log('[SCOUT] email via mailto:', email);
-  }
+  // Strategy 1+3: mailto link, else the leaf element whose text IS an email.
+  // pickEmail prefers a clean leaf over a parent's glued "label+address" text
+  // and strips a glued label prefix (the SDUI layout that broke some devices).
+  email = pickEmail(ctx);
+  if (email) console.log('[SCOUT] email via pickEmail:', email);
 
   // Strategy 2: email input value (own profile edit view)
   if (!email) {
     for (const inp of ctx.querySelectorAll('input[type="email"], input[name*="email"], input[id*="email"]')) {
-      if (inp.value) { email = inp.value.trim(); console.log('[SCOUT] email via input:', email); break; }
-    }
-  }
-
-  // Strategy 3: regex scan of overlay text (catches all remaining cases)
-  if (!email) {
-    for (const el of ctx.querySelectorAll('a, span, p, li')) {
-      const text = (el.innerText || el.textContent || '').trim();
-      if (emailRe.test(text) && !text.includes('linkedin.com') && text.length < 120) {
-        const m = text.match(emailRe);
-        if (m) { email = m[0]; console.log('[SCOUT] email via regex:', email); break; }
-      }
+      if (inp.value) { email = cleanEmail(inp.value); console.log('[SCOUT] email via input:', email); break; }
     }
   }
 
