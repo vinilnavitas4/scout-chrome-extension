@@ -145,6 +145,13 @@ function parseRequirements(description) {
 // No string-match fallback: if the model can't load, scoring fails loudly.
 
 const SIM_THRESHOLD = 0.55; // tuned for all-MiniLM: related skills ~0.6+, unrelated <0.4
+// Cosines within ±SIM_MARGIN of the threshold flip between devices/browsers
+// because WASM/quantized embedding math isn't bit-identical. Only accept a
+// semantic match when clearly above the threshold; the deterministic lexical
+// rules (exact/alias/token-subset) cover the borderline band. Keeps scores
+// consistent across devices.
+const SIM_MARGIN    = 0.02;
+const SIM_ACCEPT    = SIM_THRESHOLD + SIM_MARGIN; // 0.57
 
 let creatingOffscreen = null; // de-dupe concurrent createDocument calls
 async function ensureOffscreen() {
@@ -186,7 +193,36 @@ function cosine(a, b) {
   return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 }
 
-// ── Score candidate against requirements ──────────────────────────────────────
+// ── Backend-authoritative scoring ─────────────────────────────────────────────
+// POST the candidate + JD id to the backend, which runs the embedding match and
+// the rubric server-side so the result is identical on every device. Returns
+// { score, label, rationale } on success, or null to signal "fall back to local"
+// (endpoint missing / network error / malformed response).
+
+async function backendScore(jd_id, candidate, resume_text) {
+  try {
+    const r = await fetch(`${BASE_URL}/api/scout/score`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jd_id,
+        resume_text: resume_text || undefined, // backend applies résumé-replace rule
+        candidate: {
+          skills:           candidate.skills || [],
+          experience_years: candidate.experience_years || 0,
+        },
+      }),
+    });
+    if (!r.ok) return null; // 404 until endpoint deployed, or 5xx → local fallback
+    const d = await r.json();
+    if (!d || typeof d.score !== "number") return null;
+    return { score: d.score, label: d.label || "", rationale: d.rationale || "" };
+  } catch (_) {
+    return null; // network/parse error → local fallback
+  }
+}
+
+// ── Score candidate against requirements (local fallback) ─────────────────────
 
 async function computeScore(requirements, jobTitle, candidate) {
   const { required_skills, preferred_skills, required_years } = requirements;
@@ -231,9 +267,10 @@ async function computeScore(requirements, jobTitle, candidate) {
         const [small, big] = tTok.size <= cTok.size ? [tTok, cTok] : [cTok, tTok];
         if ([...small].every(t => big.has(t))) return true;
       }
-      // Semantic fallback.
+      // Semantic fallback — clear-margin only, so borderline cosines don't flip
+      // the score across devices.
       const cv = vecMap.get(cn);
-      return tv && cv && cosine(tv, cv) >= SIM_THRESHOLD;
+      return tv && cv && cosine(tv, cv) >= SIM_ACCEPT;
     });
   }
 
@@ -508,15 +545,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // ── GET_SCORE — use cache if warm, else fetch live ────────────────────────
+  // ── GET_SCORE — backend-authoritative embedding score, local fallback ─────
+  // Scoring runs on the backend so every device/browser gets an identical score
+  // (client WASM embeddings diverge across browsers). If the backend endpoint is
+  // unavailable, fall back to the local offscreen embedding score so the UI keeps
+  // working until /api/scout/score is deployed.
   if (type === "GET_SCORE") {
     (async () => {
       try {
         const { jd_id, candidate, resume_text } = payload;
 
+        // 1) Backend scoring (consistent). Send only what scoring needs; the
+        //    backend applies the same résumé-replaces-skills rule.
+        const backend = await backendScore(jd_id, candidate, resume_text);
+        if (backend) {
+          console.log("[SCOUT] Score (backend):", backend);
+          sendResponse({ ok: true, data: backend, source: "backend" });
+          return;
+        }
+
+        // 2) Local fallback (per-device embeddings — may differ across browsers).
         let cached = jobCache.get(jd_id);
         if (!cached) {
-          // Cache miss (SW was restarted) — fetch live
           const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`);
           const job = await r.json();
           if (job.error) { sendResponse({ ok: false, error: job.error }); return; }
@@ -524,22 +574,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           jobCache.set(jd_id, cached);
         }
 
-        // Résumé attached: score against the résumé's skills ONLY (replace the
-        // LinkedIn-scraped skills). findKeywords uses the same TOOL_KEYWORDS
-        // vocabulary as JD parsing, so it yields exactly the skills that can match
-        // a requirement. Scoring-only — a copy is scored, candidate not mutated.
-        // Guard: if the résumé yielded no keywords (parse miss), keep LinkedIn
-        // skills so a parse failure doesn't collapse the score to the no-skills floor.
+        // Résumé attached → score against the résumé's skills only (replace).
+        // Guard: empty résumé keyword scan keeps LinkedIn skills (avoids floor).
         let scored = candidate;
         if (resume_text) {
           const resumeSkills = findKeywords(resume_text);
-          console.log(`[SCOUT] résumé skills (only):`, resumeSkills);
           if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
         }
 
         const result = await computeScore(cached.requirements, cached.title, scored);
-        console.log("[SCOUT] Score:", result, "(cache hit:", jobCache.has(jd_id), ")");
-        sendResponse({ ok: true, data: result });
+        console.log("[SCOUT] Score (local fallback):", result);
+        sendResponse({ ok: true, data: result, source: "local" });
       } catch (e) {
         console.error("[SCOUT] GET_SCORE error:", e.message);
         sendResponse({ ok: false, error: `Scoring failed: ${e.message}` });
