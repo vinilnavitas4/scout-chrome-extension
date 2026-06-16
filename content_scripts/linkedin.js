@@ -490,22 +490,52 @@ async function closeOverlay() {
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 const cleanPhone = (s) => (s || '').replace(/\((mobile|home|work|cell)\)/ig, '').trim();
 
+// Extract a clean email from a text blob. Handles the SDUI layout (seen on some
+// devices) where the field label is glued to the address with no separator —
+// "Emailjohn@x.com" — by stripping a leading label token from the local part.
+function cleanEmail(text) {
+  const m = (text || '').match(EMAIL_RE);
+  if (!m) return '';
+  let e = m[0];
+  // Strip a glued leading label: "Emailjohn@x.com" → "john@x.com",
+  // "ContactWith jane@x.com" handled by the regex; only act if the result is
+  // still a valid email so legit locals like "emailservice@..." survive.
+  const stripped = e.replace(/^(?:e-?mail(?:address)?|contactinfo|contact)/i, '');
+  if (stripped !== e && stripped.includes('@') && EMAIL_RE.test(stripped)) {
+    e = stripped.match(EMAIL_RE)[0];
+  }
+  return e;
+}
+
+// Pick the cleanest email under `root`. Prefers a mailto link, then the leaf
+// element whose entire text IS an email (avoids grabbing a parent's glued
+// "label+address" text), falling back to the first match anywhere.
+function pickEmail(root) {
+  const mailto = root.querySelector('a[href^="mailto:"]');
+  if (mailto) {
+    const e = cleanEmail(mailto.getAttribute('href').replace(/^mailto:/, ''));
+    if (e) return e;
+  }
+  let fallback = '';
+  for (const el of root.querySelectorAll('a, span, p, li, dd')) {
+    const text = (el.innerText || el.textContent || '').trim();
+    if (!text || text.length > 120 || text.includes('linkedin.com')) continue;
+    if (!EMAIL_RE.test(text)) continue;
+    // Leaf whose whole text is the email = cleanest, no label glue possible.
+    if (EMAIL_RE.test(text) && text.replace(EMAIL_RE, '').trim() === '') {
+      return cleanEmail(text);
+    }
+    if (!fallback) fallback = cleanEmail(text);
+  }
+  return fallback;
+}
+
 // Parse email + phone out of a contact-info DOM/Document (server HTML or live modal).
 function parseContactFrom(root) {
   let email = '';
   let phone = '';
 
-  const mailtoEl = root.querySelector('a[href^="mailto:"]');
-  if (mailtoEl) email = mailtoEl.getAttribute('href').replace('mailto:', '').trim();
-
-  if (!email) {
-    for (const el of root.querySelectorAll('a, span, p, li')) {
-      const text = (el.textContent || '').trim();
-      if (EMAIL_RE.test(text) && !text.includes('linkedin.com') && text.length < 120) {
-        email = text.match(EMAIL_RE)[0]; break;
-      }
-    }
-  }
+  email = pickEmail(root);
 
   // Phone: find label <p>"Phone" → sibling value <p> (e.g. "9154262710 (Mobile)")
   for (const label of root.querySelectorAll('p, h3, h4, dt, span, label')) {
@@ -633,35 +663,22 @@ async function extractContactInfo() {
 
   let email = '';
   let phone = '';
-  const emailRe = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 
   // Scope to the contact-info overlay so we don't grab page numbers (follower counts etc).
   // Same finder as the readiness polls above, so we scrape the element we waited on.
   const ctx = findContactContainer() || document.body;
   console.log('[SCOUT] modal ctx tag:', ctx === document.body ? 'BODY (no modal found)' : ctx.tagName + ' ' + (ctx.getAttribute('componentkey') || ctx.getAttribute('role') || ''));
 
-  // Strategy 1: mailto link (other's profile — most reliable)
-  const mailtoEl = ctx.querySelector('a[href^="mailto:"]') || document.querySelector('a[href^="mailto:"]');
-  if (mailtoEl) {
-    email = mailtoEl.getAttribute('href').replace('mailto:', '').trim();
-    console.log('[SCOUT] email via mailto:', email);
-  }
+  // Strategy 1+3: mailto link, else the leaf element whose text IS an email.
+  // pickEmail prefers a clean leaf over a parent's glued "label+address" text
+  // and strips a glued label prefix (the SDUI layout that broke some devices).
+  email = pickEmail(ctx);
+  if (email) console.log('[SCOUT] email via pickEmail:', email);
 
   // Strategy 2: email input value (own profile edit view)
   if (!email) {
     for (const inp of ctx.querySelectorAll('input[type="email"], input[name*="email"], input[id*="email"]')) {
-      if (inp.value) { email = inp.value.trim(); console.log('[SCOUT] email via input:', email); break; }
-    }
-  }
-
-  // Strategy 3: regex scan of overlay text (catches all remaining cases)
-  if (!email) {
-    for (const el of ctx.querySelectorAll('a, span, p, li')) {
-      const text = (el.innerText || el.textContent || '').trim();
-      if (emailRe.test(text) && !text.includes('linkedin.com') && text.length < 120) {
-        const m = text.match(emailRe);
-        if (m) { email = m[0]; console.log('[SCOUT] email via regex:', email); break; }
-      }
+      if (inp.value) { email = cleanEmail(inp.value); console.log('[SCOUT] email via input:', email); break; }
     }
   }
 
