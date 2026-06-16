@@ -448,7 +448,7 @@ function showVapiSection(applicantId) {
 }
 
 vapiBtn.addEventListener('click', async () => {
-  if (!candidate || !addedApplicantId || !selectedJd) return;
+  if (!candidate || !selectedJd) return;
 
   const phone = (candidate.phone || vapiPhoneInput?.value || '').trim();
   if (!phone) {
