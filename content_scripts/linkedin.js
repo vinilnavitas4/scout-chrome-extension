@@ -490,21 +490,33 @@ async function closeOverlay() {
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
 const cleanPhone = (s) => (s || '').replace(/\((mobile|home|work|cell)\)/ig, '').trim();
 
-// Extract a clean email from a text blob. Handles the SDUI layout (seen on some
-// devices) where the field label is glued to the address with no separator —
-// "Emailjohn@x.com" — by stripping a leading label token from the local part.
+// Image/asset filenames look like emails to EMAIL_RE — "icon@2x.png" has
+// local="icon", domain="2x.png". Reject these so an asset reference in the
+// overlay (e.g. "entity-circle-pile-chat@2x.png") is never taken as the email.
+const ASSET_EXT = /\.(png|jpe?g|gif|svg|webp|ico|bmp|css|m?js|json|woff2?|ttf|otf|eot|map|pdf|mp4|webm|avif)$/i;
+function isLikelyEmail(e) {
+  if (!e || !e.includes('@')) return false;
+  if (ASSET_EXT.test(e)) return false;     // image/font/asset filename
+  if (/@\d+x\b/i.test(e)) return false;    // retina marker "@2x", "@3x"
+  const domain = e.split('@')[1] || '';
+  return domain.includes('.') && EMAIL_RE.test(e);
+}
+
+// Extract a clean email from a text blob. Skips asset filenames, and handles the
+// SDUI layout (seen on some devices) where the field label is glued to the
+// address with no separator — "Emailjohn@x.com" — by stripping a leading label
+// token. Returns the first *plausible* email so an asset match in the same blob
+// doesn't shadow the real address.
 function cleanEmail(text) {
-  const m = (text || '').match(EMAIL_RE);
-  if (!m) return '';
-  let e = m[0];
-  // Strip a glued leading label: "Emailjohn@x.com" → "john@x.com",
-  // "ContactWith jane@x.com" handled by the regex; only act if the result is
-  // still a valid email so legit locals like "emailservice@..." survive.
-  const stripped = e.replace(/^(?:e-?mail(?:address)?|contactinfo|contact)/i, '');
-  if (stripped !== e && stripped.includes('@') && EMAIL_RE.test(stripped)) {
-    e = stripped.match(EMAIL_RE)[0];
+  const all = (text || '').match(new RegExp(EMAIL_RE.source, 'g')) || [];
+  for (let e of all) {
+    const stripped = e.replace(/^(?:e-?mail(?:address)?|contactinfo|contact)/i, '');
+    if (stripped !== e && stripped.includes('@') && EMAIL_RE.test(stripped)) {
+      e = stripped.match(EMAIL_RE)[0];
+    }
+    if (isLikelyEmail(e)) return e;
   }
-  return e;
+  return '';
 }
 
 // Pick the cleanest email under `root`. Prefers a mailto link, then the leaf
@@ -520,12 +532,11 @@ function pickEmail(root) {
   for (const el of root.querySelectorAll('a, span, p, li, dd')) {
     const text = (el.innerText || el.textContent || '').trim();
     if (!text || text.length > 120 || text.includes('linkedin.com')) continue;
-    if (!EMAIL_RE.test(text)) continue;
+    const e = cleanEmail(text);   // '' for asset filenames / invalid
+    if (!e) continue;
     // Leaf whose whole text is the email = cleanest, no label glue possible.
-    if (EMAIL_RE.test(text) && text.replace(EMAIL_RE, '').trim() === '') {
-      return cleanEmail(text);
-    }
-    if (!fallback) fallback = cleanEmail(text);
+    if (text.replace(EMAIL_RE, '').trim() === '') return e;
+    if (!fallback) fallback = e;
   }
   return fallback;
 }
@@ -587,7 +598,7 @@ async function extractContactInfo() {
       // DOM parse found nothing — contact data often sits in embedded JSON
       // (SDUI/voyager payload) rather than rendered markup. Scan the raw HTML.
       const rawEmail = (html.match(new RegExp(EMAIL_RE.source, 'g')) || [])
-        .find(e => !/linkedin\.com$/i.test(e.split('@')[1] || ''));
+        .find(e => isLikelyEmail(e) && !/linkedin\.com$/i.test(e.split('@')[1] || ''));
       const rawPhone = (html.match(/"(?:phoneNumber|number)"\s*:\s*"(\+?[\d\s\-().]{7,18})"/) || [])[1] || '';
       if (rawEmail || rawPhone) {
         const got2 = { email: rawEmail || '', phone: rawPhone.trim() };
