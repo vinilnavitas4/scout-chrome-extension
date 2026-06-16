@@ -285,6 +285,44 @@ async function computeScore(requirements, jobTitle, candidate) {
   return { score, label, rationale: parts.join(" ") };
 }
 
+// ── Job list fetch + cache ────────────────────────────────────────────────────
+// The /api/scout/jobs call is the slow part of opening the panel (Azure cold
+// start). Cache the mapped list in storage.local so repeat opens populate the
+// dropdown instantly, then revalidate in the background.
+
+const JOBS_CACHE_KEY = "scout_jobs_cache";
+
+async function fetchJobs() {
+  const r    = await fetch(`${BASE_URL}/api/scout/jobs`);
+  const data = await r.json();
+  return (data.jobs || []).map(j => ({
+    id:     j.id,
+    title:  j.title,
+    client: j.internal_code || [j.city, j.state].filter(Boolean).join(", ") || j.type || ""
+  }));
+}
+
+async function getCachedJobs() {
+  const { [JOBS_CACHE_KEY]: c } = await chrome.storage.local.get(JOBS_CACHE_KEY);
+  return c && Array.isArray(c.jobs) ? c : null;
+}
+
+async function refreshJobsCache() {
+  try {
+    const jobs = await fetchJobs();
+    await chrome.storage.local.set({ [JOBS_CACHE_KEY]: { ts: Date.now(), jobs } });
+    return jobs;
+  } catch (e) {
+    console.error("[SCOUT] refreshJobsCache:", e.message);
+    return null;
+  }
+}
+
+// Prime the cache + model when the browser/extension starts, so the first panel
+// open is already warm instead of paying the cold fetch then.
+chrome.runtime.onStartup?.addListener(() => { refreshJobsCache(); ensureOffscreen().catch(() => {}); });
+chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); });
+
 // ── Pre-fetch all job descriptions in background ──────────────────────────────
 // Called after GET_JDS returns. Populates jobCache so GET_SCORE is instant.
 
@@ -428,20 +466,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // ── GET_JDS — fetch active jobs, then pre-warm description cache ──────────
+  // ── GET_JDS — serve cached list instantly, then revalidate ───────────────
   if (type === "GET_JDS") {
     (async () => {
       try {
         // fresh = user hit refresh: drop cached JD requirements so the next
         // GET_SCORE re-fetches and re-parses descriptions from the backend.
         if (message.fresh) jobCache.clear();
-        const r    = await fetch(`${BASE_URL}/api/scout/jobs`);
-        const data = await r.json();
-        const jobs = (data.jobs || []).map(j => ({
-          id:     j.id,
-          title:  j.title,
-          client: j.internal_code || [j.city, j.state].filter(Boolean).join(", ") || j.type || ""
-        }));
+
+        // Stale-while-revalidate: serve ANY cached list immediately (even past
+        // TTL) so the dropdown never waits on the network after the first-ever
+        // load — Azure cold starts can take many seconds. Always revalidate in
+        // the background so next open is current. Skipped only on forced refresh.
+        if (!message.fresh) {
+          const cached = await getCachedJobs();
+          if (cached && cached.jobs.length) {
+            sendResponse({ ok: true, data: cached.jobs });
+            ensureOffscreen().catch(() => {});
+            prefetchJobDescriptions(cached.jobs);
+            refreshJobsCache(); // silent background revalidate
+            return;
+          }
+        }
+
+        // No usable cache (or forced fresh): fetch live, then cache.
+        const jobs = await fetchJobs();
+        await chrome.storage.local.set({ [JOBS_CACHE_KEY]: { ts: Date.now(), jobs } });
         sendResponse({ ok: true, data: jobs });
         // Warm up the offscreen model + pre-fetch JD descriptions in parallel.
         // Neither is awaited — popup already has the job list.
@@ -449,6 +499,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         prefetchJobDescriptions(jobs);
       } catch (e) {
         console.error("[SCOUT] GET_JDS error:", e.message);
+        // Last resort: serve a stale cache if the live fetch failed.
+        const cached = await getCachedJobs().catch(() => null);
+        if (cached) { sendResponse({ ok: true, data: cached.jobs }); return; }
         sendResponse({ ok: false, error: `Failed to load jobs: ${e.message}` });
       }
     })();
@@ -459,7 +512,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === "GET_SCORE") {
     (async () => {
       try {
-        const { jd_id, candidate } = payload;
+        const { jd_id, candidate, resume_text } = payload;
 
         let cached = jobCache.get(jd_id);
         if (!cached) {
@@ -471,7 +524,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           jobCache.set(jd_id, cached);
         }
 
-        const result = await computeScore(cached.requirements, cached.title, candidate);
+        // Résumé attached: score against the résumé's skills ONLY (replace the
+        // LinkedIn-scraped skills). findKeywords uses the same TOOL_KEYWORDS
+        // vocabulary as JD parsing, so it yields exactly the skills that can match
+        // a requirement. Scoring-only — a copy is scored, candidate not mutated.
+        // Guard: if the résumé yielded no keywords (parse miss), keep LinkedIn
+        // skills so a parse failure doesn't collapse the score to the no-skills floor.
+        let scored = candidate;
+        if (resume_text) {
+          const resumeSkills = findKeywords(resume_text);
+          console.log(`[SCOUT] résumé skills (only):`, resumeSkills);
+          if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
+        }
+
+        const result = await computeScore(cached.requirements, cached.title, scored);
         console.log("[SCOUT] Score:", result, "(cache hit:", jobCache.has(jd_id), ")");
         sendResponse({ ok: true, data: result });
       } catch (e) {

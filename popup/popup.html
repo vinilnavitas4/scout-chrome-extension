@@ -53,6 +53,7 @@
 
         <!-- Score card -->
         <div class="score-card" id="score-card">
+          <div class="score-heading" id="score-heading" style="display:none">Updated Score</div>
           <div class="score-circle" id="score-circle">
             <span class="score-number" id="score-number">—</span>
             <small>/100</small>
@@ -108,6 +109,9 @@
 
   <div class="footer">SCOUT · Navitas AI Labs</div>
 
+  <!-- Résumé text parsers (local, no network): PDF.js + fflate (DOCX unzip) -->
+  <script src="../lib/pdf.min.js"></script>
+  <script src="../lib/fflate.min.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
