@@ -27,6 +27,8 @@ const matchSection   = document.getElementById('match-section');
 const closeBtn       = document.getElementById('close-btn');
 const refreshBtn     = document.getElementById('refresh-btn');
 const vapiSection    = document.getElementById('vapi-section');
+const vapiPhoneRow   = document.getElementById('vapi-phone-row');
+const vapiPhoneInput = document.getElementById('vapi-phone-input');
 const vapiBtn        = document.getElementById('vapi-btn');
 const vapiStatusEl   = document.getElementById('vapi-status');
 const vapiResultEl   = document.getElementById('vapi-result');
@@ -439,20 +441,26 @@ function showVapiSection(applicantId) {
 
   const phone = candidate?.phone || '';
   if (!phone) {
-    vapiBtn.disabled    = true;
-    vapiBtn.textContent = '📞 Call with AI (no phone number)';
-    return;
+    vapiPhoneRow.style.display  = 'block';
+    vapiPhoneInput.value        = '';
+    vapiBtn.textContent         = '📞 Call with AI';
+    vapiBtn.disabled            = true;  // enabled once number typed
+    vapiPhoneInput.addEventListener('input', () => {
+      vapiBtn.disabled = vapiPhoneInput.value.trim().length < 7;
+    }, { once: false });
+  } else {
+    vapiPhoneRow.style.display = 'none';
+    vapiBtn.disabled           = false;
+    vapiBtn.textContent        = '📞 Call with AI';
   }
-  vapiBtn.disabled    = false;
-  vapiBtn.textContent = '📞 Call with AI';
 }
 
 vapiBtn.addEventListener('click', async () => {
   if (!candidate || !addedApplicantId || !selectedJd) return;
 
-  const phone = candidate.phone || '';
+  const phone = (candidate.phone || vapiPhoneInput?.value || '').trim();
   if (!phone) {
-    vapiStatusEl.textContent = 'No phone number on this profile.';
+    vapiStatusEl.textContent   = 'Enter a phone number above.';
     vapiStatusEl.style.display = 'block';
     return;
   }

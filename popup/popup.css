@@ -523,6 +523,30 @@ body {
   50%       { opacity: 0.7; }
 }
 
+.vapi-phone-row {
+  margin-bottom: 6px;
+}
+
+.vapi-phone-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1.5px solid #ddd6fe;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #111827;
+  background: #faf5ff;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.vapi-phone-input:focus {
+  border-color: #7c3aed;
+}
+
+.vapi-phone-input::placeholder {
+  color: #a78bfa;
+}
+
 .vapi-status {
   margin-top: 6px;
   font-size: 11px;
