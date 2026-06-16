@@ -58,6 +58,21 @@ function findSkillsSection() {
     || null;
 }
 
+// Experience section finder — heading lookup, then anchors. Mirrors the skills
+// finder so the section is located even when the heading text/structure differs
+// across LinkedIn layouts (the cause of experience missing on some devices).
+function findExperienceSection() {
+  return findSectionByHeading('Experience')
+    || document.querySelector('#experience')?.closest('section')
+    || document.querySelector('a[href*="/details/experience"]')?.closest('section')
+    || null;
+}
+
+// Broad date/duration detector — months ("Jan 2020"), bare years ("2020"),
+// ranges ("2020 - Present"), durations ("3 yrs 2 mos"), or "Present". Used to
+// pick the dates line; the narrow month-only regex missed year-only layouts.
+const DATE_RE = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\b(?:19|20)\d{2}\b|\bPresent\b|\d+\s*yr|\d+\s*mo/i;
+
 function getSectionItems(section) {
   const expItems = section.querySelectorAll('div[componentkey^="entity-collection-item"]');
   if (expItems.length > 0) return Array.from(expItems);
@@ -199,17 +214,23 @@ function calcExperienceYears(experience) {
   }
   if (totalMonths > 0) return Math.round(totalMonths / 12 * 10) / 10;
 
-  // Fallback: earliest start year → now
-  let earliest = null;
+  // Fallback: earliest start year → latest end year (or now if a role is ongoing).
+  // Using latest end (not always "now") avoids over-counting profiles whose roles
+  // all ended in the past — a layout difference seen on some devices.
+  let earliest = null, latest = null, ongoing = false;
   const now = new Date().getFullYear();
   for (const exp of experience) {
-    const m = (exp.dates || '').match(/\b(19|20)(\d{2})\b/);
-    if (m) {
-      const y = parseInt(m[0]);
+    const d = exp.dates || '';
+    if (/present/i.test(d)) ongoing = true;
+    for (const ym of d.match(/\b(?:19|20)\d{2}\b/g) || []) {
+      const y = parseInt(ym, 10);
       if (!earliest || y < earliest) earliest = y;
+      if (!latest   || y > latest)   latest = y;
     }
   }
-  return earliest ? now - earliest : null;
+  if (!earliest) return null;
+  const end = ongoing ? now : (latest || now);
+  return Math.max(end - earliest, 0);
 }
 
 function extractProfile() {
@@ -256,9 +277,9 @@ function extractProfile() {
 
   // Experience
   const experience = [];
-  const expSection = findSectionByHeading('Experience');
+  const expSection = findExperienceSection();
   if (expSection) {
-    const dateRe = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}|\bPresent\b/i;
+    const dateRe = DATE_RE;
 
     for (const item of expSection.querySelectorAll('div[componentkey^="entity-collection-item"]')) {
       // Company name: first <p> in header area (not inside the roles ul)
@@ -294,10 +315,12 @@ function extractProfile() {
     // Fallback: old approach for profiles without entity-collection-item componentkeys
     if (experience.length === 0) {
       getSectionItems(expSection).forEach(item => {
-        const ps = item.querySelectorAll('p');
+        const ps = Array.from(item.querySelectorAll('p'));
         const title = ps[0]?.innerText.trim() || '';
         const company = ps[1]?.innerText.trim() || '';
-        const dates = ps[2]?.innerText.trim() || '';
+        // Don't assume ps[2] is the date line — scan for the first date-like <p>.
+        const dateP = ps.find(p => DATE_RE.test(p.innerText.trim()));
+        const dates = dateP ? dateP.innerText.trim() : (ps[2]?.innerText.trim() || '');
         if (title) experience.push({ title, company, dates });
       });
     }
