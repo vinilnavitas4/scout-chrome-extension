@@ -193,36 +193,7 @@ function cosine(a, b) {
   return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 }
 
-// ── Backend-authoritative scoring ─────────────────────────────────────────────
-// POST the candidate + JD id to the backend, which runs the embedding match and
-// the rubric server-side so the result is identical on every device. Returns
-// { score, label, rationale } on success, or null to signal "fall back to local"
-// (endpoint missing / network error / malformed response).
-
-async function backendScore(jd_id, candidate, resume_text) {
-  try {
-    const r = await fetch(`${BASE_URL}/api/scout/score`, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jd_id,
-        resume_text: resume_text || undefined, // backend applies résumé-replace rule
-        candidate: {
-          skills:           candidate.skills || [],
-          experience_years: candidate.experience_years || 0,
-        },
-      }),
-    });
-    if (!r.ok) return null; // 404 until endpoint deployed, or 5xx → local fallback
-    const d = await r.json();
-    if (!d || typeof d.score !== "number") return null;
-    return { score: d.score, label: d.label || "", rationale: d.rationale || "" };
-  } catch (_) {
-    return null; // network/parse error → local fallback
-  }
-}
-
-// ── Score candidate against requirements (local fallback) ─────────────────────
+// ── Score candidate against requirements ──────────────────────────────────────
 
 async function computeScore(requirements, jobTitle, candidate) {
   const { required_skills, preferred_skills, required_years } = requirements;
@@ -545,26 +516,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // ── GET_SCORE — backend-authoritative embedding score, local fallback ─────
-  // Scoring runs on the backend so every device/browser gets an identical score
-  // (client WASM embeddings diverge across browsers). If the backend endpoint is
-  // unavailable, fall back to the local offscreen embedding score so the UI keeps
-  // working until /api/scout/score is deployed.
+  // ── GET_SCORE — local embedding score, JD description cached ──────────────
+  // Scoring runs client-side in the offscreen MiniLM model. Cross-device
+  // consistency comes from deterministic lexical matching plus a clear-margin
+  // semantic threshold (SIM_ACCEPT) so borderline cosines don't flip the score.
   if (type === "GET_SCORE") {
     (async () => {
       try {
         const { jd_id, candidate, resume_text } = payload;
 
-        // 1) Backend scoring (consistent). Send only what scoring needs; the
-        //    backend applies the same résumé-replaces-skills rule.
-        const backend = await backendScore(jd_id, candidate, resume_text);
-        if (backend) {
-          console.log("[SCOUT] Score (backend):", backend);
-          sendResponse({ ok: true, data: backend, source: "backend" });
-          return;
-        }
-
-        // 2) Local fallback (per-device embeddings — may differ across browsers).
         let cached = jobCache.get(jd_id);
         if (!cached) {
           const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`);
@@ -583,8 +543,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const result = await computeScore(cached.requirements, cached.title, scored);
-        console.log("[SCOUT] Score (local fallback):", result);
-        sendResponse({ ok: true, data: result, source: "local" });
+        console.log("[SCOUT] Score:", result);
+        sendResponse({ ok: true, data: result });
       } catch (e) {
         console.error("[SCOUT] GET_SCORE error:", e.message);
         sendResponse({ ok: false, error: `Scoring failed: ${e.message}` });
