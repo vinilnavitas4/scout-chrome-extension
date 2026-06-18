@@ -534,6 +534,64 @@ body {
   50%       { opacity: 0.7; }
 }
 
+.vapi-schedule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #6b7280;
+  cursor: pointer;
+  user-select: none;
+}
+.vapi-schedule-toggle input { cursor: pointer; }
+
+.vapi-schedule-row {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #ede9fe;
+  border-radius: 6px;
+  background: #faf5ff;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vapi-dt-input,
+.vapi-tz-select {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1.5px solid #ddd6fe;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #111827;
+  background: #fff;
+  outline: none;
+}
+.vapi-dt-input:focus,
+.vapi-tz-select:focus { border-color: #7c3aed; }
+
+.btn-vapi-schedule {
+  width: 100%;
+  padding: 9px;
+  border: 1.5px solid #7c3aed;
+  border-radius: 6px;
+  background: #7c3aed;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-vapi-schedule:hover:not(:disabled) { background: #6d28d9; }
+.btn-vapi-schedule:disabled { background: #c4b5fd; border-color: #c4b5fd; cursor: not-allowed; }
+
+.vapi-schedule-hint {
+  font-size: 10px;
+  color: #9ca3af;
+  text-align: center;
+}
+
 .vapi-phone-row {
   margin-bottom: 6px;
 }

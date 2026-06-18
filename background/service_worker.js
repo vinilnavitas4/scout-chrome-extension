@@ -436,6 +436,23 @@ chrome.windows.onRemoved.addListener(async (id) => {
   if (scout_float_win === id) await chrome.storage.session.remove("scout_float_win");
 });
 
+// ── JazzHR session token ──────────────────────────────────────────────────────
+// Grab the recruiter's active JazzHR session cookie so the backend can update the
+// candidate's workflow step after a call without a separate login (JazzHR has
+// email-OTP MFA so server-side login isn't viable). Times out so a missing cookies
+// permission never hangs the message port.
+async function getJazzhrToken() {
+  try {
+    const cookie = await Promise.race([
+      chrome.cookies.get({ url: "https://api.jazz.co/", name: "sandcastle_ticket" }),
+      new Promise(resolve => setTimeout(() => resolve(null), 1500)),
+    ]);
+    return cookie?.value || "";
+  } catch (_) {
+    return "";
+  }
+}
+
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -597,11 +614,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === "ADD_CANDIDATE") {
     (async () => {
       try {
-        const { job_id, candidate, resume_b64, resume_name, resume_mime } = payload;
+        const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime } = payload;
+        const jazzhr_token = await getJazzhrToken();
         const r = await fetch(`${BASE_URL}/api/scout/candidates`, {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ job_id, candidate, resume_b64, resume_name, resume_mime }),
+          body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token }),
         });
         const text = await r.text();
         let data;
@@ -634,18 +652,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === "INITIATE_CALL") {
     (async () => {
       try {
-        // Grab the recruiter's active JazzHR session token so the backend can
-        // update the candidate's workflow step after the call without needing
-        // a separate login (JazzHR has email-OTP MFA so we can't log in server-side).
-        let jazzhr_token = "";
-        try {
-          const cookie = await Promise.race([
-            chrome.cookies.get({ url: "https://api.jazz.co/", name: "sandcastle_ticket" }),
-            new Promise(resolve => setTimeout(() => resolve(null), 1500)),
-          ]);
-          jazzhr_token = cookie?.value || "";
-        } catch (_) { /* cookies permission unavailable — non-fatal */ }
-
+        const jazzhr_token = await getJazzhrToken();
         const r = await fetch(`${BASE_URL}/api/scout/initiate-call`, {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
@@ -658,6 +665,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         );
       } catch (e) {
         console.error("[SCOUT] INITIATE_CALL error:", e.message);
+        sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
+      }
+    })();
+    return true;
+  }
+
+  // ── SCHEDULE_CALL — schedule a Vapi AI phone screen for later ──────────────
+  if (type === "SCHEDULE_CALL") {
+    (async () => {
+      try {
+        const jazzhr_token = await getJazzhrToken();
+        const r = await fetch(`${BASE_URL}/api/scout/schedule-call`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ ...payload, jazzhr_token }),
+        });
+        const data = await r.json();
+        sendResponse(data.ok
+          ? { ok: true, scheduled_id: data.scheduled_id, scheduled_at: data.scheduled_at }
+          : { ok: false, error: data.error || "Scheduling failed" }
+        );
+      } catch (e) {
+        console.error("[SCOUT] SCHEDULE_CALL error:", e.message);
         sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
       }
     })();
