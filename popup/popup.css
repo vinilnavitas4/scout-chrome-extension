@@ -141,6 +141,21 @@ body {
   text-decoration: underline;
 }
 
+.profile-phone-input {
+  font-size: 11px;
+  color: #0f172a;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 3px 6px;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.profile-phone-input:focus {
+  border-color: #0284c7;
+}
+
 /* ── Skeleton loaders ── */
 .skel {
   display: inline-block;

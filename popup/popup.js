@@ -5,6 +5,7 @@ const profileLoc     = document.getElementById('profile-location');
 const profileExp     = document.getElementById('profile-exp');
 const profileEmail   = document.getElementById('profile-email');
 const profilePhone   = document.getElementById('profile-phone');
+const profilePhoneInput = document.getElementById('profile-phone-input');
 const sourceBadge    = document.getElementById('source-badge');
 const jdSelect       = document.getElementById('jd-select');
 const jdSpinner      = document.getElementById('jd-spinner');
@@ -112,6 +113,14 @@ resumeClear.addEventListener('click', () => {
   resumeClear.style.display = 'none';
   // Re-score without the résumé contribution.
   if (selectedJd && candidate) requestScore(selectedJd);
+});
+
+// Manual phone entry — always editable. Writes straight to candidate.phone so
+// ADD_CANDIDATE (normalizePhone) and the Vapi call button pick it up.
+profilePhoneInput.addEventListener('input', () => {
+  if (!candidate) return;
+  candidate.phone = profilePhoneInput.value.trim();
+  if (vapiSection && vapiSection.style.display === 'block') showVapiSection(addedApplicantId);
 });
 
 function fileToB64(file) {
@@ -357,13 +366,10 @@ function renderProfile(p) {
   } else {
     profileEmail.style.display = 'none';
   }
-  if (p.phone) {
-    profilePhone.textContent = p.phone;
-    profilePhone.href = `tel:${p.phone.replace(/[^\d+]/g, '')}`;
-    profilePhone.style.display = 'block';
-  } else {
-    profilePhone.style.display = 'none';
-  }
+  // Phone is always an editable input — prefilled from LinkedIn when found,
+  // blank (recruiter types it) otherwise. The read-only anchor is unused.
+  profilePhone.style.display = 'none';
+  profilePhoneInput.value = p.phone || '';
 
   profileCard.classList.add('show');
   // Clear any "matching" status that was shown while waiting

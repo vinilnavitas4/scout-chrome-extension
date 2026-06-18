@@ -906,27 +906,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   return true;
 });
 
-// Auto-start: extract as soon as the profile page loads, and again on SPA
-// navigation between profiles — the panel then finds the result ready.
-// window flag guards against double timers if the script is injected twice.
+// No auto-start. Extraction runs only when the user clicks the extension
+// (toolbar click → side panel → popup sends getProfile → runExtraction).
+// On page (re)load, just clear any stale floating panel from the previous page.
 if (!window.__scoutAutoWatch) {
   window.__scoutAutoWatch = true;
-  // Page (re)load: close any stale floating panel from the previous page —
-  // a fresh one opens when this load's extraction completes.
   chrome.runtime.sendMessage({ type: 'CLOSE_FLOAT' }, () => void chrome.runtime.lastError);
-  setTimeout(() => runExtraction(), 1500);
-  let lastSlug = profileSlug(window.location.href);
-  setInterval(() => {
-    const slug = profileSlug(window.location.href);
-    // Slug change only — sub-routes the extraction itself visits
-    // (/details/skills, /overlay/contact-info) keep the same slug.
-    if (slug && slug !== lastSlug) {
-      lastSlug = slug;
-      console.log('[SCOUT] Profile navigation detected, re-extracting:', slug);
-      // New profile: drop the old profile's floating panel right away —
-      // a fresh one opens when this profile's extraction completes.
-      chrome.runtime.sendMessage({ type: 'CLOSE_FLOAT' }, () => void chrome.runtime.lastError);
-      runExtraction();
-    }
-  }, 1000);
 }
