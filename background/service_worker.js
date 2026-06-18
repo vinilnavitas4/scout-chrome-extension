@@ -1,5 +1,14 @@
 const BASE_URL = "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
+// Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
+// Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
+const SCOUT_KEY = "scout_a5ThvEKUjRbZmlpDyKQOF9WcKb2fiEl8Vat-8f_3Bzg";
+
+// Standard JSON headers + Scout key for all backend calls.
+function scoutHeaders(extra) {
+  return { "Content-Type": "application/json", "X-Scout-Key": SCOUT_KEY, ...(extra || {}) };
+}
+
 // Open the side panel when the toolbar icon is clicked.
 // Side panel stays open across outside clicks (unlike an action popup).
 chrome.sidePanel
@@ -203,7 +212,7 @@ async function backendScore(jd_id, candidate, resume_text) {
   try {
     const r = await fetch(`${BASE_URL}/api/scout/score`, {
       method:  "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: scoutHeaders(),
       body: JSON.stringify({
         jd_id,
         resume_text: resume_text || undefined, // backend applies résumé-replace rule
@@ -618,7 +627,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const jazzhr_token = await getJazzhrToken();
         const r = await fetch(`${BASE_URL}/api/scout/candidates`, {
           method:  "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: scoutHeaders(),
           body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token }),
         });
         const text = await r.text();
@@ -655,7 +664,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const jazzhr_token = await getJazzhrToken();
         const r = await fetch(`${BASE_URL}/api/scout/initiate-call`, {
           method:  "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: scoutHeaders(),
           body:    JSON.stringify({ ...payload, jazzhr_token }),
         });
         const data = await r.json();
@@ -678,7 +687,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const jazzhr_token = await getJazzhrToken();
         const r = await fetch(`${BASE_URL}/api/scout/schedule-call`, {
           method:  "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: scoutHeaders(),
           body:    JSON.stringify({ ...payload, jazzhr_token }),
         });
         const data = await r.json();
@@ -699,7 +708,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         const { applicant_id } = payload;
-        const r    = await fetch(`${BASE_URL}/api/scout/calls/${applicant_id}`);
+        const r    = await fetch(`${BASE_URL}/api/scout/calls/${applicant_id}`, { headers: scoutHeaders() });
         const data = await r.json();
         sendResponse(data);
       } catch (e) {
