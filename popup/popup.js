@@ -5,6 +5,7 @@ const profileLoc     = document.getElementById('profile-location');
 const profileExp     = document.getElementById('profile-exp');
 const profileEmail   = document.getElementById('profile-email');
 const profilePhone   = document.getElementById('profile-phone');
+const profilePhoneFound = document.getElementById('profile-phone-found');
 const sourceBadge    = document.getElementById('source-badge');
 const jdSelect       = document.getElementById('jd-select');
 const jdSpinner      = document.getElementById('jd-spinner');
@@ -55,6 +56,17 @@ refreshBtn.addEventListener('click', async () => {
 
   loadJds(selectedJd, true);   // re-fetch JD list + clear SW description cache, keep selection
   startScan(tab.id, true);     // force = bypass content-script extraction cache
+});
+
+// Phone found on LinkedIn / résumé — used unless the recruiter types a manual
+// override into the editable field.
+let foundPhone = '';
+
+// Manual phone edits flow straight into the candidate so Add-to-SCOUT and the
+// AI call both use the recruiter-entered number. Empty field falls back to the
+// found number.
+profilePhone.addEventListener('input', () => {
+  if (candidate) candidate.phone = profilePhone.value.trim() || foundPhone;
 });
 
 let candidate       = null;   // set when profile fetch completes
@@ -364,13 +376,18 @@ function renderProfile(p) {
   } else {
     profileEmail.style.display = 'none';
   }
-  if (p.phone) {
-    profilePhone.textContent = p.phone;
-    profilePhone.href = `tel:${p.phone.replace(/[^\d+]/g, '')}`;
-    profilePhone.style.display = 'block';
+  // Phone found on LinkedIn/résumé shows read-only above; the editable field
+  // stays empty for a manual add/override. candidate.phone defaults to the
+  // found number until the recruiter types one in.
+  foundPhone = p.phone || '';
+  if (foundPhone) {
+    profilePhoneFound.textContent = foundPhone;
+    profilePhoneFound.href = `tel:${foundPhone.replace(/[^\d+]/g, '')}`;
+    profilePhoneFound.style.display = 'block';
   } else {
-    profilePhone.style.display = 'none';
+    profilePhoneFound.style.display = 'none';
   }
+  profilePhone.value = '';
 
   profileCard.classList.add('show');
   // Clear any "matching" status that was shown while waiting
@@ -579,7 +596,7 @@ function showVapiSection(applicantId) {
 vapiBtn.addEventListener('click', async () => {
   if (!candidate || !selectedJd) return;
 
-  const phone = (candidate.phone || vapiPhoneInput?.value || '').trim();
+  const phone = normalizePhone(candidate.phone || vapiPhoneInput?.value || '');
   if (!phone) {
     vapiPhoneRow.style.display = 'block';
     vapiPhoneInput.focus();
@@ -636,7 +653,7 @@ if (vapiScheduleBtn) {
   vapiScheduleBtn.addEventListener('click', async () => {
     if (!candidate || !selectedJd) return;
 
-    const phone = (candidate.phone || vapiPhoneInput?.value || '').trim();
+    const phone = normalizePhone(candidate.phone || vapiPhoneInput?.value || '');
     if (!phone) {
       vapiPhoneRow.style.display = 'block';
       vapiPhoneInput.focus();
