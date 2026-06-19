@@ -339,7 +339,7 @@ async function computeScore(requirements, jobTitle, candidate) {
 const JOBS_CACHE_KEY = "scout_jobs_cache";
 
 async function fetchJobs() {
-  const r    = await fetch(`${BASE_URL}/api/scout/jobs`);
+  const r    = await fetch(`${BASE_URL}/api/scout/jobs`, { headers: scoutHeaders() });
   const data = await r.json();
   return (data.jobs || []).map(j => ({
     id:     j.id,
@@ -375,7 +375,7 @@ chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); });
 async function prefetchJobDescriptions(jobs) {
   await Promise.allSettled(jobs.map(async (job) => {
     try {
-      const r   = await fetch(`${BASE_URL}/api/scout/jobs/${job.id}`);
+      const r   = await fetch(`${BASE_URL}/api/scout/jobs/${job.id}`, { headers: scoutHeaders() });
       const data = await r.json();
       if (!data.error) {
         jobCache.set(job.id, {
@@ -593,7 +593,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // 2) Local fallback (per-device embeddings — may differ across browsers).
         let cached = jobCache.get(jd_id);
         if (!cached) {
-          const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`);
+          const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`, { headers: scoutHeaders() });
           const job = await r.json();
           if (job.error) { sendResponse({ ok: false, error: job.error }); return; }
           cached = { title: job.title, requirements: parseRequirements(job.description || "") };
