@@ -484,12 +484,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       () => sendResponse({ ok: true }),
       async () => {
         try {
-          // Side panel already open? It shows the result itself — a floating
-          // window on top would duplicate the UI.
+          // No gesture available. We never open a floating popup window — side
+          // panel only. If it's already open it shows the result itself; report
+          // ok. Otherwise report failure so the content script arms a one-time
+          // gesture listener and retries OPEN_PANEL on the user's next click.
           const panels = await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] });
           if (panels.length) { sendResponse({ ok: true }); return; }
-          await openFloatingPanel(tabId);
-          sendResponse({ ok: true, floating: true });
+          sendResponse({ ok: false, error: "no gesture" });
         } catch (e) {
           sendResponse({ ok: false, error: e.message });
         }

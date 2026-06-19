@@ -31,7 +31,14 @@
         </div>
         <div class="profile-contact">
           <a class="profile-email" id="profile-email"></a>
-          <a class="profile-phone" id="profile-phone"></a>
+          <!-- Phone found on LinkedIn / résumé — read-only display -->
+          <a class="profile-phone-found" id="profile-phone-found" style="display:none"></a>
+          <!-- Manual phone entry — always editable, overrides the found number -->
+          <div class="profile-phone-row">
+            <span class="profile-phone-icon">📞</span>
+            <input class="profile-phone-input" id="profile-phone" type="tel"
+              placeholder="Add phone  e.g. +1 555 000 1234" />
+          </div>
         </div>
       </div>
 
