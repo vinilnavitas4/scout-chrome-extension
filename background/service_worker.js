@@ -607,9 +607,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const { jd_id, candidate, resume_text } = payload;
 
-        // 1) Backend scoring (consistent). Send only what scoring needs; the
-        //    backend applies the same résumé-replaces-skills rule.
-        const backend = await backendScore(jd_id, candidate, resume_text);
+        // Résumé present → score against the résumé's skills only (replace the
+        // profile-scraped skills). Done HERE, before the backend call, so BOTH
+        // the backend and local paths score on the résumé keywords — Dice's own
+        // skill list is generic (ide/software/configuration) and must not drive
+        // the score when a résumé is available. Guard: an empty keyword scan
+        // keeps the original skills (avoids flooring the score).
+        let scored = candidate;
+        if (resume_text) {
+          const resumeSkills = findKeywords(resume_text);
+          if (resumeSkills.length > 0) {
+            scored = { ...candidate, skills: resumeSkills };
+            console.log(`[SCOUT] Scoring on ${resumeSkills.length} résumé skills:`, resumeSkills);
+          }
+        }
+
+        // 1) Backend scoring (consistent across devices). Send the résumé-derived
+        //    skills so the backend scores on them.
+        const backend = await backendScore(jd_id, scored, resume_text);
         if (backend) {
           console.log("[SCOUT] Score (backend):", backend);
           sendResponse({ ok: true, data: backend, source: "backend" });
@@ -624,14 +639,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (job.error) { sendResponse({ ok: false, error: job.error }); return; }
           cached = { title: job.title, requirements: parseRequirements(job.description || "") };
           jobCache.set(jd_id, cached);
-        }
-
-        // Résumé attached → score against the résumé's skills only (replace).
-        // Guard: empty résumé keyword scan keeps LinkedIn skills (avoids floor).
-        let scored = candidate;
-        if (resume_text) {
-          const resumeSkills = findKeywords(resume_text);
-          if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
         }
 
         const result = await computeScore(cached.requirements, cached.title, scored);

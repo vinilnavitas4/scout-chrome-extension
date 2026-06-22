@@ -6,6 +6,7 @@
   "permissions": ["activeTab", "storage", "scripting", "sidePanel", "offscreen", "cookies"],
   "host_permissions": [
     "https://www.linkedin.com/*",
+    "https://www.dice.com/*",
     "https://api.jazz.co/*",
     "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io/*",
     "https://huggingface.co/*",
@@ -20,6 +21,11 @@
     {
       "matches": ["https://www.linkedin.com/in/*"],
       "js": ["content_scripts/linkedin.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.dice.com/employers/talent-search/profile/*"],
+      "js": ["content_scripts/dice.js"],
       "run_at": "document_idle"
     }
   ],
