@@ -115,35 +115,56 @@ function findResumePdfUrl() {
   return urls.find(u => /resume|cv|\.pdf(\?|$)/i.test(u) && !/\.(png|jpe?g|svg|css|js)(\?|$)/i.test(u)) || '';
 }
 
-async function fetchResumePdfText() {
+function arrayBufferToB64(buf) {
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+// Last résumé PDF fetched this run: { text, b64, mime } — b64 is forwarded to
+// JazzHR on "Add to SCOUT" so the Dice résumé attaches without a manual upload.
+let resumePdfMeta = null;
+
+// Fetch + parse the résumé PDF the page already loaded. Captures both the text
+// (for scoring) and the raw bytes as base64 (for the JazzHR attachment).
+async function fetchResumePdf() {
   try {
-    if (typeof pdfjsLib === 'undefined') { console.warn('[SCOUT] pdf.js not loaded'); return ''; }
+    if (typeof pdfjsLib === 'undefined') { console.warn('[SCOUT] pdf.js not loaded'); return null; }
     const url = findResumePdfUrl();
-    if (!url) { console.warn('[SCOUT] résumé PDF url not found in resource timeline'); return ''; }
+    if (!url) { console.warn('[SCOUT] résumé PDF url not found in resource timeline'); return null; }
     const res = await fetch(url, { credentials: 'include' });
-    if (!res.ok) { console.warn('[SCOUT] résumé fetch HTTP', res.status); return ''; }
+    if (!res.ok) { console.warn('[SCOUT] résumé fetch HTTP', res.status); return null; }
     const buf = await res.arrayBuffer();
+    const mime = (res.headers.get('content-type') || 'application/pdf').split(';')[0];
+    const b64 = arrayBufferToB64(buf);                 // before pdf.js (it may detach the buffer)
     pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdf.worker.min.js');
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
     let out = '';
     for (let i = 1; i <= pdf.numPages; i++) {
       const content = await (await pdf.getPage(i)).getTextContent();
       out += content.items.map(it => it.str).join(' ') + '\n';
     }
-    console.log(`[SCOUT] résumé via PDF fetch: ${out.length} chars from ${url}`);
-    return out.replace(/\s+/g, ' ').trim();
+    const text = out.replace(/\s+/g, ' ').trim();
+    console.log(`[SCOUT] résumé via PDF fetch: ${text.length} chars, ${b64.length} b64 from ${url}`);
+    return { text, b64, mime };
   } catch (e) {
     console.warn('[SCOUT] résumé PDF parse failed:', e.message);
-    return '';
+    return null;
   }
 }
 
 // Best résumé text: prefer the fetched-and-parsed PDF (complete, render-proof),
-// fall back to whatever the on-page text layer has rendered.
+// fall back to whatever the on-page text layer has rendered. Side effect: stashes
+// the PDF bytes in resumePdfMeta for the JazzHR attachment.
 async function bestResumeText() {
   const dom = resumeText();
-  const pdf = await fetchResumePdfText();
-  return pdf.length > dom.length ? pdf : dom;
+  const pdf = await fetchResumePdf();
+  resumePdfMeta = pdf;
+  return (pdf && pdf.text.length > dom.length) ? pdf.text : dom;
 }
 
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
@@ -380,6 +401,13 @@ function runExtraction(force = false) {
     await loadResume();     // nudge the on-page résumé render
     const resume = await bestResumeText();   // PDF fetch preferred, DOM fallback
     const profile = extractProfile(resume);
+    // Carry the résumé PDF bytes so "Add to SCOUT" attaches it to JazzHR — no
+    // manual upload needed for Dice candidates.
+    if (resumePdfMeta?.b64) {
+      profile.resumeB64  = resumePdfMeta.b64;
+      profile.resumeMime = resumePdfMeta.mime || 'application/pdf';
+      profile.resumeName = `${(profile.name || 'candidate').replace(/\s+/g, '_')}_Resume.pdf`;
+    }
     console.log('[SCOUT] Dice parsed:', profile);
     chrome.storage.session.set({ scout_candidate: profile });
     requestPanelOpen();

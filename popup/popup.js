@@ -529,12 +529,19 @@ addBtn.addEventListener('click', () => {
     return;
   }
 
+  // Manual upload wins; otherwise attach the résumé scraped from the profile
+  // (Dice candidates carry the résumé PDF bytes on the candidate) so JazzHR gets
+  // the résumé without a separate upload.
+  const rB64  = resumeB64 || candidate.resumeB64 || '';
+  const rName = resumeB64 ? resumeFileName : (candidate.resumeName || 'resume.pdf');
+  const rMime = resumeB64 ? resumeMime : (candidate.resumeMime || 'application/pdf');
+
   const payload = {
     job_id:      selectedJd,
     job_title:   selectedJdTitle || '',
-    resume_b64:  resumeB64 || undefined,
-    resume_name: resumeB64 ? resumeFileName : undefined,
-    resume_mime: resumeB64 ? resumeMime : undefined,
+    resume_b64:  rB64 || undefined,
+    resume_name: rB64 ? rName : undefined,
+    resume_mime: rB64 ? rMime : undefined,
     candidate: {
       name:             candidate.name,
       title:            candidate.title,
