@@ -25,8 +25,14 @@
     },
     {
       "matches": ["https://www.dice.com/employers/talent-search/profile/*"],
-      "js": ["content_scripts/dice.js"],
+      "js": ["lib/pdf.min.js", "content_scripts/dice.js"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/pdf.worker.min.js"],
+      "matches": ["https://www.dice.com/*"]
     }
   ],
   "background": {

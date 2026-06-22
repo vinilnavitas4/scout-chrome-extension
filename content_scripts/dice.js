@@ -98,6 +98,54 @@ function resumeText() {
   return Array.from(spans).map(s => s.textContent).join(' ').replace(/\s+/g, ' ').trim();
 }
 
+// Render-independent résumé text: find the résumé PDF the page already fetched
+// (via the shared performance resource timeline / embedded ids) and parse it with
+// the bundled pdf.js. Used when the on-page react-pdf text layer never renders or
+// renders only partially — the cause of the résumé "not reading properly".
+function findResumePdfUrl() {
+  const json = getDiceJson();
+  const ids = [];
+  if (json) { [json.resumeId, json.resumeDocumentId, json.id].forEach(v => v && ids.push(v)); }
+  const urls = performance.getEntriesByType('resource').map(e => e.name);
+  for (const id of ids) {
+    const hit = urls.find(u => u.includes(id));
+    if (hit) return hit;
+  }
+  // Any résumé/PDF-looking resource as a last resort.
+  return urls.find(u => /resume|cv|\.pdf(\?|$)/i.test(u) && !/\.(png|jpe?g|svg|css|js)(\?|$)/i.test(u)) || '';
+}
+
+async function fetchResumePdfText() {
+  try {
+    if (typeof pdfjsLib === 'undefined') { console.warn('[SCOUT] pdf.js not loaded'); return ''; }
+    const url = findResumePdfUrl();
+    if (!url) { console.warn('[SCOUT] résumé PDF url not found in resource timeline'); return ''; }
+    const res = await fetch(url, { credentials: 'include' });
+    if (!res.ok) { console.warn('[SCOUT] résumé fetch HTTP', res.status); return ''; }
+    const buf = await res.arrayBuffer();
+    pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdf.worker.min.js');
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    let out = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const content = await (await pdf.getPage(i)).getTextContent();
+      out += content.items.map(it => it.str).join(' ') + '\n';
+    }
+    console.log(`[SCOUT] résumé via PDF fetch: ${out.length} chars from ${url}`);
+    return out.replace(/\s+/g, ' ').trim();
+  } catch (e) {
+    console.warn('[SCOUT] résumé PDF parse failed:', e.message);
+    return '';
+  }
+}
+
+// Best résumé text: prefer the fetched-and-parsed PDF (complete, render-proof),
+// fall back to whatever the on-page text layer has rendered.
+async function bestResumeText() {
+  const dom = resumeText();
+  const pdf = await fetchResumePdfText();
+  return pdf.length > dom.length ? pdf : dom;
+}
+
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 function realEmailFrom(text) {
   for (const e of (text || '').match(EMAIL_RE) || []) {
@@ -182,9 +230,9 @@ function expDates(h) {
 
 // ── Merge DOM + JSON into the LinkedIn-compatible profile shape ────────────────
 
-function extractProfile() {
+function extractProfile(resumeOverride) {
   const json = getDiceJson();
-  const resume = resumeText();
+  const resume = (resumeOverride && resumeOverride.length) ? resumeOverride : resumeText();
 
   let name     = domText('h1[data-testid="candidate-name-page-heading"]');
   let title    = domText('[data-testid="currentJobTitleLatestCompany"]');
@@ -329,14 +377,50 @@ function runExtraction(force = false) {
   extractionSettled = false;
   extractionPromise = (async () => {
     await waitForName();    // header rendered
-    await loadResume();     // all résumé pages' text layers populated
-    const profile = extractProfile();
+    await loadResume();     // nudge the on-page résumé render
+    const resume = await bestResumeText();   // PDF fetch preferred, DOM fallback
+    const profile = extractProfile(resume);
     console.log('[SCOUT] Dice parsed:', profile);
     chrome.storage.session.set({ scout_candidate: profile });
     requestPanelOpen();
+    // The PDF can finish rendering AFTER this first read (slow network / late
+    // mount). Keep watching; when more résumé text appears, recompute email +
+    // skills, restore, and push the update so the panel re-scores. This makes
+    // the résumé-driven score robust regardless of when react-pdf finishes.
+    watchResume(profile, id);
     return profile;
   })().finally(() => { extractionSettled = true; });
   return extractionPromise;
+}
+
+// Poll the résumé text for ~25s after the first read. On each growth, refresh the
+// résumé-derived fields and broadcast the updated profile to the side panel.
+async function watchResume(profile, id) {
+  let best = (profile.resumeText || '').length;
+  const start = Date.now();
+  while (Date.now() - start < 25000) {
+    await sleep(1500);
+    if (diceProfileId(window.location.href) !== id) return; // navigated away
+    const sec = sectionByHeading('Resume');
+    if (sec) {
+      sec.scrollIntoView({ block: 'start' });
+      const scroller = sec.querySelector('.overflow-auto');
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    }
+    const text = resumeText();
+    if (text.length > best + 50) {
+      best = text.length;
+      profile.resumeText = text.slice(0, 50000);
+      profile.about = text.slice(0, 4000);
+      const email = realEmailFrom(text);
+      if (email) profile.email = email;
+      const skills = skillsFromResume(text);
+      if (skills.length) profile.skills = skills;
+      chrome.storage.session.set({ scout_candidate: profile });
+      chrome.runtime.sendMessage({ type: 'DICE_PROFILE_UPDATED', profile }, () => void chrome.runtime.lastError);
+      console.log(`[SCOUT] Dice résumé updated: ${text.length} chars, ${skills.length} skills`);
+    }
+  }
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

@@ -230,6 +230,15 @@ chrome.runtime.onMessage.addListener((message) => {
       showStatus('Matching profile to JD…', 'loading');
     }
   }
+
+  // Dice résumé finished rendering after the first scan → adopt the updated
+  // candidate (real email + résumé skills + résumé text) and re-score.
+  if (message?.type === "DICE_PROFILE_UPDATED" && message.profile) {
+    candidate = message.profile;
+    foundPhone = candidate.phone || foundPhone;
+    renderProfile(candidate);
+    if (selectedJd) requestScore(selectedJd);
+  }
 });
 
 // ── Init + tab watching ───────────────────────────────────────────────────────
