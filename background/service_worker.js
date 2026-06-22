@@ -208,27 +208,52 @@ function cosine(a, b) {
 // { score, label, rationale } on success, or null to signal "fall back to local"
 // (endpoint missing / network error / malformed response).
 
+// Retry transient failures (5xx / 429 / network / timeout) before giving up.
+// The local fallback uses per-device WASM embeddings, so a machine that drops
+// to it gets a DIFFERENT score than one that reached the backend. A single
+// Azure cold start or network blip must NOT silently diverge the score — keep
+// every device on the deterministic backend path. Only a definitive 404
+// (endpoint not deployed) or malformed body falls through to local.
+const SCORE_RETRIES   = 2;
+const SCORE_TIMEOUT_MS = 12000;
+
 async function backendScore(jd_id, candidate, resume_text) {
-  try {
-    const r = await fetch(`${BASE_URL}/api/scout/score`, {
-      method:  "POST",
-      headers: scoutHeaders(),
-      body: JSON.stringify({
-        jd_id,
-        resume_text: resume_text || undefined, // backend applies résumé-replace rule
-        candidate: {
-          skills:           candidate.skills || [],
-          experience_years: candidate.experience_years || 0,
-        },
-      }),
-    });
-    if (!r.ok) return null; // 404 until endpoint deployed, or 5xx → local fallback
-    const d = await r.json();
-    if (!d || typeof d.score !== "number") return null;
-    return { score: d.score, label: d.label || "", rationale: d.rationale || "" };
-  } catch (_) {
-    return null; // network/parse error → local fallback
+  const body = JSON.stringify({
+    jd_id,
+    resume_text: resume_text || undefined, // backend applies résumé-replace rule
+    candidate: {
+      skills:           candidate.skills || [],
+      experience_years: candidate.experience_years || 0,
+    },
+  });
+
+  for (let attempt = 0; attempt <= SCORE_RETRIES; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 400 * 2 ** (attempt - 1)));
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), SCORE_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${BASE_URL}/api/scout/score`, {
+        method:  "POST",
+        headers: scoutHeaders(),
+        body,
+        signal:  ctrl.signal,
+      });
+      if (r.status === 404) return null;            // endpoint not deployed → local, no retry
+      if (!r.ok) {                                   // 5xx / 429 → transient, retry
+        console.warn(`[SCOUT] backendScore HTTP ${r.status} (attempt ${attempt + 1})`);
+        continue;
+      }
+      const d = await r.json();
+      if (!d || typeof d.score !== "number") return null; // malformed → local
+      return { score: d.score, label: d.label || "", rationale: d.rationale || "" };
+    } catch (e) {                                    // network / abort(timeout) → transient, retry
+      console.warn(`[SCOUT] backendScore ${e.name === "AbortError" ? "timeout" : "network"} (attempt ${attempt + 1})`);
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  console.warn("[SCOUT] backendScore exhausted retries — falling back to per-device local score");
+  return null; // transient errors persisted → local fallback (may differ across devices)
 }
 
 // ── Score candidate against requirements (local fallback) ─────────────────────
