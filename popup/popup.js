@@ -4,6 +4,7 @@ const profileTitle   = document.getElementById('profile-title');
 const profileLoc     = document.getElementById('profile-location');
 const profileExp     = document.getElementById('profile-exp');
 const profileEmail   = document.getElementById('profile-email');
+const profileEmailFound = document.getElementById('profile-email-found');
 const profilePhone   = document.getElementById('profile-phone');
 const profilePhoneFound = document.getElementById('profile-phone-found');
 const sourceBadge    = document.getElementById('source-badge');
@@ -57,6 +58,16 @@ refreshBtn.addEventListener('click', async () => {
 
   loadJds(selectedJd, true);          // re-fetch JD list + clear SW description cache, keep selection
   startScan(tab.id, site.script, true); // force = bypass content-script extraction cache
+});
+
+// Email found on LinkedIn / résumé — used unless the recruiter types a manual
+// override into the editable field.
+let foundEmail = '';
+
+// Manual email edits flow straight into the candidate. Empty field falls back to
+// the found address.
+profileEmail.addEventListener('input', () => {
+  if (candidate) candidate.email = profileEmail.value.trim() || foundEmail;
 });
 
 // Phone found on LinkedIn / résumé — used unless the recruiter types a manual
@@ -384,13 +395,18 @@ function renderProfile(p) {
   profileLoc.textContent   = p.location || '';
   profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
 
-  if (p.email) {
-    profileEmail.textContent = p.email;
-    profileEmail.href = `mailto:${p.email}`;
-    profileEmail.style.display = 'block';
+  // Email found on LinkedIn/résumé shows read-only above; the editable field
+  // stays empty for a manual add/override. candidate.email defaults to the
+  // found address until the recruiter types one in.
+  foundEmail = p.email || '';
+  if (foundEmail) {
+    profileEmailFound.textContent = foundEmail;
+    profileEmailFound.href = `mailto:${foundEmail}`;
+    profileEmailFound.style.display = 'block';
   } else {
-    profileEmail.style.display = 'none';
+    profileEmailFound.style.display = 'none';
   }
+  profileEmail.value = '';
   // Phone found on LinkedIn/résumé shows read-only above; the editable field
   // stays empty for a manual add/override. candidate.phone defaults to the
   // found number until the recruiter types one in.
