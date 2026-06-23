@@ -8,11 +8,15 @@ Drop-in FastAPI endpoint that the Chrome extension calls at:
     resp: { score, label, rationale }
 
 Why backend: the extension used to run MiniLM embeddings in a per-device WASM
-offscreen doc, so scores diverged across browsers. Running the same model on one
-server makes the score identical everywhere.
+offscreen doc, so scores diverged across browsers. This server is the single
+source of truth — the client always calls it first and only drops to its local
+embedding path on a hard failure.
 
-This is a faithful port of the extension's local scorer (service_worker.js) so a
-candidate scores the same here as in the client fallback — smooth migration.
+This mirrors the extension's local scorer (service_worker.js) rubric exactly, so
+the deterministic part of the score is identical. NOTE: the embedding match can
+differ marginally because the client runs the q8-quantized Xenova model while
+this server runs full-precision sentence-transformers (same checkpoint, ~0.01-0.02
+cosine drift). The lexical rules + a widened margin keep borderline pairs stable.
 
 Deps:
     pip install fastapi sentence-transformers
@@ -62,9 +66,22 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 SIM_THRESHOLD = 0.55  # tuned for all-MiniLM: related ~0.6+, unrelated <0.4
 # Clear-margin acceptance: borderline cosines are decided by deterministic
-# lexical rules instead, so the score is stable. Mirrors the client.
-SIM_MARGIN = 0.02
-SIM_ACCEPT = SIM_THRESHOLD + SIM_MARGIN  # 0.57
+# lexical rules instead, so the score is stable. Margin widened to absorb the
+# q8(client) vs fp32(server) drift. Mirrors the client.
+SIM_MARGIN = 0.03
+SIM_ACCEPT = SIM_THRESHOLD + SIM_MARGIN  # 0.58
+
+# Score calibration (#8): map raw rubric score → calibrated 0-100 the way
+# recruiters actually rate fit. Identity until fitted on labeled outcomes
+# (raw_score, hired/advanced?) — fit a logistic, then set enabled=True with k/x0.
+CALIBRATION = {"enabled": False, "k": 0.12, "x0": 50.0}
+
+
+def calibrate(raw: float) -> float:
+    if not CALIBRATION["enabled"]:
+        return raw
+    import math
+    return 100.0 / (1.0 + math.exp(-CALIBRATION["k"] * (raw - CALIBRATION["x0"])))
 
 # ── Skill normalization + aliases (port of service_worker.js) ─────────────────
 
@@ -158,23 +175,100 @@ def _slice_section(text: str, start_re: re.Pattern) -> str:
     return tail if not nxt else tail[: nxt.start() + 20]
 
 
+# ── Off-list skill mining (#1) ────────────────────────────────────────────────
+# TOOL_KEYWORDS can't enumerate every tool; mine extra skills from explicit
+# enumerations (a "skills cue" followed by a delimited list) so off-list skills
+# still score, without scraping whole prose sentences into the requirement set.
+SKILL_CUE_RE = re.compile(
+    r"(?:experience (?:with|in|using)|proficien\w* (?:with|in)|knowledge of|"
+    r"familiar\w* with|expertise in|skilled in|hands[\s-]?on (?:experience )?with|"
+    r"working knowledge of|background in|competen\w* in|specific tools[^:]*:|"
+    r"skills?\s*:|technologies?\s*:|tech\s*stack\s*:)", re.IGNORECASE)
+
+SKILL_STOPWORDS = {
+    "ability","strong","excellent","good","years","year","experience","knowledge","skills","skill",
+    "written","verbal","communication","team","teams","etc","including","environment","environments",
+    "related","equivalent","degree","plus","preferred","required","work","working","other","various",
+    "such","as","is","are","be","you","your","our","we","will","must","should","have","proven","a","an",
+    "the","and","or","with","in","of","to","using","for","on","at","but","not","this","that",
+}
+
+
+def extract_listed_skills(section: str) -> list[str]:
+    if not section:
+        return []
+    out: list[str] = []
+    for m in SKILL_CUE_RE.finditer(section):
+        if len(out) >= 15:
+            break
+        clause = section[m.end(): m.end() + 140]
+        stop = re.search(r"[.;]", clause)
+        if stop:
+            clause = clause[: stop.start()]
+        for phrase in re.split(r"[,/|]|\band\b|\n", clause, flags=re.IGNORECASE):
+            phrase = re.sub(r"^[\s\-*•]+", "", phrase)
+            phrase = re.sub(r"\s+", " ", phrase).strip()
+            if len(phrase) < 2 or len(phrase) > 40:
+                continue
+            toks = phrase.lower().split()
+            if len(toks) > 3:
+                continue
+            if all(t in SKILL_STOPWORDS for t in toks):
+                continue
+            if not re.search(r"[a-z0-9]", phrase, re.IGNORECASE):
+                continue
+            if not any(o.lower() == phrase.lower() for o in out):
+                out.append(phrase)
+    return out
+
+
+def skill_prominence(skill: str, text: str) -> int:
+    """How many times the JD mentions a skill (#7); floored at 1."""
+    if not text or not skill:
+        return 1
+    esc = re.escape(str(skill))
+    if not esc:
+        return 1
+    hits = re.findall(rf"(?<![A-Za-z0-9]){esc}(?![A-Za-z0-9])", text, re.IGNORECASE)
+    return max(len(hits), 1)
+
+
+def _dedupe_by(items, key):
+    seen, out = set(), []
+    for x in items:
+        k = key(x)
+        if k not in seen:
+            seen.add(k)
+            out.append(x)
+    return out
+
+
 def parse_requirements(description: str) -> dict:
     text = description or ""
     need = _slice_section(text, re.compile(r"What\s+You\s*'?\s*ll?\s*'?\s*Need", re.IGNORECASE)) or text
     preferred = _slice_section(text, re.compile(r"Set\s+Yourself\s+Apart", re.IGNORECASE))
 
+    # Largest stated year requirement, not the first match (#6).
     required_years = 0
-    ym = re.search(r"(\d+)\+?\s*years?\b", need, re.IGNORECASE)
-    if ym:
-        required_years = int(ym.group(1))
+    for ym in re.finditer(r"(\d+)\+?\s*years?\b", need, re.IGNORECASE):
+        required_years = max(required_years, int(ym.group(1)))
 
     required_skills = find_keywords(need) or find_keywords(text)
-    preferred_skills = [k for k in find_keywords(preferred) if k not in required_skills]
+    required_skills = _dedupe_by(
+        required_skills + extract_listed_skills(need), canonical_skill)
+
+    preferred_raw = _dedupe_by(
+        find_keywords(preferred) + extract_listed_skills(preferred), canonical_skill)
+    req_canon = {canonical_skill(s) for s in required_skills}
+    preferred_skills = [k for k in preferred_raw if canonical_skill(k) not in req_canon]
+
+    prominence = {s: skill_prominence(s, text) for s in (required_skills + preferred_skills)}
 
     return {
         "required_skills": required_skills,
         "preferred_skills": preferred_skills,
         "required_years": required_years,
+        "prominence": prominence,
     }
 
 
@@ -218,14 +312,29 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     matched_pref = [s for s in preferred if is_match(s)]
     missing_req = [s for s in required if not is_match(s)]
 
-    req_w = (len(matched_req) / len(required)) * 60 if required else 0
-    pref_w = (len(matched_pref) / len(preferred)) * 15 if preferred else 15
-    if required_years:
-        exp_w = min(exp_years / required_years, 1.2) * 25
-    else:
-        exp_w = 20 if exp_years > 0 else 10
+    # Prominence-weighted required fill (#7): core, oft-repeated skills dominate.
+    prom = requirements.get("prominence", {})
+    w_of = lambda s: max(prom.get(s, 1), 1)
+    req_total = sum(w_of(s) for s in required)
+    req_matched = sum(w_of(s) for s in matched_req)
+    req_fill = req_matched / req_total if req_total else 0
+    pref_fill = (len(matched_pref) / len(preferred)) if preferred else 0
+    exp_fill = min(exp_years / required_years, 1) if required_years else 0  # cap 1.0 (#3)
 
-    score = max(min(round(req_w + pref_w + exp_w), 99), 5)
+    # Renormalize so only present buckets contribute and they sum to 100 (#2).
+    W_REQ, W_PREF, W_EXP = 60, 15, 25
+    active = W_REQ                       # required always present here
+    if preferred:
+        active += W_PREF
+    if required_years:
+        active += W_EXP
+    raw = (W_REQ / active) * req_fill * 100
+    if preferred:
+        raw += (W_PREF / active) * pref_fill * 100
+    if required_years:
+        raw += (W_EXP / active) * exp_fill * 100
+
+    score = max(min(round(calibrate(raw)), 99), 5)
 
     if score >= 80:   label = "Excellent Fit"
     elif score >= 65: label = "Good Fit"

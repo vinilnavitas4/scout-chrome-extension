@@ -120,32 +120,97 @@ function sliceSection(text, startRe) {
   return endRel === -1 ? tail : tail.slice(0, endRel + 20);
 }
 
+// ── Off-list skill mining (#1) ────────────────────────────────────────────────
+// TOOL_KEYWORDS can't enumerate every tool, so a JD requiring something off-list
+// would never score it. Mine extra skill phrases from explicit enumerations only
+// (a "skills cue" followed by a delimited list) so we capture off-list skills
+// without scraping whole prose sentences into the requirement set.
+const SKILL_CUE_RE = /(?:experience (?:with|in|using)|proficien\w* (?:with|in)|knowledge of|familiar\w* with|expertise in|skilled in|hands[\s-]?on (?:experience )?with|working knowledge of|background in|competen\w* in|specific tools[^:]*:|skills?\s*:|technologies?\s*:|tech\s*stack\s*:)/ig;
+
+// Generic words that survive the length/word-count filter but aren't skills.
+const SKILL_STOPWORDS = new Set([
+  "ability","strong","excellent","good","years","year","experience","knowledge","skills","skill",
+  "written","verbal","communication","team","teams","etc","including","environment","environments",
+  "related","equivalent","degree","plus","preferred","required","work","working","other","various",
+  "such","as","is","are","be","you","your","our","we","will","must","should","have","proven","a","an",
+  "the","and","or","with","in","of","to","using","for","on","at","an","but","not","this","that",
+]);
+
+function extractListedSkills(section) {
+  if (!section) return [];
+  const out = [];
+  let m;
+  SKILL_CUE_RE.lastIndex = 0;
+  while ((m = SKILL_CUE_RE.exec(section)) && out.length < 15) {
+    const from = m.index + m[0].length;
+    let clause = section.slice(from, from + 140);
+    const stop = clause.search(/[.;]/);          // end the list at the first sentence break
+    if (stop !== -1) clause = clause.slice(0, stop);
+    for (let phrase of clause.split(/[,/|]|\band\b|\n/i)) {
+      phrase = phrase.replace(/^[\s\-*•]+/, "").replace(/\s+/g, " ").trim();
+      if (phrase.length < 2 || phrase.length > 40) continue;
+      const toks = phrase.toLowerCase().split(/\s+/);
+      if (toks.length > 3) continue;                          // skills are short phrases
+      if (toks.every(t => SKILL_STOPWORDS.has(t))) continue;  // pure boilerplate
+      if (!/[a-z0-9]/i.test(phrase)) continue;
+      if (!out.some(o => o.toLowerCase() === phrase.toLowerCase())) out.push(phrase);
+    }
+  }
+  return out;
+}
+
+// Prominence (#7): how many times a skill is mentioned across the whole JD.
+// Skills the JD repeats are weighted more in the required-skill fill, so missing
+// a core, oft-repeated skill costs more than missing a one-off mention.
+function skillProminence(skill, text) {
+  if (!text || !skill) return 1;
+  const esc = String(skill).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!esc) return 1;
+  const re = new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, "gi");
+  const hits = text.match(re);
+  return Math.max(hits ? hits.length : 1, 1);
+}
+
+function dedupeBy(list, keyFn) {
+  const seen = new Set(), out = [];
+  for (const x of list) { const k = keyFn(x); if (!seen.has(k)) { seen.add(k); out.push(x); } }
+  return out;
+}
+
 function parseRequirements(description) {
   const text = description || "";
 
   const needSection      = sliceSection(text, /What\s+You\s*'?\s*ll?\s*'?\s*Need/i) || text;
   const preferredSection = sliceSection(text, /Set\s+Yourself\s+Apart/i);
 
-  // "5+ years of experience", "5+ years in software engineering", "15+ years of progressive experience"
+  // Take the LARGEST stated year requirement in the need section, not the first
+  // match (#6) — a stray "3 years" in an unrelated line must not undercut "8+ years".
   let required_years = 0;
-  const yearsMatch = needSection.match(/(\d+)\+?\s*years?\b/i);
-  if (yearsMatch) required_years = parseInt(yearsMatch[1], 10);
-
-  // Some JDs (e.g. architect roles) list only soft skills under "Need" — fall
-  // back to scanning the whole description so we still have something to score.
-  let required_skills = findKeywords(needSection);
-  if (required_skills.length === 0) required_skills = findKeywords(text);
-  const preferred_skills = findKeywords(preferredSection).filter(k => !required_skills.includes(k));
-
-  const specificMatch = needSection.match(/Specific\s+tools[^:]*:([\s\S]*?)(?:\n\s*(?:[A-Z]|\n)|$)/i);
-  if (specificMatch) {
-    const extras = specificMatch[1].split(/[,\n]+/).map(s => s.replace(/^[\s\-\*]+/, '').trim()).filter(s => s.length > 1 && s.length < 60);
-    for (const e of extras) {
-      if (!required_skills.includes(e)) required_skills.push(e);
-    }
+  for (const ym of needSection.matchAll(/(\d+)\+?\s*years?\b/ig)) {
+    required_years = Math.max(required_years, parseInt(ym[1], 10));
   }
 
-  return { required_skills, preferred_skills, required_years };
+  // Required = allow-list keyword hits ∪ mined enumeration skills. Fall back to
+  // the whole description if the "Need" section yielded nothing.
+  let required_skills = findKeywords(needSection);
+  if (required_skills.length === 0) required_skills = findKeywords(text);
+  required_skills = dedupeBy(
+    [...required_skills, ...extractListedSkills(needSection)],
+    s => canonicalSkill(s)
+  );
+
+  const preferredRaw = dedupeBy(
+    [...findKeywords(preferredSection), ...extractListedSkills(preferredSection)],
+    s => canonicalSkill(s)
+  );
+  const reqCanon = new Set(required_skills.map(canonicalSkill));
+  const preferred_skills = preferredRaw.filter(k => !reqCanon.has(canonicalSkill(k)));
+
+  // Mention-frequency weight per skill, computed over the full JD text.
+  const prominence = {};
+  for (const s of [...required_skills, ...preferred_skills]) prominence[s] = skillProminence(s, text);
+
+  return { required_skills, preferred_skills, required_years, prominence };
 }
 
 // ── Semantic skill matching via embeddings (offscreen model) ──────────────────
@@ -155,12 +220,26 @@ function parseRequirements(description) {
 
 const SIM_THRESHOLD = 0.55; // tuned for all-MiniLM: related skills ~0.6+, unrelated <0.4
 // Cosines within ±SIM_MARGIN of the threshold flip between devices/browsers
-// because WASM/quantized embedding math isn't bit-identical. Only accept a
-// semantic match when clearly above the threshold; the deterministic lexical
-// rules (exact/alias/token-subset) cover the borderline band. Keeps scores
-// consistent across devices.
-const SIM_MARGIN    = 0.02;
-const SIM_ACCEPT    = SIM_THRESHOLD + SIM_MARGIN; // 0.57
+// because WASM/quantized embedding math isn't bit-identical. The client runs the
+// q8-quantized Xenova model; the backend runs full-precision sentence-transformers,
+// so the same pair can differ by ~0.01-0.02. The backend is the single source of
+// truth (see backendScore) — this LOCAL path is a best-effort fallback and may
+// diverge slightly. Margin widened so the deterministic lexical rules
+// (exact/alias/token-subset) decide the borderline band instead of the model.
+const SIM_MARGIN    = 0.03;
+const SIM_ACCEPT    = SIM_THRESHOLD + SIM_MARGIN; // 0.58
+
+// Score calibration (#8): map the raw rubric score → a calibrated 0-100 the way
+// recruiters actually rate fit. Identity until fitted: collect (raw_score,
+// hired/advanced?) pairs, fit a logistic P(good_fit | raw), then set
+// CALIBRATION.enabled = true with the fitted { k, x0 }. Until then raw passes
+// through unchanged so behavior is unsurprising.
+const CALIBRATION = { enabled: false, k: 0.12, x0: 50 };
+function calibrate(raw) {
+  if (!CALIBRATION.enabled) return raw;
+  const { k, x0 } = CALIBRATION;
+  return 100 / (1 + Math.exp(-k * (raw - x0)));
+}
 
 let creatingOffscreen = null; // de-dupe concurrent createDocument calls
 async function ensureOffscreen() {
@@ -324,11 +403,27 @@ async function computeScore(requirements, jobTitle, candidate) {
     missingReq,
   });
 
-  const reqWeight  = required_skills.length  ? (matchedReq.length  / required_skills.length)  * 60 : 0;
-  const prefWeight = preferred_skills.length ? (matchedPref.length / preferred_skills.length) * 15 : 15;
-  const expWeight  = required_years ? Math.min(expYears / required_years, 1.2) * 25 : (expYears > 0 ? 20 : 10);
+  // Prominence-weighted required fill (#7): each required skill counts by how
+  // often the JD mentions it, so core skills dominate the ratio.
+  const prom = requirements.prominence || {};
+  const wOf  = s => Math.max(prom[s] || 1, 1);
+  const reqTotal   = required_skills.reduce((a, s) => a + wOf(s), 0);
+  const reqMatched = matchedReq.reduce((a, s) => a + wOf(s), 0);
+  const reqFill  = reqTotal ? reqMatched / reqTotal : 0;
+  const prefFill = preferred_skills.length ? matchedPref.length / preferred_skills.length : 0;
+  const expFill  = required_years ? Math.min(expYears / required_years, 1) : 0; // cap at 1.0 (#3)
 
-  const score = Math.min(Math.max(Math.round(reqWeight + prefWeight + expWeight), 5), 99);
+  // Renormalize so only PRESENT buckets contribute and they sum to 100 (#2) — no
+  // free credit for an absent preferred list or an unstated year requirement.
+  const W_REQ = 60, W_PREF = 15, W_EXP = 25;
+  let active = W_REQ;                                  // required is always present here
+  if (preferred_skills.length) active += W_PREF;
+  if (required_years)          active += W_EXP;
+  let raw = (W_REQ / active) * reqFill * 100;
+  if (preferred_skills.length) raw += (W_PREF / active) * prefFill * 100;
+  if (required_years)          raw += (W_EXP / active) * expFill * 100;
+
+  const score = Math.min(Math.max(Math.round(calibrate(raw)), 5), 99);
 
   let label;
   if      (score >= 80) label = "Excellent Fit";
