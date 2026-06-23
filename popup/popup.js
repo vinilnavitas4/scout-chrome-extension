@@ -52,10 +52,11 @@ closeBtn.addEventListener('click', () => {
 // Re-scan: reset state and run the whole pipeline again (profile → JDs → score)
 refreshBtn.addEventListener('click', async () => {
   const tab = await getTargetTab();
-  if (!tab || !(tab.url || '').includes('linkedin.com/in/')) return;
+  const site = siteFor(tab?.url);
+  if (!site) return;
 
-  loadJds(selectedJd, true);   // re-fetch JD list + clear SW description cache, keep selection
-  startScan(tab.id, true);     // force = bypass content-script extraction cache
+  loadJds(selectedJd, true);          // re-fetch JD list + clear SW description cache, keep selection
+  startScan(tab.id, site.script, true); // force = bypass content-script extraction cache
 });
 
 // Phone found on LinkedIn / résumé — used unless the recruiter types a manual
@@ -229,6 +230,15 @@ chrome.runtime.onMessage.addListener((message) => {
       showStatus('Matching profile to JD…', 'loading');
     }
   }
+
+  // Dice résumé finished rendering after the first scan → adopt the updated
+  // candidate (real email + résumé skills + résumé text) and re-score.
+  if (message?.type === "DICE_PROFILE_UPDATED" && message.profile) {
+    candidate = message.profile;
+    foundPhone = candidate.phone || foundPhone;
+    renderProfile(candidate);
+    if (selectedJd) requestScore(selectedJd);
+  }
 });
 
 // ── Init + tab watching ───────────────────────────────────────────────────────
@@ -249,15 +259,20 @@ async function getTargetTab() {
   return tab;
 }
 
-// Canonical profile identity. Full-URL comparison loops: the extraction visits
-// /details/skills and /overlay/contact-info sub-routes, which fire tabs.onUpdated
-// and must not count as a new profile.
-function profileSlug(url) {
-  const m = (url || '').match(/linkedin\.com\/in\/([^\/?#]+)/i);
-  return m ? m[1].toLowerCase() : '';
+// Supported candidate sources. Returns {source, script, slug} for a profile URL,
+// or null when the tab isn't on a recognized profile. `slug` is the canonical
+// per-profile identity used to dedupe rescans (full-URL comparison loops because
+// the LinkedIn extraction visits /details/skills and /overlay/contact-info
+// sub-routes, which fire tabs.onUpdated and must not count as a new profile).
+function siteFor(url) {
+  const li = (url || '').match(/linkedin\.com\/in\/([^\/?#]+)/i);
+  if (li) return { source: 'LinkedIn', script: 'content_scripts/linkedin.js', slug: li[1].toLowerCase() };
+  const dc = (url || '').match(/dice\.com\/employers\/talent-search\/profile\/([0-9a-f-]+)/i);
+  if (dc) return { source: 'Dice', script: 'content_scripts/dice.js', slug: dc[1].toLowerCase() };
+  return null;
 }
 
-function startScan(tabId, force = false) {
+function startScan(tabId, scriptFile, force = false) {
   candidate      = null;
   currentScore   = null;
   profilePending = true;
@@ -272,7 +287,7 @@ function startScan(tabId, force = false) {
   refreshBtn.classList.add('spinning');
   showStatus('Reading profile…', 'loading');
 
-  requestProfile(tabId, 'content_scripts/linkedin.js', force);
+  requestProfile(tabId, scriptFile, force);
 }
 
 // Sync panel to the active tab: empty state off LinkedIn, auto-scan when a
@@ -280,19 +295,19 @@ function startScan(tabId, force = false) {
 async function handleActiveTab() {
   const tab = await getTargetTab();
   if (!tab) return;
-  const slug = profileSlug(tab.url);
-  const onProfile = !!slug;
+  const site = siteFor(tab.url);
+  const onProfile = !!site;
 
   mainView.style.display  = onProfile ? '' : 'none';
   emptyView.style.display = onProfile ? 'none' : 'block';
   if (!onProfile) return;
 
-  sourceBadge.textContent = 'LinkedIn';
+  sourceBadge.textContent = site.source;
   matchSection.style.display = 'block';
 
-  if (slug !== lastProfileSlug) {
-    lastProfileSlug = slug;
-    startScan(tab.id);
+  if (site.slug !== lastProfileSlug) {
+    lastProfileSlug = site.slug;
+    startScan(tab.id, site.script);
   }
 }
 
@@ -464,14 +479,18 @@ function requestScore(jdId) {
   scoreCard.classList.remove('show');
   showStatus(modelReady ? 'Matching profile to JD…' : 'Loading AI model (first time only)…', 'loading');
 
+  // Prefer a manually-attached résumé; otherwise fall back to the résumé text
+  // scraped from the profile (Dice profiles embed the candidate's résumé).
+  const effectiveResume = resumeText || candidate?.resumeText || '';
+
   chrome.runtime.sendMessage(
-    { type: 'GET_SCORE', payload: { jd_id: jdId, candidate, resume_text: resumeText || undefined } },
+    { type: 'GET_SCORE', payload: { jd_id: jdId, candidate, resume_text: effectiveResume || undefined } },
     (res) => {
       if (version !== scoreVersion) return; // stale — user changed JD
       statusEl.classList.remove('show');
       if (!res?.ok) { showStatus('Score failed — ' + (res?.error || 'unknown error'), 'error'); return; }
       currentScore = res.data;
-      renderScore(currentScore, !!resumeText);
+      renderScore(currentScore, !!effectiveResume);
     }
   );
 }
@@ -510,12 +529,19 @@ addBtn.addEventListener('click', () => {
     return;
   }
 
+  // Manual upload wins; otherwise attach the résumé scraped from the profile
+  // (Dice candidates carry the résumé PDF bytes on the candidate) so JazzHR gets
+  // the résumé without a separate upload.
+  const rB64  = resumeB64 || candidate.resumeB64 || '';
+  const rName = resumeB64 ? resumeFileName : (candidate.resumeName || 'resume.pdf');
+  const rMime = resumeB64 ? resumeMime : (candidate.resumeMime || 'application/pdf');
+
   const payload = {
     job_id:      selectedJd,
     job_title:   selectedJdTitle || '',
-    resume_b64:  resumeB64 || undefined,
-    resume_name: resumeB64 ? resumeFileName : undefined,
-    resume_mime: resumeB64 ? resumeMime : undefined,
+    resume_b64:  rB64 || undefined,
+    resume_name: rB64 ? rName : undefined,
+    resume_mime: rB64 ? rMime : undefined,
     candidate: {
       name:             candidate.name,
       title:            candidate.title,

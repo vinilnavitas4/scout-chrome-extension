@@ -233,6 +233,88 @@ function calcExperienceYears(experience) {
   return Math.max(end - earliest, 0);
 }
 
+function extractExperience() {
+  const experience = [];
+  const expSection = findExperienceSection();
+  if (!expSection) return experience;
+  const dateRe = DATE_RE;
+
+  for (const item of expSection.querySelectorAll('div[componentkey^="entity-collection-item"]')) {
+    // Company name: first <p> in header area (not inside the roles ul)
+    const headerPs = Array.from(item.querySelectorAll('p')).filter(p => !p.closest('ul'));
+    const companyName = headerPs[0]?.innerText.trim() || '';
+
+    const roleItems = item.querySelectorAll('ul > li');
+    if (roleItems.length > 0) {
+      // Multi-role entry: each li = one position
+      for (const li of roleItems) {
+        // Narrow/zoomed layouts drop the <a> wrapper around each role — fall
+        // back to the li's own <p>s so the position isn't skipped (the cause
+        // of experience missing at small screen widths).
+        const roleLink = li.querySelector('a:not([componentkey])');
+        const ps = roleLink
+          ? Array.from(roleLink.querySelectorAll('p'))
+          : Array.from(li.querySelectorAll('p'));
+        const title = ps[0]?.innerText.trim() || '';
+        let dates = '';
+        for (const p of ps) {
+          if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
+        }
+        if (title) experience.push({ title, company: companyName, dates });
+      }
+    } else {
+      // Single-role entry: company header IS the role
+      const singleLink = item.querySelector('a:not([componentkey])');
+      const ps = singleLink ? Array.from(singleLink.querySelectorAll('p')) : headerPs;
+      const title = ps[0]?.innerText.trim() || '';
+      let dates = '';
+      for (const p of ps) {
+        if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
+      }
+      if (title) experience.push({ title, company: companyName, dates });
+    }
+  }
+
+  // Fallback: old approach for profiles without entity-collection-item componentkeys
+  if (experience.length === 0) {
+    getSectionItems(expSection).forEach(item => {
+      const ps = Array.from(item.querySelectorAll('p'));
+      const title = ps[0]?.innerText.trim() || '';
+      const company = ps[1]?.innerText.trim() || '';
+      // Don't assume ps[2] is the date line — scan for the first date-like <p>.
+      const dateP = ps.find(p => DATE_RE.test(p.innerText.trim()));
+      const dates = dateP ? dateP.innerText.trim() : (ps[2]?.innerText.trim() || '');
+      if (title) experience.push({ title, company, dates });
+    });
+  }
+  return experience;
+}
+
+// Wait for the Experience section's items to lazy-render, then extract. On
+// slower machines/networks the section streams in AFTER the scroll pass, so a
+// single read races the render and returns []. Polls up to ~maxMs, scrolling
+// the section into view to trigger its lazy load, and returns as soon as items
+// appear. Same-account/same-browser profiles only differ by this timing — this
+// is why experience was missing on some machines but not others.
+async function extractExperienceWithWait(maxMs = 6000) {
+  let experience = extractExperience();
+  if (experience.length > 0) return experience;
+
+  const section = findExperienceSection();
+  if (section) section.scrollIntoView({ block: 'center' });
+
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    await new Promise(r => setTimeout(r, 300));
+    experience = extractExperience();
+    if (experience.length > 0) break;
+    const sec = findExperienceSection();
+    if (sec) sec.scrollIntoView({ block: 'center' });
+  }
+  console.log(`[SCOUT] extractExperienceWithWait: ${experience.length} items after ${Date.now() - start}ms`);
+  return experience;
+}
+
 function extractProfile() {
   const column = findTopcardColumn();
 
@@ -276,55 +358,7 @@ function extractProfile() {
   })();
 
   // Experience
-  const experience = [];
-  const expSection = findExperienceSection();
-  if (expSection) {
-    const dateRe = DATE_RE;
-
-    for (const item of expSection.querySelectorAll('div[componentkey^="entity-collection-item"]')) {
-      // Company name: first <p> in header area (not inside the roles ul)
-      const headerPs = Array.from(item.querySelectorAll('p')).filter(p => !p.closest('ul'));
-      const companyName = headerPs[0]?.innerText.trim() || '';
-
-      const roleItems = item.querySelectorAll('ul > li');
-      if (roleItems.length > 0) {
-        // Multi-role entry: each li = one position
-        for (const li of roleItems) {
-          const roleLink = li.querySelector('a:not([componentkey])');
-          const ps = roleLink ? Array.from(roleLink.querySelectorAll('p')) : [];
-          const title = ps[0]?.innerText.trim() || '';
-          let dates = '';
-          for (const p of ps) {
-            if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
-          }
-          if (title) experience.push({ title, company: companyName, dates });
-        }
-      } else {
-        // Single-role entry: company header IS the role
-        const singleLink = item.querySelector('a:not([componentkey])');
-        const ps = singleLink ? Array.from(singleLink.querySelectorAll('p')) : headerPs;
-        const title = ps[0]?.innerText.trim() || '';
-        let dates = '';
-        for (const p of ps) {
-          if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
-        }
-        if (title) experience.push({ title, company: companyName, dates });
-      }
-    }
-
-    // Fallback: old approach for profiles without entity-collection-item componentkeys
-    if (experience.length === 0) {
-      getSectionItems(expSection).forEach(item => {
-        const ps = Array.from(item.querySelectorAll('p'));
-        const title = ps[0]?.innerText.trim() || '';
-        const company = ps[1]?.innerText.trim() || '';
-        // Don't assume ps[2] is the date line — scan for the first date-like <p>.
-        const dateP = ps.find(p => DATE_RE.test(p.innerText.trim()));
-        const dates = dateP ? dateP.innerText.trim() : (ps[2]?.innerText.trim() || '');
-        if (title) experience.push({ title, company, dates });
-      });
-    }
-  }
+  const experience = extractExperience();
 
   // Skills — Source 1: Skills section on main page
   const seen = new Set();
@@ -883,6 +917,18 @@ function runExtraction(force = false) {
     }
     profile.email = contact.email;
     profile.phone = contact.phone;
+
+    // Experience can lose the lazy-render race on slower machines (same account/
+    // same browser, only timing differs). If empty, scroll the section into view
+    // and poll until it streams in, then recompute experience_years.
+    if (!profile.experience || profile.experience.length === 0) {
+      console.log('[SCOUT] experience empty after scroll — waiting for lazy render');
+      const exp = await extractExperienceWithWait();
+      if (exp.length > 0) {
+        profile.experience = exp;
+        profile.experience_years = calcExperienceYears(exp);
+      }
+    }
 
     if (!profile.about) {
       profile.about = await fetchAbout();
