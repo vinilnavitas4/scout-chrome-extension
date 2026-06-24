@@ -21,6 +21,13 @@
   <div id="main-view">
     <div class="body">
 
+      <!-- Auto-source pager (hidden until top-5 results are ready) -->
+      <div class="auto-pager" id="auto-pager" style="display:none">
+        <button class="pager-btn" id="auto-prev" title="Previous candidate">‹</button>
+        <span class="pager-label" id="auto-label">1 / 5</span>
+        <button class="pager-btn" id="auto-next" title="Next candidate">›</button>
+      </div>
+
       <!-- Profile card (hidden until profile is read) -->
       <div class="profile-card" id="profile-card">
         <div class="profile-name" id="profile-name"></div>
@@ -63,6 +70,8 @@
             </select>
             <span class="jd-spinner" id="jd-spinner"></span>
           </div>
+          <!-- Auto-source: pick a JD, search LinkedIn, score the top 5 -->
+          <button class="btn btn-secondary" id="autosource-btn">🔍 Find top 5 on LinkedIn</button>
         </div>
 
         <!-- Score card -->
