@@ -128,7 +128,7 @@ body {
   gap: 3px;
 }
 
-.profile-email,
+.profile-email-found,
 .profile-phone-found {
   font-size: 11px;
   color: #0284c7;
@@ -136,22 +136,25 @@ body {
   word-break: break-all;
 }
 
-.profile-email:hover,
+.profile-email-found:hover,
 .profile-phone-found:hover {
   text-decoration: underline;
 }
 
+.profile-email-row,
 .profile-phone-row {
   display: flex;
   align-items: center;
   gap: 5px;
 }
 
+.profile-email-icon,
 .profile-phone-icon {
   font-size: 11px;
   flex: 0 0 auto;
 }
 
+.profile-email-input,
 .profile-phone-input {
   flex: 1 1 auto;
   font-size: 11px;
@@ -163,6 +166,7 @@ body {
   background: #fff;
 }
 
+.profile-email-input:focus,
 .profile-phone-input:focus {
   border-color: #0284c7;
   box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.15);
@@ -430,6 +434,40 @@ body {
   color: #cbd5e1;
   border-color: #f1f5f9;
   cursor: not-allowed;
+}
+
+/* Auto-source candidate pager (‹ 1/5 ›) */
+.auto-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.pager-btn {
+  width: 32px;
+  height: 32px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #0f172a;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pager-btn:hover:not(:disabled) { background: #e2e8f0; }
+.pager-btn:disabled { color: #cbd5e1; cursor: not-allowed; }
+
+.pager-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
 }
 
 .btn-duplicate {
