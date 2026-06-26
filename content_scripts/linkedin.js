@@ -52,9 +52,14 @@ function findSectionByHeading(headingText) {
 // Skills section finder — heading lookup first, then layout-specific anchors
 // (classic LinkedIn uses a <div id="skills"> anchor inside the section).
 function findSkillsSection() {
+  // Fallback anchor must be the section's "Show all skills" link — NOT a per-skill
+  // endorsers link (".../details/skills/urn:li:fsd_skill:(...)/endorsers/"), which
+  // also matches "/details/skills" and lives in unrelated cards (browsemap etc.).
+  const showAll = Array.from(document.querySelectorAll('a[href*="/details/skills"]'))
+    .find(a => !/\/endorsers\//.test(a.href) && !/fsd_skill:/.test(a.href));
   return findSectionByHeading('Skills')
     || document.querySelector('#skills')?.closest('section')
-    || document.querySelector('a[href*="/details/skills"]')?.closest('section')
+    || showAll?.closest('section')
     || null;
 }
 
@@ -365,12 +370,22 @@ function extractProfile() {
   const skills = [];
 
   function addSkill(raw) {
-    const s = (raw || '').trim().split('\n')[0].trim();
+    // First line only, then drop any endorsement tail LinkedIn appends inline
+    // ("Python · 12 endorsements", "AWS · Endorsed by 3 colleagues") and the
+    // leftover middot/separator so only the skill name remains.
+    let s = (raw || '').trim().split('\n')[0].trim();
+    // Drop the endorsement tail in either form: "· 12 endorsements" or
+    // "· Endorsed by 3 colleagues", plus the leftover middot/separator.
+    s = s.replace(/\s*[·•|–-]\s*(?:\d+\s*endorsements?|endorsed by\b.*)$/i, '');
+    s = s.replace(/\s*\d+\s*endorsements?$/i, '');
+    s = s.replace(/\s*[·•|]\s*$/, '').trim();
+    const low = s.toLowerCase();
     if (s && s.length < 80 && s.length > 1 &&
-      !s.toLowerCase().includes('show all') &&
-      !s.toLowerCase().includes('endorse') &&
-      !seen.has(s.toLowerCase())) {
-      seen.add(s.toLowerCase());
+      !low.includes('show all') &&
+      !low.includes('endorse') &&
+      !/^\d+$/.test(s) &&                // pure endorsement count leaked as a row
+      !seen.has(low)) {
+      seen.add(low);
       skills.push(s);
     }
   }
@@ -469,9 +484,17 @@ async function expandAndExtractAllSkills(profile) {
   const skillSection = findSkillsSection();
   if (!skillSection) return;
 
-  const showAllBtn = skillSection.querySelector(
-    'a[aria-label="Show all skills"], a[aria-label*="skills" i][href*="/details/skills"], a[href*="/details/skills"]'
-  );
+  // Each skill row also links to its endorsers at
+  // ".../details/skills/urn:li:fsd_skill:(...,N)/endorsers/", which ALSO matches
+  // "/details/skills" and sits BEFORE the real "Show all" button in DOM order.
+  // A bare href*="/details/skills" query therefore grabs an endorsers link and
+  // navigates to the endorsers page. Take the aria-labelled button first, then
+  // fall back to a skills link that is neither a per-skill urn nor /endorsers/.
+  const isEndorsersLink = (a) => /\/endorsers\//.test(a.href) || /fsd_skill:/.test(a.href);
+  const showAllBtn =
+    skillSection.querySelector('a[aria-label="Show all skills"]') ||
+    Array.from(skillSection.querySelectorAll('a[href*="/details/skills"]'))
+      .find(a => !isEndorsersLink(a));
   if (!showAllBtn) {
     console.warn('[SCOUT] No "Show all skills" button found');
     return;
@@ -497,11 +520,19 @@ async function expandAndExtractAllSkills(profile) {
       const p = el.querySelector('p');
       if (p) tryAdd(p.innerText || p.textContent);
     });
-    // Classic /details/skills page items
+    // Classic /details/skills page: the skill name is the skill-topic anchor.
     document.querySelectorAll(
-      'a[data-field="skill_page_skill_topic"] span[aria-hidden="true"], ' +
-      '.pvs-list__paged-list-item .hoverable-link-text.t-bold span[aria-hidden="true"]'
+      'a[data-field="skill_page_skill_topic"] span[aria-hidden="true"]'
     ).forEach(el => tryAdd(el.innerText));
+    // Fallback only if the skill-topic anchor is absent: take the FIRST bold
+    // hoverable link per row (the skill name). Each row also nests endorser
+    // names with the same class, so a flat query would scrape endorsers as
+    // skills — read one per list item to skip them.
+    document.querySelectorAll('.pvs-list__paged-list-item').forEach(item => {
+      if (item.querySelector('a[data-field="skill_page_skill_topic"]')) return;
+      const span = item.querySelector('.hoverable-link-text.t-bold span[aria-hidden="true"]');
+      if (span) tryAdd(span.innerText);
+    });
   }
 
   showAllBtn.click();
