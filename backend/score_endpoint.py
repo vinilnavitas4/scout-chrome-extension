@@ -175,6 +175,75 @@ def _slice_section(text: str, start_re: re.Pattern) -> str:
     return tail if not nxt else tail[: nxt.start() + 20]
 
 
+# ── Clearance + location signals (mirror of service_worker.js) ────────────────
+# Clearance and geography are hard hiring constraints alongside skills; the
+# scorer treats each as its own bucket, renormalized in only when the JD states
+# it. Kept byte-for-byte equivalent to the client so scores agree.
+
+# Ordered high→low. A higher clearance satisfies a lower requirement.
+CLEARANCE_LEVELS = [
+    (4, "TS/SCI",       re.compile(r"\bTS\s*/?\s*SCI\b|\bsensitive compartmented\b", re.IGNORECASE)),
+    (3, "Top Secret",   re.compile(r"\btop\s+secret\b", re.IGNORECASE)),
+    (2, "Secret",       re.compile(r"\bsecret(?:\s+clearance)?\b", re.IGNORECASE)),
+    (1, "Public Trust", re.compile(r"\bpublic\s+trust\b", re.IGNORECASE)),
+]
+
+
+def detect_clearance(text: str) -> dict:
+    if not text:
+        return {"rank": 0, "label": ""}
+    for rank, label, pat in CLEARANCE_LEVELS:
+        if pat.search(text):
+            return {"rank": rank, "label": label}
+    return {"rank": 0, "label": ""}
+
+
+STATE_ABBRS = {
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
+    "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
+    "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC",
+}
+STATE_NAMES = {
+    "alabama":"AL","alaska":"AK","arizona":"AZ","arkansas":"AR","california":"CA","colorado":"CO",
+    "connecticut":"CT","delaware":"DE","florida":"FL","georgia":"GA","hawaii":"HI","idaho":"ID",
+    "illinois":"IL","indiana":"IN","iowa":"IA","kansas":"KS","kentucky":"KY","louisiana":"LA","maine":"ME",
+    "maryland":"MD","massachusetts":"MA","michigan":"MI","minnesota":"MN","mississippi":"MS","missouri":"MO",
+    "montana":"MT","nebraska":"NE","nevada":"NV","new hampshire":"NH","new jersey":"NJ","new mexico":"NM",
+    "new york":"NY","north carolina":"NC","north dakota":"ND","ohio":"OH","oklahoma":"OK","oregon":"OR",
+    "pennsylvania":"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD","tennessee":"TN",
+    "texas":"TX","utah":"UT","vermont":"VT","virginia":"VA","washington":"WA","west virginia":"WV",
+    "wisconsin":"WI","wyoming":"WY","district of columbia":"DC","washington dc":"DC","washington, dc":"DC",
+}
+
+
+def detect_state(text: str, bare_abbr: bool) -> str:
+    """Extract a US state abbreviation. `bare_abbr` allows a lone two-letter
+    token — safe for a short controlled string ('City, ST') but NOT JD prose,
+    where 'IN'/'OR'/'OK' false-match, so JD parsing passes False."""
+    if not text:
+        return ""
+    comma = re.search(r",\s*([A-Za-z]{2})\b", text)
+    if comma and comma.group(1).upper() in STATE_ABBRS:
+        return comma.group(1).upper()
+    low = text.lower()
+    for name, ab in STATE_NAMES.items():
+        if name in low:
+            return ab
+    if bare_abbr:
+        bare = re.search(r"\b([A-Z]{2})\b", text)
+        if bare and bare.group(1) in STATE_ABBRS:
+            return bare.group(1)
+    return ""
+
+
+def detect_remote(text: str) -> bool:
+    if not text:
+        return False
+    if re.search(r"\b(?:not|no|non[\s-]?)\s*remote\b", text, re.IGNORECASE):
+        return False
+    return bool(re.search(r"\bremote\b", text, re.IGNORECASE))
+
+
 # ── Off-list skill mining (#1) ────────────────────────────────────────────────
 # TOOL_KEYWORDS can't enumerate every tool; mine extra skills from explicit
 # enumerations (a "skills cue" followed by a delimited list) so off-list skills
@@ -264,17 +333,27 @@ def parse_requirements(description: str) -> dict:
 
     prominence = {s: skill_prominence(s, text) for s in (required_skills + preferred_skills)}
 
+    # Clearance + location scanned over the WHOLE JD (clearance often sits in a
+    # "Clearance:" line outside the "Need" section). Each scores only when stated.
+    required_clearance = detect_clearance(text)
+    jd_state = detect_state(text, False)
+    jd_remote = detect_remote(text)
+
     return {
         "required_skills": required_skills,
         "preferred_skills": preferred_skills,
         "required_years": required_years,
         "prominence": prominence,
+        "required_clearance": required_clearance,
+        "jd_state": jd_state,
+        "jd_remote": jd_remote,
     }
 
 
 # ── Scoring (port of computeScore) ────────────────────────────────────────────
 
-def compute_score(requirements: dict, job_title: str, skills: list[str], exp_years: float) -> dict:
+def compute_score(requirements: dict, job_title: str, skills: list[str], exp_years: float,
+                  location: str = "", clearance: str = "") -> dict:
     required = requirements["required_skills"]
     preferred = requirements["preferred_skills"]
     required_years = requirements["required_years"]
@@ -321,18 +400,49 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     pref_fill = (len(matched_pref) / len(preferred)) if preferred else 0
     exp_fill = min(exp_years / required_years, 1) if required_years else 0  # cap 1.0 (#3)
 
+    # Clearance bucket — active ONLY when the JD states a required clearance.
+    # Meets/exceeds → full; holds a lower clearance → half; none → zero.
+    req_clr = requirements.get("required_clearance") or {"rank": 0, "label": ""}
+    cand_clr = detect_clearance(clearance)
+    clearance_active = req_clr["rank"] > 0
+    if not clearance_active:
+        clearance_fill = 0.0
+    elif cand_clr["rank"] >= req_clr["rank"]:
+        clearance_fill = 1.0
+    elif cand_clr["rank"] > 0:
+        clearance_fill = 0.5
+    else:
+        clearance_fill = 0.0
+
+    # Location bucket — active when JD is remote, or both JD + candidate states
+    # are known. Remote / same state → full; different state → zero (penalized);
+    # unknown either side and not remote → bucket stays out (no penalty).
+    jd_remote = bool(requirements.get("jd_remote"))
+    jd_state = requirements.get("jd_state") or ""
+    cand_state = detect_state(location or "", True)
+    location_active = jd_remote or (bool(jd_state) and bool(cand_state))
+    location_fill = 1.0 if jd_remote else (1.0 if (jd_state and cand_state and jd_state == cand_state) else 0.0)
+
     # Renormalize so only present buckets contribute and they sum to 100 (#2).
-    W_REQ, W_PREF, W_EXP = 60, 15, 25
+    W_REQ, W_PREF, W_EXP, W_CLR, W_LOC = 60, 15, 25, 25, 15
     active = W_REQ                       # required always present here
     if preferred:
         active += W_PREF
     if required_years:
         active += W_EXP
+    if clearance_active:
+        active += W_CLR
+    if location_active:
+        active += W_LOC
     raw = (W_REQ / active) * req_fill * 100
     if preferred:
         raw += (W_PREF / active) * pref_fill * 100
     if required_years:
         raw += (W_EXP / active) * exp_fill * 100
+    if clearance_active:
+        raw += (W_CLR / active) * clearance_fill * 100
+    if location_active:
+        raw += (W_LOC / active) * location_fill * 100
 
     score = max(min(round(calibrate(raw)), 99), 5)
 
@@ -358,6 +468,25 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
             if exp_years >= required_years
             else f"{exp_years} yrs is below the {required_years}-yr requirement."
         )
+    if clearance_active:
+        if clearance_fill == 1.0:
+            parts.append(f"Holds {cand_clr['label']} — meets the {req_clr['label']} clearance.")
+        elif cand_clr["rank"] > 0:
+            parts.append(f"Holds {cand_clr['label']}, below the required {req_clr['label']} clearance.")
+        else:
+            parts.append(f"No clearance found; role requires {req_clr['label']}.")
+    # Always report location whenever the JD expresses one (remote or a state),
+    # even if the candidate's state is unknown — the bucket may stay out of the
+    # score, but the match/mismatch is always surfaced in the rationale.
+    if jd_remote:
+        parts.append("Remote role — location not a constraint.")
+    elif jd_state:
+        if not cand_state:
+            parts.append(f"Candidate location unknown; job located in {jd_state}.")
+        elif jd_state == cand_state:
+            parts.append(f"Located in {cand_state} — matches the {jd_state} job location.")
+        else:
+            parts.append(f"Located in {cand_state}, outside the {jd_state} job location.")
 
     return {"score": score, "label": label, "rationale": " ".join(parts)}
 
@@ -367,6 +496,8 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
 class Candidate(BaseModel):
     skills: list[str] = []
     experience_years: float = 0
+    location: str = ""
+    clearance: str = ""
 
 
 class ScoreRequest(BaseModel):
@@ -395,4 +526,9 @@ def score(req: ScoreRequest) -> dict:
         if resume_skills:
             skills = resume_skills
 
-    return compute_score(requirements, title, skills, req.candidate.experience_years)
+    # Clearance text = client-detected label + résumé text fallback, so an older
+    # client that doesn't send candidate.clearance still scores clearance.
+    clearance_text = " ".join(t for t in (req.candidate.clearance, req.resume_text) if t)
+
+    return compute_score(requirements, title, skills, req.candidate.experience_years,
+                         location=req.candidate.location, clearance=clearance_text)

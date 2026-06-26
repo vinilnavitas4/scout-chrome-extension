@@ -436,12 +436,31 @@ function extractProfile() {
   const education = extractEducation();
   const openToWork = extractOpenToWork();
 
+  // Clearance from about + skills + title — highest level found. Mirrors the
+  // scorer's detectClearance (service_worker.js / score_endpoint.py).
+  const clearance = detectClearance([about, (skills || []).join(" "), title].filter(Boolean).join("\n"));
+
   return {
     source: "linkedin",
-    name, title, location, skills, experience_years,
+    name, title, location, skills, experience_years, clearance,
     profileUrl: window.location.href.split('?')[0],
     experience, about, education, openToWork
   };
+}
+
+// Security clearance scan — ordered high→low; highest level found wins (a TS/SCI
+// holder also satisfies a Secret requirement). Mirrors detectClearance in
+// service_worker.js / score_endpoint.py.
+const CLEARANCE_LEVELS = [
+  { label: "TS/SCI",       re: /\bTS\s*\/?\s*SCI\b|\bsensitive compartmented\b/i },
+  { label: "Top Secret",   re: /\btop\s+secret\b/i },
+  { label: "Secret",       re: /\bsecret(?:\s+clearance)?\b/i },
+  { label: "Public Trust", re: /\bpublic\s+trust\b/i },
+];
+function detectClearance(text) {
+  if (!text) return "";
+  for (const lvl of CLEARANCE_LEVELS) if (lvl.re.test(text)) return lvl.label;
+  return "";
 }
 
 // Clicks "Show all skills" → extracts from the modal that renders in-place in the live DOM.

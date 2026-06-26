@@ -120,6 +120,63 @@ function sliceSection(text, startRe) {
   return endRel === -1 ? tail : tail.slice(0, endRel + 20);
 }
 
+// ── Clearance + location signals ──────────────────────────────────────────────
+// Clearance and geography are hard hiring constraints alongside skills, so the
+// scorer treats them as their own buckets (renormalized in, only when the JD
+// states them). detectClearance/detectState/detectRemote are mirrored verbatim
+// in score_endpoint.py and the scrapers so client and backend agree.
+
+// Clearance levels, ordered high→low. A higher clearance satisfies a lower
+// requirement (TS/SCI holder meets a Secret ask), so we rank rather than equate.
+const CLEARANCE_LEVELS = [
+  { rank: 4, label: "TS/SCI",       re: /\bTS\s*\/?\s*SCI\b|\bsensitive compartmented\b/i },
+  { rank: 3, label: "Top Secret",   re: /\btop\s+secret\b/i },
+  { rank: 2, label: "Secret",       re: /\bsecret(?:\s+clearance)?\b/i },
+  { rank: 1, label: "Public Trust", re: /\bpublic\s+trust\b/i },
+];
+function detectClearance(text) {
+  if (!text) return { rank: 0, label: "" };
+  for (const lvl of CLEARANCE_LEVELS) if (lvl.re.test(text)) return { rank: lvl.rank, label: lvl.label };
+  return { rank: 0, label: "" };
+}
+
+const STATE_ABBRS = new Set([
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
+  "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
+  "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC",
+]);
+const STATE_NAMES = {
+  alabama:"AL",alaska:"AK",arizona:"AZ",arkansas:"AR",california:"CA",colorado:"CO",connecticut:"CT",
+  delaware:"DE",florida:"FL",georgia:"GA",hawaii:"HI",idaho:"ID",illinois:"IL",indiana:"IN",iowa:"IA",
+  kansas:"KS",kentucky:"KY",louisiana:"LA",maine:"ME",maryland:"MD",massachusetts:"MA",michigan:"MI",
+  minnesota:"MN",mississippi:"MS",missouri:"MO",montana:"MT",nebraska:"NE",nevada:"NV","new hampshire":"NH",
+  "new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND",ohio:"OH",
+  oklahoma:"OK",oregon:"OR",pennsylvania:"PA","rhode island":"RI","south carolina":"SC","south dakota":"SD",
+  tennessee:"TN",texas:"TX",utah:"UT",vermont:"VT",virginia:"VA",washington:"WA","west virginia":"WV",
+  wisconsin:"WI",wyoming:"WY","district of columbia":"DC","washington dc":"DC","washington, dc":"DC",
+};
+// Extract a US state abbreviation. `bareAbbr` allows a lone two-letter token —
+// safe for a short controlled string (candidate "City, ST") but NOT for JD prose,
+// where words like "IN"/"OR"/"OK" would false-match, so JD parsing passes false.
+function detectState(text, bareAbbr) {
+  if (!text) return "";
+  const comma = text.match(/,\s*([A-Za-z]{2})\b/);
+  if (comma && STATE_ABBRS.has(comma[1].toUpperCase())) return comma[1].toUpperCase();
+  const low = text.toLowerCase();
+  for (const name in STATE_NAMES) if (low.includes(name)) return STATE_NAMES[name];
+  if (bareAbbr) {
+    const bare = text.match(/\b([A-Z]{2})\b/);
+    if (bare && STATE_ABBRS.has(bare[1])) return bare[1];
+  }
+  return "";
+}
+
+function detectRemote(text) {
+  if (!text) return false;
+  if (/\b(?:not|no|non[\s-]?)\s*remote\b/i.test(text)) return false;
+  return /\bremote\b/i.test(text);
+}
+
 // ── Off-list skill mining (#1) ────────────────────────────────────────────────
 // TOOL_KEYWORDS can't enumerate every tool, so a JD requiring something off-list
 // would never score it. Mine extra skill phrases from explicit enumerations only
@@ -210,7 +267,13 @@ function parseRequirements(description) {
   const prominence = {};
   for (const s of [...required_skills, ...preferred_skills]) prominence[s] = skillProminence(s, text);
 
-  return { required_skills, preferred_skills, required_years, prominence };
+  // Clearance + location are scanned over the WHOLE JD (clearance often sits in a
+  // "Clearance:" line outside the "Need" section). Each only scores when stated.
+  const required_clearance = detectClearance(text);
+  const jd_state  = detectState(text, false);
+  const jd_remote = detectRemote(text);
+
+  return { required_skills, preferred_skills, required_years, prominence, required_clearance, jd_state, jd_remote };
 }
 
 // ── Semantic skill matching via embeddings (offscreen model) ──────────────────
@@ -303,6 +366,8 @@ async function backendScore(jd_id, candidate, resume_text) {
     candidate: {
       skills:           candidate.skills || [],
       experience_years: candidate.experience_years || 0,
+      location:         candidate.location  || "",
+      clearance:        candidate.clearance || "",
     },
   });
 
@@ -413,15 +478,41 @@ async function computeScore(requirements, jobTitle, candidate) {
   const prefFill = preferred_skills.length ? matchedPref.length / preferred_skills.length : 0;
   const expFill  = required_years ? Math.min(expYears / required_years, 1) : 0; // cap at 1.0 (#3)
 
+  // Clearance bucket — active ONLY when the JD states a required clearance. Meets
+  // or exceeds → full credit; holds a lower clearance → half (still investable);
+  // none → zero. A JD with no clearance ask leaves this bucket out entirely.
+  const reqClr  = requirements.required_clearance || { rank: 0, label: "" };
+  const candClr = detectClearance([candidate.clearance, candidate.about].filter(Boolean).join("\n"));
+  const clearanceActive = reqClr.rank > 0;
+  const clearanceFill = !clearanceActive ? 0
+    : candClr.rank >= reqClr.rank ? 1
+    : candClr.rank > 0            ? 0.5
+    :                              0;
+
+  // Location bucket — active when the JD is remote, or both JD and candidate
+  // states are known. Remote → location is not a constraint (full credit); same
+  // state → full; different state → zero (penalized). Unknown either side and
+  // not remote → bucket stays out (no penalty for missing data).
+  const jdRemote  = !!requirements.jd_remote;
+  const jdState   = requirements.jd_state || "";
+  const candState = detectState(candidate.location || "", true);
+  const locationActive = jdRemote || (!!jdState && !!candState);
+  const locationFill = jdRemote ? 1 : (jdState && candState && jdState === candState ? 1 : 0);
+
   // Renormalize so only PRESENT buckets contribute and they sum to 100 (#2) — no
-  // free credit for an absent preferred list or an unstated year requirement.
-  const W_REQ = 60, W_PREF = 15, W_EXP = 25;
+  // free credit for an absent preferred list, unstated years, or an unstated
+  // clearance/location constraint.
+  const W_REQ = 60, W_PREF = 15, W_EXP = 25, W_CLR = 25, W_LOC = 15;
   let active = W_REQ;                                  // required is always present here
   if (preferred_skills.length) active += W_PREF;
   if (required_years)          active += W_EXP;
+  if (clearanceActive)         active += W_CLR;
+  if (locationActive)          active += W_LOC;
   let raw = (W_REQ / active) * reqFill * 100;
   if (preferred_skills.length) raw += (W_PREF / active) * prefFill * 100;
   if (required_years)          raw += (W_EXP / active) * expFill * 100;
+  if (clearanceActive)         raw += (W_CLR / active) * clearanceFill * 100;
+  if (locationActive)          raw += (W_LOC / active) * locationFill * 100;
 
   const score = Math.min(Math.max(Math.round(calibrate(raw)), 5), 99);
 
@@ -446,6 +537,25 @@ async function computeScore(requirements, jobTitle, candidate) {
       ? `${expYears} yrs meets the ${required_years}-yr requirement.`
       : `${expYears} yrs is below the ${required_years}-yr requirement.`
     );
+  }
+  if (clearanceActive) {
+    parts.push(clearanceFill === 1
+      ? `Holds ${candClr.label} — meets the ${reqClr.label} clearance.`
+      : candClr.rank > 0
+        ? `Holds ${candClr.label}, below the required ${reqClr.label} clearance.`
+        : `No clearance found; role requires ${reqClr.label}.`);
+  }
+  // Always report location whenever the JD expresses one (remote or a state),
+  // even if the candidate's state is unknown — the bucket may stay out of the
+  // score, but the match/mismatch is always surfaced in the rationale.
+  if (jdRemote) {
+    parts.push(`Remote role — location not a constraint.`);
+  } else if (jdState) {
+    parts.push(!candState
+      ? `Candidate location unknown; job located in ${jdState}.`
+      : jdState === candState
+        ? `Located in ${candState} — matches the ${jdState} job location.`
+        : `Located in ${candState}, outside the ${jdState} job location.`);
   }
 
   return { score, label, rationale: parts.join(" ") };
