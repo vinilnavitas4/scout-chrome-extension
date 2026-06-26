@@ -155,6 +155,24 @@ const STATE_NAMES = {
   tennessee:"TN",texas:"TX",utah:"UT",vermont:"VT",virginia:"VA",washington:"WA","west virginia":"WV",
   wisconsin:"WI",wyoming:"WY","district of columbia":"DC","washington dc":"DC","washington, dc":"DC",
 };
+// LinkedIn often reports a metro/city only ("Greater Boston Area", "San Francisco
+// Bay Area"), with no state token. Map the major US metros to a state so those
+// locations still score instead of reading as "unknown". Mirrored in score_endpoint.py.
+const CITY_NAMES = {
+  "san francisco":"CA","bay area":"CA","silicon valley":"CA","san jose":"CA",oakland:"CA",
+  "los angeles":"CA","san diego":"CA",sacramento:"CA","orange county":"CA",
+  "new york":"NY",nyc:"NY",manhattan:"NY",brooklyn:"NY",
+  boston:"MA",chicago:"IL",seattle:"WA",portland:"OR","las vegas":"NV",
+  houston:"TX",dallas:"TX",austin:"TX","san antonio":"TX","fort worth":"TX",
+  philadelphia:"PA",pittsburgh:"PA",atlanta:"GA",
+  miami:"FL",orlando:"FL",tampa:"FL",jacksonville:"FL",
+  denver:"CO",phoenix:"AZ",tucson:"AZ",detroit:"MI",
+  minneapolis:"MN","st. paul":"MN","saint paul":"MN","st paul":"MN",
+  charlotte:"NC",raleigh:"NC",durham:"NC",nashville:"TN",memphis:"TN",
+  baltimore:"MD","salt lake city":"UT",columbus:"OH",cleveland:"OH",cincinnati:"OH",
+  "kansas city":"MO","st. louis":"MO","saint louis":"MO","st louis":"MO",
+  indianapolis:"IN",milwaukee:"WI","new orleans":"LA",richmond:"VA",
+};
 // Extract a US state abbreviation. `bareAbbr` allows a lone two-letter token —
 // safe for a short controlled string (candidate "City, ST") but NOT for JD prose,
 // where words like "IN"/"OR"/"OK" would false-match, so JD parsing passes false.
@@ -163,7 +181,10 @@ function detectState(text, bareAbbr) {
   const comma = text.match(/,\s*([A-Za-z]{2})\b/);
   if (comma && STATE_ABBRS.has(comma[1].toUpperCase())) return comma[1].toUpperCase();
   const low = text.toLowerCase();
+  // "Washington DC" must beat the plain "washington" → WA state name.
+  if (/washington\s*,?\s*d\.?\s*c\.?/.test(low)) return "DC";
   for (const name in STATE_NAMES) if (low.includes(name)) return STATE_NAMES[name];
+  for (const city in CITY_NAMES) if (low.includes(city)) return CITY_NAMES[city];
   if (bareAbbr) {
     const bare = text.match(/\b([A-Z]{2})\b/);
     if (bare && STATE_ABBRS.has(bare[1])) return bare[1];
@@ -551,8 +572,11 @@ async function computeScore(requirements, jobTitle, candidate) {
   if (jdRemote) {
     parts.push(`Remote role — location not a constraint.`);
   } else if (jdState) {
+    const candLoc = (candidate.location || "").trim();
     parts.push(!candState
-      ? `Candidate location unknown; job located in ${jdState}.`
+      ? (candLoc
+          ? `Located in ${candLoc}; job located in ${jdState}.`
+          : `Candidate location unknown; job located in ${jdState}.`)
       : jdState === candState
         ? `Located in ${candState} — matches the ${jdState} job location.`
         : `Located in ${candState}, outside the ${jdState} job location.`);

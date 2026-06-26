@@ -214,6 +214,24 @@ STATE_NAMES = {
     "texas":"TX","utah":"UT","vermont":"VT","virginia":"VA","washington":"WA","west virginia":"WV",
     "wisconsin":"WI","wyoming":"WY","district of columbia":"DC","washington dc":"DC","washington, dc":"DC",
 }
+# LinkedIn often reports a metro/city only ("Greater Boston Area", "San Francisco
+# Bay Area"), with no state token. Map the major US metros to a state so those
+# locations still score instead of reading as "unknown".
+CITY_NAMES = {
+    "san francisco":"CA","bay area":"CA","silicon valley":"CA","san jose":"CA","oakland":"CA",
+    "los angeles":"CA","san diego":"CA","sacramento":"CA","orange county":"CA",
+    "new york":"NY","nyc":"NY","manhattan":"NY","brooklyn":"NY",
+    "boston":"MA","chicago":"IL","seattle":"WA","portland":"OR","las vegas":"NV",
+    "houston":"TX","dallas":"TX","austin":"TX","san antonio":"TX","fort worth":"TX",
+    "philadelphia":"PA","pittsburgh":"PA","atlanta":"GA",
+    "miami":"FL","orlando":"FL","tampa":"FL","jacksonville":"FL",
+    "denver":"CO","phoenix":"AZ","tucson":"AZ","detroit":"MI",
+    "minneapolis":"MN","st. paul":"MN","saint paul":"MN","st paul":"MN",
+    "charlotte":"NC","raleigh":"NC","durham":"NC","nashville":"TN","memphis":"TN",
+    "baltimore":"MD","salt lake city":"UT","columbus":"OH","cleveland":"OH","cincinnati":"OH",
+    "kansas city":"MO","st. louis":"MO","saint louis":"MO","st louis":"MO",
+    "indianapolis":"IN","milwaukee":"WI","new orleans":"LA","richmond":"VA",
+}
 
 
 def detect_state(text: str, bare_abbr: bool) -> str:
@@ -226,8 +244,14 @@ def detect_state(text: str, bare_abbr: bool) -> str:
     if comma and comma.group(1).upper() in STATE_ABBRS:
         return comma.group(1).upper()
     low = text.lower()
+    # "Washington DC" must beat the plain "washington" → WA state name.
+    if re.search(r"washington\s*,?\s*d\.?\s*c\.?", low):
+        return "DC"
     for name, ab in STATE_NAMES.items():
         if name in low:
+            return ab
+    for city, ab in CITY_NAMES.items():
+        if city in low:
             return ab
     if bare_abbr:
         bare = re.search(r"\b([A-Z]{2})\b", text)
@@ -481,8 +505,12 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     if jd_remote:
         parts.append("Remote role — location not a constraint.")
     elif jd_state:
+        cand_loc = (location or "").strip()
         if not cand_state:
-            parts.append(f"Candidate location unknown; job located in {jd_state}.")
+            if cand_loc:
+                parts.append(f"Located in {cand_loc}; job located in {jd_state}.")
+            else:
+                parts.append(f"Candidate location unknown; job located in {jd_state}.")
         elif jd_state == cand_state:
             parts.append(f"Located in {cand_state} — matches the {jd_state} job location.")
         else:
