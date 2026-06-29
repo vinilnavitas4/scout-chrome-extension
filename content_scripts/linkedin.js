@@ -687,6 +687,11 @@ async function extractContactInfo() {
     return { email: '', phone: '', sawOverlay: false };
   }
 
+  // Carry whatever the fetch path resolves so a partial result (email but no
+  // phone) doesn't get thrown away when we fall through to the modal.
+  let fetchedEmail = '';
+  let fetchedPhone = '';
+
   // Strategy A (preferred): fetch the overlay route — it returns server-rendered
   // HTML with email/phone inline. No modal, no timing, no navigation.
   try {
@@ -698,21 +703,21 @@ async function extractContactInfo() {
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const scope = doc.querySelector('[componentkey*="ContactInfo"], [data-sdui-screen*="ContactDetails"], dialog') || doc;
       const got = parseContactFrom(scope);
-      if (got.email || got.phone) {
-        console.log('[SCOUT] contact info via fetch:', got);
-        return { ...got, sawOverlay: true };
-      }
-      // DOM parse found nothing — contact data often sits in embedded JSON
-      // (SDUI/voyager payload) rather than rendered markup. Scan the raw HTML.
+      // Fields can split across sources: email rendered in DOM, phone only in
+      // the embedded JSON (SDUI/voyager payload). Scan raw HTML too.
       const rawEmail = (html.match(new RegExp(EMAIL_RE.source, 'g')) || [])
         .find(e => isLikelyEmail(e) && !/linkedin\.com$/i.test(e.split('@')[1] || ''));
       const rawPhone = (html.match(/"(?:phoneNumber|number)"\s*:\s*"(\+?[\d\s\-().]{7,18})"/) || [])[1] || '';
-      if (rawEmail || rawPhone) {
-        const got2 = { email: rawEmail || '', phone: rawPhone.trim() };
-        console.log('[SCOUT] contact info via raw HTML scan:', got2);
-        return got2;
+      fetchedEmail = got.email || rawEmail || '';
+      fetchedPhone = got.phone || (rawPhone ? rawPhone.trim() : '');
+      console.log('[SCOUT] contact info via fetch (DOM+raw):', { email: fetchedEmail, phone: fetchedPhone });
+      // Only short-circuit when BOTH fields are in hand. The server-rendered
+      // overlay often carries email but loads the phone lazily (only the live
+      // modal renders it), so a missing phone must fall through to the modal.
+      if (fetchedEmail && fetchedPhone) {
+        return { email: fetchedEmail, phone: fetchedPhone, sawOverlay: true };
       }
-      console.log('[SCOUT] fetch returned no contact fields, falling back to modal');
+      console.log('[SCOUT] fetch missing phone — opening modal to complete');
     } else {
       console.log('[SCOUT] fetch status', res.status, '— falling back to modal');
     }
@@ -837,6 +842,11 @@ async function extractContactInfo() {
       }
     }
   }
+
+  // Fold in anything the fetch path already resolved (e.g. email) so the modal
+  // pass only needs to supply what was missing (e.g. the lazily-rendered phone).
+  email = email || fetchedEmail;
+  phone = phone || fetchedPhone;
 
   console.log('[SCOUT] contact info result:', { email, phone });
   await closeOverlay();
