@@ -1,4 +1,4 @@
-const BASE_URL = "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
+const BASE_URL = "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
 // Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
 // Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
