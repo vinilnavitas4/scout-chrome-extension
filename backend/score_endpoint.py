@@ -186,6 +186,8 @@ CLEARANCE_LEVELS = [
     (3, "Top Secret",   re.compile(r"\btop\s+secret\b", re.IGNORECASE)),
     (2, "Secret",       re.compile(r"\bsecret(?:\s+clearance)?\b", re.IGNORECASE)),
     (1, "Public Trust", re.compile(r"\bpublic\s+trust\b", re.IGNORECASE)),
+    # Generic fallback — any mention of clearance/cleared without a named level.
+    (1, "Clearance",    re.compile(r"\bclear(?:ance|ence|ances|ences)\b|\bcleared\b|\bclearable\b", re.IGNORECASE)),
 ]
 
 

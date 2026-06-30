@@ -71,6 +71,13 @@
           </div>
         </div>
 
+        <!-- Cross-JD fit check — scores the candidate against every JD -->
+        <button class="btn btn-secondary" id="scan-jds-btn">🔎 Check fit across all JDs</button>
+        <div class="bestfit" id="bestfit" style="display:none">
+          <div class="bestfit-status" id="bestfit-status"></div>
+          <div class="bestfit-list" id="bestfit-list"></div>
+        </div>
+
         <!-- Optional resume upload — appears once score is ready -->
         <div class="resume-upload" id="resume-upload" style="display:none">
           <div class="resume-label">Attach Resume <span class="resume-hint">optional · PDF / DOC / DOCX</span></div>

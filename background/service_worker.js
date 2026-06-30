@@ -133,6 +133,8 @@ const CLEARANCE_LEVELS = [
   { rank: 3, label: "Top Secret",   re: /\btop\s+secret\b/i },
   { rank: 2, label: "Secret",       re: /\bsecret(?:\s+clearance)?\b/i },
   { rank: 1, label: "Public Trust", re: /\bpublic\s+trust\b/i },
+  // Generic fallback — any mention of clearance/cleared without a named level.
+  { rank: 1, label: "Clearance",    re: /\bclear(?:ance|ence|ances|ences)\b|\bcleared\b|\bclearable\b/i },
 ];
 function detectClearance(text) {
   if (!text) return { rank: 0, label: "" };
@@ -585,6 +587,50 @@ async function computeScore(requirements, jobTitle, candidate) {
   return { score, label, rationale: parts.join(" ") };
 }
 
+// ── Score one candidate against one JD (backend-first, local fallback) ────────
+// Shared by GET_SCORE (single JD) and SCORE_ALL (every JD). Folds experience-
+// description skills + résumé skills, then scores. Returns { score, label,
+// rationale, source }.
+async function scoreCandidateForJd(jd_id, candidate, resume_text) {
+  // Fold skills mined from each experience's description into the skill set,
+  // alongside the Skills section. findKeywords whitelists known tools → no prose
+  // pollution. Overridden when a résumé replaces skills below.
+  const expText = (candidate.experience || [])
+    .map(e => e && e.description).filter(Boolean).join("\n");
+  if (expText) {
+    const expSkills = findKeywords(expText);
+    if (expSkills.length > 0) {
+      const have = new Set((candidate.skills || []).map(s => s.toLowerCase()));
+      const added = expSkills.filter(s => !have.has(s.toLowerCase()));
+      candidate = { ...candidate, skills: [...(candidate.skills || []), ...added] };
+    }
+  }
+
+  // Résumé present → score against the résumé's skills only (replace the
+  // profile-scraped skills). Guard: empty keyword scan keeps original skills.
+  let scored = candidate;
+  if (resume_text) {
+    const resumeSkills = findKeywords(resume_text);
+    if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
+  }
+
+  // 1) Backend scoring (consistent across devices).
+  const backend = await backendScore(jd_id, scored, resume_text);
+  if (backend) return { ...backend, source: "backend" };
+
+  // 2) Local fallback (per-device embeddings — may differ across browsers).
+  let cached = jobCache.get(jd_id);
+  if (!cached) {
+    const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`, { headers: scoutHeaders() });
+    const job = await r.json();
+    if (job.error) throw new Error(job.error);
+    cached = { title: job.title, requirements: parseRequirements(job.description || "") };
+    jobCache.set(jd_id, cached);
+  }
+  const result = await computeScore(cached.requirements, cached.title, scored);
+  return { ...result, source: "local" };
+}
+
 // ── Job list fetch + cache ────────────────────────────────────────────────────
 // The /api/scout/jobs call is the slow part of opening the panel (Azure cold
 // start). Cache the mapped list in storage.local so repeat opens populate the
@@ -835,46 +881,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         const { jd_id, candidate, resume_text } = payload;
-
-        // Résumé present → score against the résumé's skills only (replace the
-        // profile-scraped skills). Done HERE, before the backend call, so BOTH
-        // the backend and local paths score on the résumé keywords — Dice's own
-        // skill list is generic (ide/software/configuration) and must not drive
-        // the score when a résumé is available. Guard: an empty keyword scan
-        // keeps the original skills (avoids flooring the score).
-        let scored = candidate;
-        if (resume_text) {
-          const resumeSkills = findKeywords(resume_text);
-          if (resumeSkills.length > 0) {
-            scored = { ...candidate, skills: resumeSkills };
-            console.log(`[SCOUT] Scoring on ${resumeSkills.length} résumé skills:`, resumeSkills);
-          }
-        }
-
-        // 1) Backend scoring (consistent across devices). Send the résumé-derived
-        //    skills so the backend scores on them.
-        const backend = await backendScore(jd_id, scored, resume_text);
-        if (backend) {
-          console.log("[SCOUT] Score (backend):", backend);
-          sendResponse({ ok: true, data: backend, source: "backend" });
-          return;
-        }
-
-        // 2) Local fallback (per-device embeddings — may differ across browsers).
-        let cached = jobCache.get(jd_id);
-        if (!cached) {
-          const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`, { headers: scoutHeaders() });
-          const job = await r.json();
-          if (job.error) { sendResponse({ ok: false, error: job.error }); return; }
-          cached = { title: job.title, requirements: parseRequirements(job.description || "") };
-          jobCache.set(jd_id, cached);
-        }
-
-        const result = await computeScore(cached.requirements, cached.title, scored);
-        console.log("[SCOUT] Score (local fallback):", result);
-        sendResponse({ ok: true, data: result, source: "local" });
+        const result = await scoreCandidateForJd(jd_id, candidate, resume_text);
+        console.log(`[SCOUT] Score (${result.source}):`, result);
+        sendResponse({ ok: true, data: result, source: result.source });
       } catch (e) {
         console.error("[SCOUT] GET_SCORE error:", e.message);
+        sendResponse({ ok: false, error: `Scoring failed: ${e.message}` });
+      }
+    })();
+    return true;
+  }
+
+  // ── SCORE_ALL — score the candidate against EVERY JD, return best-first ────
+  // Runs entirely in the background (service worker). Scores all jobs with
+  // bounded concurrency so Azure isn't hit with N parallel cold-start requests,
+  // then returns the list sorted high→low. Popup shows the top (best-fit) JD.
+  if (type === "SCORE_ALL") {
+    (async () => {
+      try {
+        const { candidate, resume_text } = payload;
+
+        const cached = await getCachedJobs().catch(() => null);
+        let jobs = cached?.jobs;
+        if (!jobs || !jobs.length) jobs = await fetchJobs();
+        if (!jobs.length) { sendResponse({ ok: false, error: "No jobs to score against." }); return; }
+
+        const CONCURRENCY = 4;
+        const results = [];
+        let idx = 0;
+        async function worker() {
+          while (idx < jobs.length) {
+            const job = jobs[idx++];
+            try {
+              const r = await scoreCandidateForJd(job.id, candidate, resume_text);
+              results.push({ id: job.id, title: job.title, client: job.client || "",
+                             score: r.score, label: r.label, rationale: r.rationale });
+            } catch (e) {
+              console.warn(`[SCOUT] SCORE_ALL skip ${job.id}: ${e.message}`);
+            }
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker));
+
+        results.sort((a, b) => b.score - a.score);
+        console.log(`[SCOUT] SCORE_ALL: ${results.length}/${jobs.length} scored, best:`, results[0]);
+        sendResponse({ ok: true, data: results });
+      } catch (e) {
+        console.error("[SCOUT] SCORE_ALL error:", e.message);
         sendResponse({ ok: false, error: `Scoring failed: ${e.message}` });
       }
     })();

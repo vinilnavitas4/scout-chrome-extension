@@ -23,6 +23,10 @@ const resumeUpload   = document.getElementById('resume-upload');
 const resumeFile     = document.getElementById('resume-file');
 const resumeName     = document.getElementById('resume-name');
 const resumeClear    = document.getElementById('resume-clear');
+const scanJdsBtn     = document.getElementById('scan-jds-btn');
+const bestfit        = document.getElementById('bestfit');
+const bestfitStatus  = document.getElementById('bestfit-status');
+const bestfitList    = document.getElementById('bestfit-list');
 const mainView       = document.getElementById('main-view');
 const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
@@ -513,6 +517,50 @@ function renderScore(data, updated = false) {
   resumeUpload.style.display = 'block';
   addBtn.disabled = false;
   resetAddButton();
+}
+
+// ── Cross-JD fit check ────────────────────────────────────────────────────────
+// Scores the candidate against every JD in the background (service worker),
+// then surfaces the best-fit JD (and the rest, high→low).
+scanJdsBtn.addEventListener('click', () => {
+  if (!candidate) { showStatus('Profile not loaded yet — wait and try again.', 'error'); return; }
+
+  scanJdsBtn.disabled = true;
+  bestfit.style.display = 'block';
+  bestfitList.innerHTML = '';
+  bestfitStatus.textContent = 'Scoring against all JDs…';
+
+  const effectiveResume = resumeText || candidate?.resumeText || '';
+  chrome.runtime.sendMessage(
+    { type: 'SCORE_ALL', payload: { candidate, resume_text: effectiveResume || undefined } },
+    (res) => {
+      scanJdsBtn.disabled = false;
+      if (!res?.ok) { bestfitStatus.textContent = 'Failed — ' + (res?.error || 'unknown error'); return; }
+      renderBestFit(res.data);
+    }
+  );
+});
+
+function renderBestFit(list) {
+  if (!list || !list.length) { bestfitStatus.textContent = 'No JDs scored.'; return; }
+  const best = list[0];
+  bestfitStatus.innerHTML = `Best fit: <strong>${best.title}</strong> — ${best.score}/100 (${best.label})`;
+
+  bestfitList.innerHTML = '';
+  list.slice(0, 3).forEach((jd, i) => {
+    const cls = jd.score >= 80 ? 'excellent' : jd.score >= 65 ? 'good' : jd.score >= 45 ? 'fair' : 'poor';
+    const row = document.createElement('div');
+    row.className = 'bestfit-row' + (i === 0 ? ' top' : '');
+    row.innerHTML =
+      `<span class="bestfit-score ${cls}">${jd.score}</span>` +
+      `<span class="bestfit-title">${jd.title}${jd.client ? ' · ' + jd.client : ''}</span>`;
+    // Click a row → select that JD in the dropdown and score it normally.
+    row.addEventListener('click', () => {
+      jdSelect.value = jd.id;
+      jdSelect.dispatchEvent(new Event('change'));
+    });
+    bestfitList.appendChild(row);
+  });
 }
 
 // ── Add to SCOUT → backend API ────────────────────────────────────────────────

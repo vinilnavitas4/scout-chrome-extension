@@ -265,7 +265,9 @@ function extractExperience() {
         for (const p of ps) {
           if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
         }
-        if (title) experience.push({ title, company: companyName, dates });
+        // Full role text → scorer mines skill keywords from the description.
+        const description = (li.innerText || '').trim();
+        if (title) experience.push({ title, company: companyName, dates, description });
       }
     } else {
       // Single-role entry: company header IS the role
@@ -276,7 +278,8 @@ function extractExperience() {
       for (const p of ps) {
         if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
       }
-      if (title) experience.push({ title, company: companyName, dates });
+      const description = (item.innerText || '').trim();
+      if (title) experience.push({ title, company: companyName, dates, description });
     }
   }
 
@@ -289,7 +292,8 @@ function extractExperience() {
       // Don't assume ps[2] is the date line — scan for the first date-like <p>.
       const dateP = ps.find(p => DATE_RE.test(p.innerText.trim()));
       const dates = dateP ? dateP.innerText.trim() : (ps[2]?.innerText.trim() || '');
-      if (title) experience.push({ title, company, dates });
+      const description = (item.innerText || '').trim();
+      if (title) experience.push({ title, company, dates, description });
     });
   }
   return experience;
@@ -471,6 +475,8 @@ const CLEARANCE_LEVELS = [
   { label: "Top Secret",   re: /\btop\s+secret\b/i },
   { label: "Secret",       re: /\bsecret(?:\s+clearance)?\b/i },
   { label: "Public Trust", re: /\bpublic\s+trust\b/i },
+  // Generic fallback — any mention of clearance/cleared without a named level.
+  { label: "Clearance",    re: /\bclear(?:ance|ence|ances|ences)\b|\bcleared\b|\bclearable\b/i },
 ];
 function detectClearance(text) {
   if (!text) return "";

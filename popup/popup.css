@@ -425,6 +425,49 @@ body {
   background: #e2e8f0;
 }
 
+/* Cross-JD fit results */
+.bestfit {
+  margin: 6px 0 10px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.bestfit-status {
+  font-size: 12px;
+  color: #334155;
+  margin-bottom: 8px;
+}
+.bestfit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.bestfit-row:hover { background: #eef2f7; }
+.bestfit-row.top { background: #f0fdf4; }
+.bestfit-score {
+  flex: 0 0 34px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 2px 0;
+  border-radius: 5px;
+}
+.bestfit-score.excellent { color: #16a34a; background: #f0fdf4; }
+.bestfit-score.good      { color: #0284c7; background: #f0f9ff; }
+.bestfit-score.fair      { color: #d97706; background: #fffbeb; }
+.bestfit-score.poor      { color: #dc2626; background: #fef2f2; }
+.bestfit-title {
+  font-size: 12px;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .btn-secondary:disabled {
   background: #f8fafc;
   color: #cbd5e1;
