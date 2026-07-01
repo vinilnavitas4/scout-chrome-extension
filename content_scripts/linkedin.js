@@ -52,9 +52,14 @@ function findSectionByHeading(headingText) {
 // Skills section finder — heading lookup first, then layout-specific anchors
 // (classic LinkedIn uses a <div id="skills"> anchor inside the section).
 function findSkillsSection() {
+  // Fallback anchor must be the section's "Show all skills" link — NOT a per-skill
+  // endorsers link (".../details/skills/urn:li:fsd_skill:(...)/endorsers/"), which
+  // also matches "/details/skills" and lives in unrelated cards (browsemap etc.).
+  const showAll = Array.from(document.querySelectorAll('a[href*="/details/skills"]'))
+    .find(a => !/\/endorsers\//.test(a.href) && !/fsd_skill:/.test(a.href));
   return findSectionByHeading('Skills')
     || document.querySelector('#skills')?.closest('section')
-    || document.querySelector('a[href*="/details/skills"]')?.closest('section')
+    || showAll?.closest('section')
     || null;
 }
 
@@ -203,6 +208,33 @@ function extractEducation() {
   return education;
 }
 
+// Licenses & certifications (doc §3.1) — name, issuing body, issue/expiry dates.
+// Feeds the §4 "Required Certifications" auto-scheduling gate. LinkedIn renders
+// the section heading as "Licenses & certifications" (older: "Certifications").
+function extractCertifications() {
+  const certs = [];
+  const section = findSectionByHeading('Licenses & certifications')
+    || findSectionByHeading('Licenses and certifications')
+    || findSectionByHeading('Certifications')
+    || document.querySelector('#licenses_and_certifications')?.closest('section');
+  if (!section) return certs;
+  getSectionItems(section).forEach(item => {
+    const editLink = item.querySelector('a[href*="edit/forms/"]');
+    const ps = editLink ? editLink.querySelectorAll('p') : item.querySelectorAll('p');
+    const name   = ps[0]?.innerText.trim() || '';
+    const issuer = ps[1]?.innerText.trim() || '';
+    // Dates line looks like "Issued Jun 2021 · Expires Jun 2024" — take the first
+    // <p> that carries an issue/expiry marker or a year.
+    let dates = '';
+    for (const p of ps) {
+      const t = (p.innerText || '').trim();
+      if (/issued|expires|\b(?:19|20)\d{2}\b/i.test(t)) { dates = t; break; }
+    }
+    if (name && !/^show all/i.test(name)) certs.push({ name, issuer, dates });
+  });
+  return certs;
+}
+
 function calcExperienceYears(experience) {
   // Strategy 1: sum "X yrs Y mos" duration strings from LinkedIn
   let totalMonths = 0;
@@ -260,7 +292,9 @@ function extractExperience() {
         for (const p of ps) {
           if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
         }
-        if (title) experience.push({ title, company: companyName, dates });
+        // Full role text → scorer mines skill keywords from the description.
+        const description = (li.innerText || '').trim();
+        if (title) experience.push({ title, company: companyName, dates, description });
       }
     } else {
       // Single-role entry: company header IS the role
@@ -271,7 +305,8 @@ function extractExperience() {
       for (const p of ps) {
         if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
       }
-      if (title) experience.push({ title, company: companyName, dates });
+      const description = (item.innerText || '').trim();
+      if (title) experience.push({ title, company: companyName, dates, description });
     }
   }
 
@@ -284,7 +319,8 @@ function extractExperience() {
       // Don't assume ps[2] is the date line — scan for the first date-like <p>.
       const dateP = ps.find(p => DATE_RE.test(p.innerText.trim()));
       const dates = dateP ? dateP.innerText.trim() : (ps[2]?.innerText.trim() || '');
-      if (title) experience.push({ title, company, dates });
+      const description = (item.innerText || '').trim();
+      if (title) experience.push({ title, company, dates, description });
     });
   }
   return experience;
@@ -363,15 +399,29 @@ function extractProfile() {
   // Skills — Source 1: Skills section on main page
   const seen = new Set();
   const skills = [];
+  const endorsements = {};   // skill name (lowercased) → endorsement count, when shown
 
   function addSkill(raw) {
-    const s = (raw || '').trim().split('\n')[0].trim();
+    // First line only, then drop any endorsement tail LinkedIn appends inline
+    // ("Python · 12 endorsements", "AWS · Endorsed by 3 colleagues") and the
+    // leftover middot/separator so only the skill name remains.
+    let s = (raw || '').trim().split('\n')[0].trim();
+    // Capture the endorsement count (doc §3.1) before stripping the tail.
+    const endMatch = s.match(/(\d+)\s*endorsements?/i);
+    // Drop the endorsement tail in either form: "· 12 endorsements" or
+    // "· Endorsed by 3 colleagues", plus the leftover middot/separator.
+    s = s.replace(/\s*[·•|–-]\s*(?:\d+\s*endorsements?|endorsed by\b.*)$/i, '');
+    s = s.replace(/\s*\d+\s*endorsements?$/i, '');
+    s = s.replace(/\s*[·•|]\s*$/, '').trim();
+    const low = s.toLowerCase();
     if (s && s.length < 80 && s.length > 1 &&
-      !s.toLowerCase().includes('show all') &&
-      !s.toLowerCase().includes('endorse') &&
-      !seen.has(s.toLowerCase())) {
-      seen.add(s.toLowerCase());
+      !low.includes('show all') &&
+      !low.includes('endorse') &&
+      !/^\d+$/.test(s) &&                // pure endorsement count leaked as a row
+      !seen.has(low)) {
+      seen.add(low);
       skills.push(s);
+      if (endMatch) endorsements[low] = parseInt(endMatch[1], 10);
     }
   }
 
@@ -434,14 +484,44 @@ function extractProfile() {
   const about = extractAbout();
   console.log('[SCOUT] about result:', about ? about.substring(0, 80) : '(empty)');
   const education = extractEducation();
+  const certifications = extractCertifications();
   const openToWork = extractOpenToWork();
+
+  // Clearance from about + skills + title + experience bullets + certifications —
+  // highest level found. Candidates often state clearance in a role description
+  // ("Active Secret clearance"), so experience text must be scanned too or a
+  // cleared candidate reads as "None". Mirrors the scorer's detectClearance.
+  const clearance = detectClearance([
+    about,
+    (skills || []).join(" "),
+    title,
+    (experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
+    (certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
+  ].filter(Boolean).join("\n"));
 
   return {
     source: "linkedin",
-    name, title, location, skills, experience_years,
+    name, title, location, skills, endorsements, experience_years, clearance,
     profileUrl: window.location.href.split('?')[0],
-    experience, about, education, openToWork
+    experience, about, education, certifications, openToWork
   };
+}
+
+// Security clearance scan — ordered high→low; highest level found wins (a TS/SCI
+// holder also satisfies a Secret requirement). Mirrors detectClearance in
+// service_worker.js / score_endpoint.py.
+const CLEARANCE_LEVELS = [
+  { label: "TS/SCI",       re: /\bTS\s*\/?\s*SCI\b|\bsensitive compartmented\b/i },
+  { label: "Top Secret",   re: /\btop\s+secret\b/i },
+  { label: "Secret",       re: /\bsecret(?:\s+clearance)?\b/i },
+  { label: "Public Trust", re: /\bpublic\s+trust\b/i },
+  // Generic fallback — any mention of clearance/cleared without a named level.
+  { label: "Clearance",    re: /\bclear(?:ance|ence|ances|ences)\b|\bcleared\b|\bclearable\b/i },
+];
+function detectClearance(text) {
+  if (!text) return "";
+  for (const lvl of CLEARANCE_LEVELS) if (lvl.re.test(text)) return lvl.label;
+  return "";
 }
 
 // Clicks "Show all skills" → extracts from the modal that renders in-place in the live DOM.
@@ -450,9 +530,17 @@ async function expandAndExtractAllSkills(profile) {
   const skillSection = findSkillsSection();
   if (!skillSection) return;
 
-  const showAllBtn = skillSection.querySelector(
-    'a[aria-label="Show all skills"], a[aria-label*="skills" i][href*="/details/skills"], a[href*="/details/skills"]'
-  );
+  // Each skill row also links to its endorsers at
+  // ".../details/skills/urn:li:fsd_skill:(...,N)/endorsers/", which ALSO matches
+  // "/details/skills" and sits BEFORE the real "Show all" button in DOM order.
+  // A bare href*="/details/skills" query therefore grabs an endorsers link and
+  // navigates to the endorsers page. Take the aria-labelled button first, then
+  // fall back to a skills link that is neither a per-skill urn nor /endorsers/.
+  const isEndorsersLink = (a) => /\/endorsers\//.test(a.href) || /fsd_skill:/.test(a.href);
+  const showAllBtn =
+    skillSection.querySelector('a[aria-label="Show all skills"]') ||
+    Array.from(skillSection.querySelectorAll('a[href*="/details/skills"]'))
+      .find(a => !isEndorsersLink(a));
   if (!showAllBtn) {
     console.warn('[SCOUT] No "Show all skills" button found');
     return;
@@ -478,11 +566,19 @@ async function expandAndExtractAllSkills(profile) {
       const p = el.querySelector('p');
       if (p) tryAdd(p.innerText || p.textContent);
     });
-    // Classic /details/skills page items
+    // Classic /details/skills page: the skill name is the skill-topic anchor.
     document.querySelectorAll(
-      'a[data-field="skill_page_skill_topic"] span[aria-hidden="true"], ' +
-      '.pvs-list__paged-list-item .hoverable-link-text.t-bold span[aria-hidden="true"]'
+      'a[data-field="skill_page_skill_topic"] span[aria-hidden="true"]'
     ).forEach(el => tryAdd(el.innerText));
+    // Fallback only if the skill-topic anchor is absent: take the FIRST bold
+    // hoverable link per row (the skill name). Each row also nests endorser
+    // names with the same class, so a flat query would scrape endorsers as
+    // skills — read one per list item to skip them.
+    document.querySelectorAll('.pvs-list__paged-list-item').forEach(item => {
+      if (item.querySelector('a[data-field="skill_page_skill_topic"]')) return;
+      const span = item.querySelector('.hoverable-link-text.t-bold span[aria-hidden="true"]');
+      if (span) tryAdd(span.innerText);
+    });
   }
 
   showAllBtn.click();
@@ -637,6 +733,11 @@ async function extractContactInfo() {
     return { email: '', phone: '', sawOverlay: false };
   }
 
+  // Carry whatever the fetch path resolves so a partial result (email but no
+  // phone) doesn't get thrown away when we fall through to the modal.
+  let fetchedEmail = '';
+  let fetchedPhone = '';
+
   // Strategy A (preferred): fetch the overlay route — it returns server-rendered
   // HTML with email/phone inline. No modal, no timing, no navigation.
   try {
@@ -648,21 +749,21 @@ async function extractContactInfo() {
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const scope = doc.querySelector('[componentkey*="ContactInfo"], [data-sdui-screen*="ContactDetails"], dialog') || doc;
       const got = parseContactFrom(scope);
-      if (got.email || got.phone) {
-        console.log('[SCOUT] contact info via fetch:', got);
-        return { ...got, sawOverlay: true };
-      }
-      // DOM parse found nothing — contact data often sits in embedded JSON
-      // (SDUI/voyager payload) rather than rendered markup. Scan the raw HTML.
+      // Fields can split across sources: email rendered in DOM, phone only in
+      // the embedded JSON (SDUI/voyager payload). Scan raw HTML too.
       const rawEmail = (html.match(new RegExp(EMAIL_RE.source, 'g')) || [])
         .find(e => isLikelyEmail(e) && !/linkedin\.com$/i.test(e.split('@')[1] || ''));
       const rawPhone = (html.match(/"(?:phoneNumber|number)"\s*:\s*"(\+?[\d\s\-().]{7,18})"/) || [])[1] || '';
-      if (rawEmail || rawPhone) {
-        const got2 = { email: rawEmail || '', phone: rawPhone.trim() };
-        console.log('[SCOUT] contact info via raw HTML scan:', got2);
-        return got2;
+      fetchedEmail = got.email || rawEmail || '';
+      fetchedPhone = got.phone || (rawPhone ? rawPhone.trim() : '');
+      console.log('[SCOUT] contact info via fetch (DOM+raw):', { email: fetchedEmail, phone: fetchedPhone });
+      // Only short-circuit when BOTH fields are in hand. The server-rendered
+      // overlay often carries email but loads the phone lazily (only the live
+      // modal renders it), so a missing phone must fall through to the modal.
+      if (fetchedEmail && fetchedPhone) {
+        return { email: fetchedEmail, phone: fetchedPhone, sawOverlay: true };
       }
-      console.log('[SCOUT] fetch returned no contact fields, falling back to modal');
+      console.log('[SCOUT] fetch missing phone — opening modal to complete');
     } else {
       console.log('[SCOUT] fetch status', res.status, '— falling back to modal');
     }
@@ -787,6 +888,11 @@ async function extractContactInfo() {
       }
     }
   }
+
+  // Fold in anything the fetch path already resolved (e.g. email) so the modal
+  // pass only needs to supply what was missing (e.g. the lazily-rendered phone).
+  email = email || fetchedEmail;
+  phone = phone || fetchedPhone;
 
   console.log('[SCOUT] contact info result:', { email, phone });
   await closeOverlay();
