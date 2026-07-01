@@ -323,6 +323,95 @@ body {
   line-height: 1.5;
 }
 
+/* ── Auto-scheduling gate (doc §4) ── */
+.auto-gate {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.auto-gate.pass { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+.auto-gate.hold { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+.auto-gate-icon { font-weight: 800; flex: 0 0 auto; }
+
+/* ── Category breakdown (doc §3.4) ── */
+.score-breakdown {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.score-breakdown:empty { display: none; }
+
+.breakdown-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+}
+
+.cat-row { display: flex; flex-direction: column; gap: 3px; }
+
+.cat-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.cat-name { font-size: 11px; font-weight: 600; color: #1e293b; }
+.cat-weight { font-weight: 500; color: #94a3b8; font-size: 10px; }
+.cat-score { font-size: 11px; font-weight: 700; }
+.cat-score.excellent { color: #16a34a; }
+.cat-score.good      { color: #0284c7; }
+.cat-score.fair      { color: #d97706; }
+.cat-score.poor      { color: #dc2626; }
+
+.cat-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: #eef2f7;
+  overflow: hidden;
+}
+.cat-bar-fill { height: 100%; border-radius: 3px; }
+.cat-bar-fill.excellent { background: #16a34a; }
+.cat-bar-fill.good      { background: #0284c7; }
+.cat-bar-fill.fair      { background: #d97706; }
+.cat-bar-fill.poor      { background: #dc2626; }
+
+.cat-foot { display: flex; justify-content: flex-end; }
+.cat-detail { font-size: 10px; color: #64748b; }
+
+/* ── Matched vs missing required skills (doc §3.4) ── */
+.skill-lists {
+  flex: 0 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skill-lists:empty { display: none; }
+
+.skill-group { display: flex; flex-direction: column; gap: 4px; }
+.skill-group-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+}
+.skill-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.skill-chip {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+.skill-chip.matched { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+.skill-chip.missing { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+
 /* ── Resume upload ── */
 .resume-upload {
   margin-bottom: 10px;

@@ -15,6 +15,9 @@ const scoreCircle    = document.getElementById('score-circle');
 const scoreNumber    = document.getElementById('score-number');
 const scoreLabel     = document.getElementById('score-label');
 const scoreRationale = document.getElementById('score-rationale');
+const scoreBreakdown = document.getElementById('score-breakdown');
+const skillLists     = document.getElementById('skill-lists');
+const autoGate       = document.getElementById('auto-gate');
 const addBtn         = document.getElementById('add-btn');
 const jazzhrBtn      = document.getElementById('jazzhr-btn');
 const statusEl       = document.getElementById('status');
@@ -481,6 +484,10 @@ function requestScore(jdId) {
 
   addBtn.disabled = true;
   scoreCard.classList.remove('show');
+  // Wipe the previous JD's breakdown so nothing stale shows during the re-score.
+  if (scoreBreakdown) scoreBreakdown.innerHTML = '';
+  if (skillLists)     skillLists.innerHTML = '';
+  if (autoGate)       autoGate.style.display = 'none';
   showStatus(modelReady ? 'Matching profile to JD…' : 'Loading AI model (first time only)…', 'loading');
 
   // Prefer a manually-attached résumé; otherwise fall back to the résumé text
@@ -508,15 +515,94 @@ function renderScore(data, updated = false) {
   scoreRationale.textContent = rationale;
 
   scoreCircle.className = 'score-circle';
-  if      (score >= 80) scoreCircle.classList.add('excellent');
-  else if (score >= 65) scoreCircle.classList.add('good');
-  else if (score >= 45) scoreCircle.classList.add('fair');
-  else                  scoreCircle.classList.add('poor');
+  const tone = score >= 80 ? 'excellent' : score >= 65 ? 'good' : score >= 45 ? 'fair' : 'poor';
+  scoreCircle.classList.add(tone);
+
+  renderAutoGate(data);
+  renderBreakdown(data.categories);
+  renderSkillLists(data.categories);
 
   scoreCard.classList.add('show');
   resumeUpload.style.display = 'block';
   addBtn.disabled = false;
   resetAddButton();
+}
+
+// Doc §4 — auto-scheduling gate. Shows whether the candidate clears all four
+// critical gates (required skills, certs, clearance, locality) at score ≥ 80.
+function renderAutoGate(data) {
+  if (!autoGate) return;
+  const gates = data.gates;
+  if (!gates) { autoGate.style.display = 'none'; return; }
+
+  const labels = {
+    required_skills: 'Required Skills',
+    certifications:  'Certifications',
+    clearance:       'Clearance',
+    locality:        'Commute / Locality',
+  };
+  const failed = Object.keys(labels).filter(k => !gates[k]);
+
+  autoGate.className = 'auto-gate ' + (data.auto_schedule ? 'pass' : 'hold');
+  if (data.auto_schedule) {
+    autoGate.innerHTML = `<span class="auto-gate-icon">✓</span>` +
+      `<span>Auto-schedule eligible — score ≥ 80 and all critical gates passed.</span>`;
+  } else {
+    const reason = data.score < 80
+      ? `score below 80`
+      : `unmet: ${failed.map(k => labels[k]).join(', ')}`;
+    autoGate.innerHTML = `<span class="auto-gate-icon">•</span>` +
+      `<span>Standard pipeline — no auto-scheduling (${escapeHtml(reason)}).</span>`;
+  }
+  autoGate.style.display = 'flex';
+}
+
+// Doc §3.4 — per-category breakdown: weight, sub-score, and a fill bar. Only the
+// categories the JD actually specifies are shown (others renormalized out).
+function renderBreakdown(categories) {
+  if (!scoreBreakdown) return;
+  if (!categories || !categories.length) { scoreBreakdown.innerHTML = ''; return; }
+
+  const rows = categories.filter(c => c.active).map(c => {
+    const pct  = Math.round((c.fill || 0) * 100);
+    const tone = pct >= 100 ? 'excellent' : pct >= 60 ? 'good' : pct >= 30 ? 'fair' : 'poor';
+    let detail = '';
+    if (c.key === 'clearance' || c.key === 'education') {
+      detail = `<span class="cat-detail">${escapeHtml(c.detected)} vs ${escapeHtml(c.required)}</span>`;
+    } else if (c.key === 'location') {
+      detail = `<span class="cat-detail">${escapeHtml(c.detected)} vs ${escapeHtml(c.required)}</span>`;
+    } else {
+      const m = (c.matched || []).length, t = m + (c.missing || []).length;
+      detail = `<span class="cat-detail">${m}/${t}</span>`;
+    }
+    return `
+      <div class="cat-row">
+        <div class="cat-head">
+          <span class="cat-name">${escapeHtml(c.name)} <span class="cat-weight">${c.weight}%</span></span>
+          <span class="cat-score ${tone}">${pct}%</span>
+        </div>
+        <div class="cat-bar"><div class="cat-bar-fill ${tone}" style="width:${pct}%"></div></div>
+        <div class="cat-foot">${detail}</div>
+      </div>`;
+  }).join('');
+
+  scoreBreakdown.innerHTML = `<div class="breakdown-title">Category Breakdown</div>${rows}`;
+}
+
+// Doc §3.4 — matched vs missing required skills as chips.
+function renderSkillLists(categories) {
+  if (!skillLists) return;
+  const req = (categories || []).find(c => c.key === 'required');
+  if (!req) { skillLists.innerHTML = ''; return; }
+
+  const chip = (s, cls) => `<span class="skill-chip ${cls}">${escapeHtml(s)}</span>`;
+  const matched = (req.matched || []).map(s => chip(s, 'matched')).join('');
+  const missing = (req.missing || []).map(s => chip(s, 'missing')).join('');
+
+  let html = '';
+  if (matched) html += `<div class="skill-group"><span class="skill-group-label">Matched</span><div class="skill-chips">${matched}</div></div>`;
+  if (missing) html += `<div class="skill-group"><span class="skill-group-label">Missing</span><div class="skill-chips">${missing}</div></div>`;
+  skillLists.innerHTML = html;
 }
 
 // ── Cross-JD fit check ────────────────────────────────────────────────────────
@@ -602,6 +688,8 @@ addBtn.addEventListener('click', () => {
       experience:       candidate.experience || [],
       about:            candidate.about      || '',
       education:        candidate.education  || [],
+      certifications:   candidate.certifications || [],
+      endorsements:     candidate.endorsements   || {},
       openToWork:       candidate.openToWork || false,
       source:           candidate.source,
       score:            currentScore?.score,

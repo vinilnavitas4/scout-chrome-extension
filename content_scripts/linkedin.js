@@ -208,6 +208,33 @@ function extractEducation() {
   return education;
 }
 
+// Licenses & certifications (doc §3.1) — name, issuing body, issue/expiry dates.
+// Feeds the §4 "Required Certifications" auto-scheduling gate. LinkedIn renders
+// the section heading as "Licenses & certifications" (older: "Certifications").
+function extractCertifications() {
+  const certs = [];
+  const section = findSectionByHeading('Licenses & certifications')
+    || findSectionByHeading('Licenses and certifications')
+    || findSectionByHeading('Certifications')
+    || document.querySelector('#licenses_and_certifications')?.closest('section');
+  if (!section) return certs;
+  getSectionItems(section).forEach(item => {
+    const editLink = item.querySelector('a[href*="edit/forms/"]');
+    const ps = editLink ? editLink.querySelectorAll('p') : item.querySelectorAll('p');
+    const name   = ps[0]?.innerText.trim() || '';
+    const issuer = ps[1]?.innerText.trim() || '';
+    // Dates line looks like "Issued Jun 2021 · Expires Jun 2024" — take the first
+    // <p> that carries an issue/expiry marker or a year.
+    let dates = '';
+    for (const p of ps) {
+      const t = (p.innerText || '').trim();
+      if (/issued|expires|\b(?:19|20)\d{2}\b/i.test(t)) { dates = t; break; }
+    }
+    if (name && !/^show all/i.test(name)) certs.push({ name, issuer, dates });
+  });
+  return certs;
+}
+
 function calcExperienceYears(experience) {
   // Strategy 1: sum "X yrs Y mos" duration strings from LinkedIn
   let totalMonths = 0;
@@ -372,12 +399,15 @@ function extractProfile() {
   // Skills — Source 1: Skills section on main page
   const seen = new Set();
   const skills = [];
+  const endorsements = {};   // skill name (lowercased) → endorsement count, when shown
 
   function addSkill(raw) {
     // First line only, then drop any endorsement tail LinkedIn appends inline
     // ("Python · 12 endorsements", "AWS · Endorsed by 3 colleagues") and the
     // leftover middot/separator so only the skill name remains.
     let s = (raw || '').trim().split('\n')[0].trim();
+    // Capture the endorsement count (doc §3.1) before stripping the tail.
+    const endMatch = s.match(/(\d+)\s*endorsements?/i);
     // Drop the endorsement tail in either form: "· 12 endorsements" or
     // "· Endorsed by 3 colleagues", plus the leftover middot/separator.
     s = s.replace(/\s*[·•|–-]\s*(?:\d+\s*endorsements?|endorsed by\b.*)$/i, '');
@@ -391,6 +421,7 @@ function extractProfile() {
       !seen.has(low)) {
       seen.add(low);
       skills.push(s);
+      if (endMatch) endorsements[low] = parseInt(endMatch[1], 10);
     }
   }
 
@@ -453,6 +484,7 @@ function extractProfile() {
   const about = extractAbout();
   console.log('[SCOUT] about result:', about ? about.substring(0, 80) : '(empty)');
   const education = extractEducation();
+  const certifications = extractCertifications();
   const openToWork = extractOpenToWork();
 
   // Clearance from about + skills + title — highest level found. Mirrors the
@@ -461,9 +493,9 @@ function extractProfile() {
 
   return {
     source: "linkedin",
-    name, title, location, skills, experience_years, clearance,
+    name, title, location, skills, endorsements, experience_years, clearance,
     profileUrl: window.location.href.split('?')[0],
-    experience, about, education, openToWork
+    experience, about, education, certifications, openToWork
   };
 }
 

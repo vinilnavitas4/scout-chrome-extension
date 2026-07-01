@@ -270,6 +270,50 @@ def detect_remote(text: str) -> bool:
     return bool(re.search(r"\bremote\b", text, re.IGNORECASE))
 
 
+# ── Education signals (mirror of service_worker.js) ───────────────────────────
+# Degree level scored as its own bucket (doc §3.3, 15%). Ranked high→low so a
+# higher degree satisfies a lower requirement.
+EDUCATION_LEVELS = [
+    (4, "Doctorate",  re.compile(r"\b(?:ph\.?\s?d|doctorate|doctoral|d\.?sc\.?|ed\.?d)\b", re.IGNORECASE)),
+    (3, "Master's",   re.compile(r"\b(?:master'?s?|m\.?s\.?c?\.?|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b", re.IGNORECASE)),
+    (2, "Bachelor's", re.compile(r"\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?eng\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b", re.IGNORECASE)),
+    # Bare dotless "AS"/"AA" omitted — "as" is a common word and would false-match.
+    (1, "Associate",  re.compile(r"\b(?:associate'?s?|a\.?a\.?s\.?|a\.s|two[\s-]?year degree)\b", re.IGNORECASE)),
+]
+
+
+def detect_education(text: str) -> dict:
+    if not text:
+        return {"rank": 0, "label": ""}
+    for rank, label, pat in EDUCATION_LEVELS:
+        if pat.search(text):
+            return {"rank": rank, "label": label}
+    if re.search(r"\bdegree\b", text, re.IGNORECASE):
+        return {"rank": 2, "label": "Degree"}
+    return {"rank": 0, "label": ""}
+
+
+# ── Certification signals (mirror of service_worker.js) ───────────────────────
+# Not scored, but the auto-scheduling gate (doc §4) needs a pass/fail on
+# "Required Certifications".
+CERT_KEYWORDS = [
+    "PMP","CISSP","CISM","CISA","CEH","Security+","Network+","A+","CCNA","CCNP","CCIE",
+    "AWS Certified","Azure Certified","GCP Certified","CKA","CKAD","Terraform Associate",
+    "CompTIA","ITIL","CSM","PSM","SAFe","Six Sigma","CPA","PE license",
+]
+
+
+def find_certs(text: str) -> list[str]:
+    if not text:
+        return []
+    found: list[str] = []
+    for kw in CERT_KEYWORDS:
+        esc = re.escape(kw)
+        if re.search(rf"(?<![A-Za-z0-9]){esc}(?![A-Za-z0-9])", text, re.IGNORECASE) and kw not in found:
+            found.append(kw)
+    return found
+
+
 # ── Off-list skill mining (#1) ────────────────────────────────────────────────
 # TOOL_KEYWORDS can't enumerate every tool; mine extra skills from explicit
 # enumerations (a "skills cue" followed by a delimited list) so off-list skills
@@ -365,6 +409,10 @@ def parse_requirements(description: str) -> dict:
     jd_state = detect_state(text, False)
     jd_remote = detect_remote(text)
 
+    # Education requirement — prefer the "Need" section, fall back to whole JD.
+    required_education = detect_education(need) if detect_education(need)["rank"] else detect_education(text)
+    required_certs = find_certs(need if need else text)
+
     return {
         "required_skills": required_skills,
         "preferred_skills": preferred_skills,
@@ -373,13 +421,16 @@ def parse_requirements(description: str) -> dict:
         "required_clearance": required_clearance,
         "jd_state": jd_state,
         "jd_remote": jd_remote,
+        "required_education": required_education,
+        "required_certs": required_certs,
     }
 
 
 # ── Scoring (port of computeScore) ────────────────────────────────────────────
 
 def compute_score(requirements: dict, job_title: str, skills: list[str], exp_years: float,
-                  location: str = "", clearance: str = "") -> dict:
+                  location: str = "", clearance: str = "",
+                  education: str = "", about: str = "", certifications: str = "") -> dict:
     required = requirements["required_skills"]
     preferred = requirements["preferred_skills"]
     required_years = requirements["required_years"]
@@ -417,6 +468,7 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     matched_pref = [s for s in preferred if is_match(s)]
     missing_req = [s for s in required if not is_match(s)]
 
+    # ── Category fills (each 0-1) ────────────────────────────────────────────
     # Prominence-weighted required fill (#7): core, oft-repeated skills dominate.
     prom = requirements.get("prominence", {})
     w_of = lambda s: max(prom.get(s, 1), 1)
@@ -424,7 +476,6 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     req_matched = sum(w_of(s) for s in matched_req)
     req_fill = req_matched / req_total if req_total else 0
     pref_fill = (len(matched_pref) / len(preferred)) if preferred else 0
-    exp_fill = min(exp_years / required_years, 1) if required_years else 0  # cap 1.0 (#3)
 
     # Clearance bucket — active ONLY when the JD states a required clearance.
     # Meets/exceeds → full; holds a lower clearance → half; none → zero.
@@ -440,6 +491,20 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     else:
         clearance_fill = 0.0
 
+    # Education bucket — active ONLY when the JD states a degree requirement.
+    # Meets/exceeds → full; holds a lower degree → half; none → zero.
+    req_edu = requirements.get("required_education") or {"rank": 0, "label": ""}
+    cand_edu = detect_education("\n".join(t for t in (education, about) if t))
+    education_active = req_edu["rank"] > 0
+    if not education_active:
+        education_fill = 0.0
+    elif cand_edu["rank"] >= req_edu["rank"]:
+        education_fill = 1.0
+    elif cand_edu["rank"] > 0:
+        education_fill = 0.5
+    else:
+        education_fill = 0.0
+
     # Location bucket — active when JD is remote, or both JD + candidate states
     # are known. Remote / same state → full; different state → zero (penalized);
     # unknown either side and not remote → bucket stays out (no penalty).
@@ -449,24 +514,26 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     location_active = jd_remote or (bool(jd_state) and bool(cand_state))
     location_fill = 1.0 if jd_remote else (1.0 if (jd_state and cand_state and jd_state == cand_state) else 0.0)
 
-    # Renormalize so only present buckets contribute and they sum to 100 (#2).
-    W_REQ, W_PREF, W_EXP, W_CLR, W_LOC = 60, 15, 25, 25, 15
+    # ── Composite (doc §3.3 weights) ─────────────────────────────────────────
+    # Required 35 / Preferred 15 / Clearance 20 / Education 15 / Location 15.
+    # Renormalize so only present buckets contribute and they sum to 100.
+    W_REQ, W_PREF, W_CLR, W_EDU, W_LOC = 35, 15, 20, 15, 15
     active = W_REQ                       # required always present here
     if preferred:
         active += W_PREF
-    if required_years:
-        active += W_EXP
     if clearance_active:
         active += W_CLR
+    if education_active:
+        active += W_EDU
     if location_active:
         active += W_LOC
     raw = (W_REQ / active) * req_fill * 100
     if preferred:
         raw += (W_PREF / active) * pref_fill * 100
-    if required_years:
-        raw += (W_EXP / active) * exp_fill * 100
     if clearance_active:
         raw += (W_CLR / active) * clearance_fill * 100
+    if education_active:
+        raw += (W_EDU / active) * education_fill * 100
     if location_active:
         raw += (W_LOC / active) * location_fill * 100
 
@@ -476,6 +543,38 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     elif score >= 65: label = "Good Fit"
     elif score >= 45: label = "Fair Fit"
     else:             label = "Poor Fit"
+
+    # ── Per-category breakdown for the score card (doc §3.4) ──────────────────
+    jd_loc = "Remote" if jd_remote else (jd_state or "")
+    categories = [
+        {"key": "required",  "name": "Required Skills",    "weight": W_REQ, "active": True,
+         "fill": req_fill,  "matched": matched_req, "missing": missing_req},
+        {"key": "preferred", "name": "Preferred Skills",   "weight": W_PREF, "active": bool(preferred),
+         "fill": pref_fill, "matched": matched_pref,
+         "missing": [s for s in preferred if s not in matched_pref]},
+        {"key": "clearance", "name": "Clearance",          "weight": W_CLR, "active": clearance_active,
+         "fill": clearance_fill, "detected": cand_clr["label"] or "None", "required": req_clr["label"] or "None"},
+        {"key": "education", "name": "Education",          "weight": W_EDU, "active": education_active,
+         "fill": education_fill, "detected": cand_edu["label"] or "None", "required": req_edu["label"] or "None"},
+        {"key": "location",  "name": "Location / Commute", "weight": W_LOC, "active": location_active,
+         "fill": location_fill, "detected": cand_state or (location or "").strip() or "Unknown",
+         "required": jd_loc or "Any"},
+    ]
+
+    # ── Auto-scheduling gate (doc §4) — pass/fail on the four critical
+    # categories, independent of the composite.
+    cert_text = "\n".join(t for t in (" ".join(skills or []), certifications, about) if t)
+    req_certs = requirements.get("required_certs") or []
+    cand_certs = find_certs(cert_text)
+    missing_certs = [c for c in req_certs if c not in cand_certs]
+    gates = {
+        "required_skills": req_fill >= 1,
+        "certifications":  len(missing_certs) == 0,
+        "clearance":       (not clearance_active) or clearance_fill >= 1,
+        "locality":        (not location_active) or location_fill >= 1,
+    }
+    auto_schedule = (score >= 80 and gates["required_skills"] and gates["certifications"]
+                     and gates["clearance"] and gates["locality"])
 
     parts = []
     if matched_req:
@@ -488,12 +587,13 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
         parts.append(f"Preferred: {', '.join(matched_pref[:3])}.")
     if missing_req:
         parts.append(f"Missing: {', '.join(missing_req[:3])}.")
-    if exp_years > 0 and required_years > 0:
-        parts.append(
-            f"{exp_years} yrs meets the {required_years}-yr requirement."
-            if exp_years >= required_years
-            else f"{exp_years} yrs is below the {required_years}-yr requirement."
-        )
+    if education_active:
+        if education_fill == 1.0:
+            parts.append(f"Holds a {cand_edu['label']} — meets the {req_edu['label']} requirement.")
+        elif cand_edu["rank"] > 0:
+            parts.append(f"Holds a {cand_edu['label']}, below the required {req_edu['label']}.")
+        else:
+            parts.append(f"No degree found; role requires a {req_edu['label']}.")
     if clearance_active:
         if clearance_fill == 1.0:
             parts.append(f"Holds {cand_clr['label']} — meets the {req_clr['label']} clearance.")
@@ -518,7 +618,8 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
         else:
             parts.append(f"Located in {cand_state}, outside the {jd_state} job location.")
 
-    return {"score": score, "label": label, "rationale": " ".join(parts)}
+    return {"score": score, "label": label, "rationale": " ".join(parts),
+            "categories": categories, "gates": gates, "auto_schedule": auto_schedule}
 
 
 # ── Request/response models + route ───────────────────────────────────────────
@@ -528,6 +629,9 @@ class Candidate(BaseModel):
     experience_years: float = 0
     location: str = ""
     clearance: str = ""
+    about: str = ""
+    education: list[str] = []       # flattened "degree school" lines from the profile
+    certifications: list[str] = []  # flattened "name issuer" lines from the profile
 
 
 class ScoreRequest(BaseModel):
@@ -560,5 +664,12 @@ def score(req: ScoreRequest) -> dict:
     # client that doesn't send candidate.clearance still scores clearance.
     clearance_text = " ".join(t for t in (req.candidate.clearance, req.resume_text) if t)
 
+    # Education text = flattened profile education lines + About/résumé fallback,
+    # so an older client that doesn't send candidate.education still scores it.
+    education_text = "\n".join(req.candidate.education or [])
+    about_text = " ".join(t for t in (req.candidate.about, req.resume_text) if t)
+    cert_text = "\n".join(req.candidate.certifications or [])
+
     return compute_score(requirements, title, skills, req.candidate.experience_years,
-                         location=req.candidate.location, clearance=clearance_text)
+                         location=req.candidate.location, clearance=clearance_text,
+                         education=education_text, about=about_text, certifications=cert_text)

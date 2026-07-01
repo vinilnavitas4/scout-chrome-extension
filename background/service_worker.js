@@ -200,6 +200,46 @@ function detectRemote(text) {
   return /\bremote\b/i.test(text);
 }
 
+// ── Education signals ─────────────────────────────────────────────────────────
+// Degree level scored as its own bucket (doc §3.3, 15%). Ranked high→low so a
+// higher degree satisfies a lower requirement (a Master's meets a Bachelor's
+// ask). Mirrored verbatim in score_endpoint.py so client and backend agree.
+const EDUCATION_LEVELS = [
+  { rank: 4, label: "Doctorate",  re: /\b(?:ph\.?\s?d|doctorate|doctoral|d\.?sc\.?|ed\.?d)\b/i },
+  { rank: 3, label: "Master's",   re: /\b(?:master'?s?|m\.?s\.?c?\.?|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b/i },
+  { rank: 2, label: "Bachelor's", re: /\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?eng\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b/i },
+  // Bare dotless "AS"/"AA" omitted on purpose — "as" is a common word and would
+  // false-match. Accept spelled-out forms and dotted abbreviations only.
+  { rank: 1, label: "Associate",  re: /\b(?:associate'?s?|a\.?a\.?s\.?|a\.s|two[\s-]?year degree)\b/i },
+];
+function detectEducation(text) {
+  if (!text) return { rank: 0, label: "" };
+  for (const lvl of EDUCATION_LEVELS) if (lvl.re.test(text)) return { rank: lvl.rank, label: lvl.label };
+  // Bare "degree" with no named level → treat as a Bachelor's-level ask/hold.
+  if (/\bdegree\b/i.test(text)) return { rank: 2, label: "Degree" };
+  return { rank: 0, label: "" };
+}
+
+// ── Certification signals ─────────────────────────────────────────────────────
+// Not a scored bucket, but the auto-scheduling gate (doc §4) needs a pass/fail on
+// "Required Certifications". Whole-word scan for named certs; a JD with none
+// required passes the gate automatically.
+const CERT_KEYWORDS = [
+  "PMP","CISSP","CISM","CISA","CEH","Security+","Network+","A+","CCNA","CCNP","CCIE",
+  "AWS Certified","Azure Certified","GCP Certified","CKA","CKAD","Terraform Associate",
+  "CompTIA","ITIL","CSM","PSM","SAFe","Six Sigma","CPA","PE license",
+];
+function findCerts(text) {
+  if (!text) return [];
+  const found = [];
+  for (const kw of CERT_KEYWORDS) {
+    const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, "i");
+    if (re.test(text) && !found.includes(kw)) found.push(kw);
+  }
+  return found;
+}
+
 // ── Off-list skill mining (#1) ────────────────────────────────────────────────
 // TOOL_KEYWORDS can't enumerate every tool, so a JD requiring something off-list
 // would never score it. Mine extra skill phrases from explicit enumerations only
@@ -296,7 +336,14 @@ function parseRequirements(description) {
   const jd_state  = detectState(text, false);
   const jd_remote = detectRemote(text);
 
-  return { required_skills, preferred_skills, required_years, prominence, required_clearance, jd_state, jd_remote };
+  // Education requirement — prefer the "Need" section, fall back to the whole JD.
+  // Only scores when the JD actually states a degree requirement.
+  const required_education = detectEducation(needSection).rank ? detectEducation(needSection) : detectEducation(text);
+  // Required certifications — only gate the auto-schedule rule when the JD names one.
+  const required_certs = findCerts(needSection.length ? needSection : text);
+
+  return { required_skills, preferred_skills, required_years, prominence,
+           required_clearance, jd_state, jd_remote, required_education, required_certs };
 }
 
 // ── Semantic skill matching via embeddings (offscreen model) ──────────────────
@@ -391,6 +438,15 @@ async function backendScore(jd_id, candidate, resume_text) {
       experience_years: candidate.experience_years || 0,
       location:         candidate.location  || "",
       clearance:        candidate.clearance || "",
+      about:            candidate.about     || "",
+      // Flatten education to "degree school" lines so the backend can rank it.
+      education:        (candidate.education || [])
+                          .map(e => `${e.degree || ""} ${e.school || ""}`.trim())
+                          .filter(Boolean),
+      // Flatten certifications to "name issuer" lines for the §4 cert gate.
+      certifications:   (candidate.certifications || [])
+                          .map(c => `${c.name || ""} ${c.issuer || ""}`.trim())
+                          .filter(Boolean),
     },
   });
 
@@ -412,7 +468,11 @@ async function backendScore(jd_id, candidate, resume_text) {
       }
       const d = await r.json();
       if (!d || typeof d.score !== "number") return null; // malformed → local
-      return { score: d.score, label: d.label || "", rationale: d.rationale || "" };
+      return {
+        score: d.score, label: d.label || "", rationale: d.rationale || "",
+        categories: d.categories || null, gates: d.gates || null,
+        auto_schedule: !!d.auto_schedule,
+      };
     } catch (e) {                                    // network / abort(timeout) → transient, retry
       console.warn(`[SCOUT] backendScore ${e.name === "AbortError" ? "timeout" : "network"} (attempt ${attempt + 1})`);
     } finally {
@@ -491,6 +551,7 @@ async function computeScore(requirements, jobTitle, candidate) {
     missingReq,
   });
 
+  // ── Category fills (each 0-1) ───────────────────────────────────────────────
   // Prominence-weighted required fill (#7): each required skill counts by how
   // often the JD mentions it, so core skills dominate the ratio.
   const prom = requirements.prominence || {};
@@ -499,7 +560,6 @@ async function computeScore(requirements, jobTitle, candidate) {
   const reqMatched = matchedReq.reduce((a, s) => a + wOf(s), 0);
   const reqFill  = reqTotal ? reqMatched / reqTotal : 0;
   const prefFill = preferred_skills.length ? matchedPref.length / preferred_skills.length : 0;
-  const expFill  = required_years ? Math.min(expYears / required_years, 1) : 0; // cap at 1.0 (#3)
 
   // Clearance bucket — active ONLY when the JD states a required clearance. Meets
   // or exceeds → full credit; holds a lower clearance → half (still investable);
@@ -512,6 +572,21 @@ async function computeScore(requirements, jobTitle, candidate) {
     : candClr.rank > 0            ? 0.5
     :                              0;
 
+  // Education bucket — active ONLY when the JD states a degree requirement. Meets
+  // or exceeds → full; holds a lower degree → half; none → zero. Candidate degree
+  // level read from the Education section entries (fallback: About/résumé text).
+  const reqEdu  = requirements.required_education || { rank: 0, label: "" };
+  const eduText = [
+    (candidate.education || []).map(e => `${e.degree || ""} ${e.school || ""}`).join("\n"),
+    candidate.about,
+  ].filter(Boolean).join("\n");
+  const candEdu = detectEducation(eduText);
+  const educationActive = reqEdu.rank > 0;
+  const educationFill = !educationActive ? 0
+    : candEdu.rank >= reqEdu.rank ? 1
+    : candEdu.rank > 0            ? 0.5
+    :                              0;
+
   // Location bucket — active when the JD is remote, or both JD and candidate
   // states are known. Remote → location is not a constraint (full credit); same
   // state → full; different state → zero (penalized). Unknown either side and
@@ -522,19 +597,20 @@ async function computeScore(requirements, jobTitle, candidate) {
   const locationActive = jdRemote || (!!jdState && !!candState);
   const locationFill = jdRemote ? 1 : (jdState && candState && jdState === candState ? 1 : 0);
 
-  // Renormalize so only PRESENT buckets contribute and they sum to 100 (#2) — no
-  // free credit for an absent preferred list, unstated years, or an unstated
-  // clearance/location constraint.
-  const W_REQ = 60, W_PREF = 15, W_EXP = 25, W_CLR = 25, W_LOC = 15;
+  // ── Composite (doc §3.3 weights) ────────────────────────────────────────────
+  // Required 35 / Preferred 15 / Clearance 20 / Education 15 / Location 15.
+  // Renormalize so only PRESENT buckets contribute and they sum to 100 — no free
+  // credit for an unstated preferred/clearance/education/location constraint.
+  const W_REQ = 35, W_PREF = 15, W_CLR = 20, W_EDU = 15, W_LOC = 15;
   let active = W_REQ;                                  // required is always present here
   if (preferred_skills.length) active += W_PREF;
-  if (required_years)          active += W_EXP;
   if (clearanceActive)         active += W_CLR;
+  if (educationActive)         active += W_EDU;
   if (locationActive)          active += W_LOC;
   let raw = (W_REQ / active) * reqFill * 100;
   if (preferred_skills.length) raw += (W_PREF / active) * prefFill * 100;
-  if (required_years)          raw += (W_EXP / active) * expFill * 100;
   if (clearanceActive)         raw += (W_CLR / active) * clearanceFill * 100;
+  if (educationActive)         raw += (W_EDU / active) * educationFill * 100;
   if (locationActive)          raw += (W_LOC / active) * locationFill * 100;
 
   const score = Math.min(Math.max(Math.round(calibrate(raw)), 5), 99);
@@ -544,6 +620,42 @@ async function computeScore(requirements, jobTitle, candidate) {
   else if (score >= 65) label = "Good Fit";
   else if (score >= 45) label = "Fair Fit";
   else                  label = "Poor Fit";
+
+  // ── Per-category breakdown for the score card (doc §3.4) ────────────────────
+  const jdLoc = jdRemote ? "Remote" : (jdState || "");
+  const categories = [
+    { key: "required",  name: "Required Skills",    weight: W_REQ, active: true,
+      fill: reqFill,  matched: matchedReq, missing: missingReq },
+    { key: "preferred", name: "Preferred Skills",   weight: W_PREF, active: !!preferred_skills.length,
+      fill: prefFill, matched: matchedPref, missing: preferred_skills.filter(s => !matchedPref.includes(s)) },
+    { key: "clearance", name: "Clearance",          weight: W_CLR, active: clearanceActive,
+      fill: clearanceFill, detected: candClr.label || "None", required: reqClr.label || "None" },
+    { key: "education", name: "Education",          weight: W_EDU, active: educationActive,
+      fill: educationFill, detected: candEdu.label || "None", required: reqEdu.label || "None" },
+    { key: "location",  name: "Location / Commute", weight: W_LOC, active: locationActive,
+      fill: locationFill, detected: candState || (candidate.location || "").trim() || "Unknown", required: jdLoc || "Any" },
+  ];
+
+  // ── Auto-scheduling gate (doc §4) — pass/fail on the four critical categories,
+  // independent of the composite. required_certs gate passes when the JD names
+  // no cert; else the candidate text must mention every required cert.
+  const certText = [
+    (candidate.skills || []).join(" "),
+    candidate.about,
+    (candidate.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
+    (candidate.experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
+  ].filter(Boolean).join("\n");
+  const reqCerts    = requirements.required_certs || [];
+  const candCerts   = findCerts(certText);
+  const missingCerts = reqCerts.filter(c => !candCerts.includes(c));
+  const gates = {
+    required_skills: reqFill >= 1,
+    certifications:  missingCerts.length === 0,
+    clearance:       !clearanceActive || clearanceFill >= 1,
+    locality:        !locationActive  || locationFill  >= 1,
+  };
+  const auto_schedule = score >= 80 && gates.required_skills && gates.certifications
+                        && gates.clearance && gates.locality;
 
   const parts = [];
   if (matchedReq.length > 0) {
@@ -555,11 +667,12 @@ async function computeScore(requirements, jobTitle, candidate) {
   }
   if (matchedPref.length > 0) parts.push(`Preferred: ${matchedPref.slice(0, 3).join(", ")}.`);
   if (missingReq.length  > 0) parts.push(`Missing: ${missingReq.slice(0, 3).join(", ")}.`);
-  if (expYears > 0 && required_years > 0) {
-    parts.push(expYears >= required_years
-      ? `${expYears} yrs meets the ${required_years}-yr requirement.`
-      : `${expYears} yrs is below the ${required_years}-yr requirement.`
-    );
+  if (educationActive) {
+    parts.push(educationFill === 1
+      ? `Holds a ${candEdu.label} — meets the ${reqEdu.label} requirement.`
+      : candEdu.rank > 0
+        ? `Holds a ${candEdu.label}, below the required ${reqEdu.label}.`
+        : `No degree found; role requires a ${reqEdu.label}.`);
   }
   if (clearanceActive) {
     parts.push(clearanceFill === 1
@@ -584,7 +697,7 @@ async function computeScore(requirements, jobTitle, candidate) {
         : `Located in ${candState}, outside the ${jdState} job location.`);
   }
 
-  return { score, label, rationale: parts.join(" ") };
+  return { score, label, rationale: parts.join(" "), categories, gates, auto_schedule };
 }
 
 // ── Score one candidate against one JD (backend-first, local fallback) ────────
