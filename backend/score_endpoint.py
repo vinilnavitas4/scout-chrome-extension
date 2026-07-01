@@ -482,8 +482,14 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
     req_clr = requirements.get("required_clearance") or {"rank": 0, "label": ""}
     cand_clr = detect_clearance(clearance)
     clearance_active = req_clr["rank"] > 0
+    # "Clearance" is the generic fallback label — candidate stated they hold a
+    # clearance but not which level. Treat that as meeting a named requirement
+    # (recruiter verifies the exact level) rather than half credit.
+    cand_generic = cand_clr["label"] == "Clearance"
     if not clearance_active:
         clearance_fill = 0.0
+    elif cand_generic:
+        clearance_fill = 1.0
     elif cand_clr["rank"] >= req_clr["rank"]:
         clearance_fill = 1.0
     elif cand_clr["rank"] > 0:
@@ -595,7 +601,9 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
         else:
             parts.append(f"No degree found; role requires a {req_edu['label']}.")
     if clearance_active:
-        if clearance_fill == 1.0:
+        if cand_generic:
+            parts.append(f"Holds an active clearance — meets the {req_clr['label']} requirement (level unverified).")
+        elif clearance_fill == 1.0:
             parts.append(f"Holds {cand_clr['label']} — meets the {req_clr['label']} clearance.")
         elif cand_clr["rank"] > 0:
             parts.append(f"Holds {cand_clr['label']}, below the required {req_clr['label']} clearance.")

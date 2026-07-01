@@ -565,9 +565,19 @@ async function computeScore(requirements, jobTitle, candidate) {
   // or exceeds → full credit; holds a lower clearance → half (still investable);
   // none → zero. A JD with no clearance ask leaves this bucket out entirely.
   const reqClr  = requirements.required_clearance || { rank: 0, label: "" };
-  const candClr = detectClearance([candidate.clearance, candidate.about].filter(Boolean).join("\n"));
+  const candClr = detectClearance([
+    candidate.clearance,
+    candidate.about,
+    (candidate.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
+    (candidate.experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
+  ].filter(Boolean).join("\n"));
   const clearanceActive = reqClr.rank > 0;
+  // "Clearance" is the generic fallback label — candidate stated they hold a
+  // clearance but not which level. Treat that as meeting a named requirement
+  // (they're cleared; recruiter verifies the exact level) rather than half credit.
+  const candGeneric = candClr.label === "Clearance";
   const clearanceFill = !clearanceActive ? 0
+    : candGeneric                ? 1
     : candClr.rank >= reqClr.rank ? 1
     : candClr.rank > 0            ? 0.5
     :                              0;
@@ -675,11 +685,13 @@ async function computeScore(requirements, jobTitle, candidate) {
         : `No degree found; role requires a ${reqEdu.label}.`);
   }
   if (clearanceActive) {
-    parts.push(clearanceFill === 1
-      ? `Holds ${candClr.label} — meets the ${reqClr.label} clearance.`
-      : candClr.rank > 0
-        ? `Holds ${candClr.label}, below the required ${reqClr.label} clearance.`
-        : `No clearance found; role requires ${reqClr.label}.`);
+    parts.push(candGeneric
+      ? `Holds an active clearance — meets the ${reqClr.label} requirement (level unverified).`
+      : clearanceFill === 1
+        ? `Holds ${candClr.label} — meets the ${reqClr.label} clearance.`
+        : candClr.rank > 0
+          ? `Holds ${candClr.label}, below the required ${reqClr.label} clearance.`
+          : `No clearance found; role requires ${reqClr.label}.`);
   }
   // Always report location whenever the JD expresses one (remote or a state),
   // even if the candidate's state is unknown — the bucket may stay out of the

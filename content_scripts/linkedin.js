@@ -487,9 +487,17 @@ function extractProfile() {
   const certifications = extractCertifications();
   const openToWork = extractOpenToWork();
 
-  // Clearance from about + skills + title — highest level found. Mirrors the
-  // scorer's detectClearance (service_worker.js / score_endpoint.py).
-  const clearance = detectClearance([about, (skills || []).join(" "), title].filter(Boolean).join("\n"));
+  // Clearance from about + skills + title + experience bullets + certifications —
+  // highest level found. Candidates often state clearance in a role description
+  // ("Active Secret clearance"), so experience text must be scanned too or a
+  // cleared candidate reads as "None". Mirrors the scorer's detectClearance.
+  const clearance = detectClearance([
+    about,
+    (skills || []).join(" "),
+    title,
+    (experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
+    (certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
+  ].filter(Boolean).join("\n"));
 
   return {
     source: "linkedin",
