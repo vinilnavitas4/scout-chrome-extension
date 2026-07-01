@@ -200,6 +200,23 @@ function skillsFromResume(text) {
   return found;
 }
 
+// Security clearance scan — clearance is a hard hiring constraint on cleared
+// roles, so surface it as its own candidate field instead of leaving it buried
+// in the generic skill list. Ordered high→low; the highest level found wins
+// (a TS/SCI holder also satisfies a Secret requirement). Mirrors the scorer's
+// detectClearance in service_worker.js / score_endpoint.py.
+const CLEARANCE_LEVELS = [
+  { label: "TS/SCI",       re: /\bTS\s*\/?\s*SCI\b|\bsensitive compartmented\b/i },
+  { label: "Top Secret",   re: /\btop\s+secret\b/i },
+  { label: "Secret",       re: /\bsecret(?:\s+clearance)?\b/i },
+  { label: "Public Trust", re: /\bpublic\s+trust\b/i },
+];
+function detectClearance(text) {
+  if (!text) return "";
+  for (const lvl of CLEARANCE_LEVELS) if (lvl.re.test(text)) return lvl.label;
+  return "";
+}
+
 // ── Embedded flight JSON ──────────────────────────────────────────────────────
 
 // Brace-match a JSON object starting at `start` (index of '{'), respecting strings.
@@ -301,9 +318,12 @@ function extractProfile(resumeOverride) {
   const resumeSkills = skillsFromResume(resume);
   if (resumeSkills.length) skills = resumeSkills;
 
+  // Clearance from résumé + profile (skills/title) — highest level found.
+  const clearance = detectClearance([resume, (skills || []).join(" "), title].filter(Boolean).join("\n"));
+
   return {
     source: 'dice',
-    name, title, location, skills, experience_years,
+    name, title, location, skills, experience_years, clearance,
     profileUrl: window.location.href.split('?')[0],
     experience, about: resume.slice(0, 4000), education, openToWork,
     email, phone,
