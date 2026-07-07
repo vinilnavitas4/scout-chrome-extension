@@ -954,24 +954,30 @@ function _decodeJwtPayload(jwt) {
 
 async function syncScoutSession() {
   try {
-    const cookies = await chrome.cookies.getAll({ url: "https://api.jazz.co/" });
+    // Search ALL jazz.co subdomains — the scout@ session cookie may be scoped to
+    // app.jazz.co (login UI) rather than api.jazz.co, so a single-url lookup
+    // missed it. Dedupe by name, preferring the most specific/fresh value.
+    const cookies = await chrome.cookies.getAll({ domain: "jazz.co" });
     let chosen = null;
     for (const name of SCOUT_SESSION_COOKIES) {
-      const c = cookies.find(x => x.name === name);
-      if (!c || (c.value.match(/\./g) || []).length !== 2) continue;
-      const p = _decodeJwtPayload(c.value);
-      if (!p || p.isOtpToken) continue;                 // skip OTP challenge token
-      if (p.exp && p.exp * 1000 < Date.now()) continue; // skip expired
-      chosen = `${name}=${c.value}`;
-      break;
+      for (const c of cookies.filter(x => x.name === name)) {
+        if ((c.value.match(/\./g) || []).length !== 2) continue;
+        const p = _decodeJwtPayload(c.value);
+        if (!p || p.isOtpToken) continue;                 // skip OTP challenge token
+        if (p.exp && p.exp * 1000 < Date.now()) continue; // skip expired
+        chosen = `${name}=${c.value}`;
+        break;
+      }
+      if (chosen) break;
     }
-    if (!chosen) return;
-    await fetch(`${BASE_URL}/api/scout/set-session`, {
+    if (!chosen) { console.log("[SCOUT] syncScoutSession: no valid session cookie on jazz.co"); return; }
+    const r = await fetch(`${BASE_URL}/api/scout/set-session`, {
       method: "POST",
       headers: scoutHeaders(),
       body: JSON.stringify({ cookie: chosen }),
     });
-  } catch (_) { /* cookies/network unavailable — non-fatal */ }
+    console.log("[SCOUT] syncScoutSession → set-session", r.status, await r.text().catch(() => ""));
+  } catch (e) { console.log("[SCOUT] syncScoutSession error:", e?.message || e); }
 }
 
 chrome.alarms?.create("scoutSessionSync", { periodInMinutes: 30 });
