@@ -310,13 +310,42 @@ async function handleActiveTab() {
   if (!onProfile) return;
 
   sourceBadge.textContent = site.source;
-  matchSection.style.display = 'block';
 
+  // Extraction no longer runs automatically. On a new profile, reset the panel
+  // and re-arm the Start-extraction button; the recruiter triggers extraction.
   if (site.slug !== lastProfileSlug) {
     lastProfileSlug = site.slug;
-    startScan(tab.id, site.script);
+    resetExtractUI();
   }
 }
+
+// Hide profile/JD/score and re-enable the Start-extraction button for a fresh
+// profile. Extraction fills these in only when the recruiter asks for it.
+function resetExtractUI() {
+  candidate    = null;
+  currentScore = null;
+  matchSection.style.display = 'none';
+  profileCard.classList.remove('show');
+  scoreCard.classList.remove('show');
+  statusEl.classList.remove('show');
+  if (extractBtn) {
+    extractBtn.disabled    = false;
+    extractBtn.textContent = 'Start extraction';
+  }
+}
+
+// Start-extraction button: run the full pipeline (profile → JDs → score) for the
+// current tab, on demand.
+const extractBtn = document.getElementById('extract-btn');
+extractBtn?.addEventListener('click', async () => {
+  const tab  = await getTargetTab();
+  const site = siteFor(tab?.url);
+  if (!site) return;
+  matchSection.style.display = 'block';
+  extractBtn.disabled    = true;
+  extractBtn.textContent = 'Extracting…';
+  startScan(tab.id, site.script, true);
+});
 
 window.addEventListener('DOMContentLoaded', () => {
   loadJds();
@@ -365,6 +394,7 @@ function onProfileLoaded(profile) {
   candidate     = profile;
   profilePending = false;
   refreshBtn.classList.remove('spinning');
+  if (extractBtn) { extractBtn.disabled = false; extractBtn.textContent = 'Re-extract'; }
   renderProfile(profile);
   // If user already picked a JD while profile was loading → score now
   if (selectedJd) {
@@ -376,6 +406,7 @@ function onProfileLoaded(profile) {
 function onProfileFailed(msg) {
   profilePending = false;
   refreshBtn.classList.remove('spinning');
+  if (extractBtn) { extractBtn.disabled = false; extractBtn.textContent = 'Start extraction'; }
   // Only show error if user has already selected a JD (otherwise silent)
   if (selectedJd) {
     showStatus(msg, 'error');
@@ -997,3 +1028,189 @@ function normalizePhone(s) {
   const digits  = t.replace(/\D/g, '');
   return digits ? (hasPlus ? '+' : '') + digits : '';
 }
+
+// ── Session recorder ──────────────────────────────────────────────────────────
+// Toggles the recorder content script (via storage.local), shows a live counter,
+// and turns the captured event log into a runnable Playwright .spec.js. Local
+// only — the log never leaves the browser.
+(() => {
+  const REC_STATE  = 'scoutRec';
+  const REC_EVENTS = 'scoutRecEvents';
+
+  const recBtn      = document.getElementById('rec-btn');
+  const recBtnLabel = document.getElementById('rec-btn-label');
+  const recCard     = document.getElementById('rec-card');
+  const recMeta     = document.getElementById('rec-meta');
+  const recCount    = document.getElementById('rec-count');
+  const recTimer    = document.getElementById('rec-timer');
+  const recActions  = document.getElementById('rec-actions');
+  const recDownload = document.getElementById('rec-download');
+  const recCopy     = document.getElementById('rec-copy');
+  const recClear    = document.getElementById('rec-clear');
+  if (!recBtn) return;
+
+  let recOn = false;
+  let startedAt = 0;
+  let tick = null;
+
+  async function getState()  { return (await chrome.storage.local.get(REC_STATE))[REC_STATE] || null; }
+  async function getEvents() { return (await chrome.storage.local.get(REC_EVENTS))[REC_EVENTS] || []; }
+
+  function fmtElapsed(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  async function paint() {
+    const st = await getState();
+    const events = await getEvents();
+    recOn = !!(st && st.on);
+    startedAt = st?.startedAt || 0;
+
+    recBtn.classList.toggle('recording', recOn);
+    recBtnLabel.textContent = recOn ? 'Stop recording' : 'Record session';
+    recMeta.style.display   = recOn ? 'flex' : 'none';
+    // Show export actions whenever a log exists and we're not currently recording.
+    recActions.style.display = (!recOn && events.length) ? 'flex' : 'none';
+    recCount.textContent = `${events.length} action${events.length === 1 ? '' : 's'}`;
+
+    if (recOn && !tick) {
+      tick = setInterval(() => { recTimer.textContent = fmtElapsed(Date.now() - startedAt); }, 500);
+    } else if (!recOn && tick) {
+      clearInterval(tick); tick = null;
+    }
+    if (recOn) recTimer.textContent = fmtElapsed(Date.now() - startedAt);
+  }
+
+  recBtn.addEventListener('click', async () => {
+    if (recOn) {
+      await chrome.storage.local.set({ [REC_STATE]: { on: false } });
+    } else {
+      // Ensure the recorder content script is present — tabs opened before an
+      // extension reload won't have it from the manifest. The IIFE guard makes
+      // re-injection a no-op when it's already loaded.
+      const tab  = await getTargetTab();
+      const site = siteFor(tab?.url);
+      if (!site) { showStatus('Open a candidate profile first', 'error'); return; }
+      try {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content_scripts/recorder.js'] });
+      } catch (e) { console.warn('[SCOUT] recorder inject:', e.message); }
+
+      // Fresh recording: clear the previous log so sessions don't concatenate.
+      await chrome.storage.local.set({
+        [REC_EVENTS]: [],
+        [REC_STATE]: { on: true, sessionId: Date.now(), startedAt: Date.now() },
+      });
+    }
+    paint();
+  });
+
+  recClear.addEventListener('click', async () => {
+    await chrome.storage.local.set({ [REC_EVENTS]: [] });
+    paint();
+  });
+
+  recDownload.addEventListener('click', async () => {
+    const events = await getEvents();
+    if (!events.length) return;
+    const spec = buildSpec(events);
+    const blob = new Blob([spec], { type: 'text/javascript' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `scout-session-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.spec.js`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
+  recCopy.addEventListener('click', async () => {
+    const events = await getEvents();
+    if (!events.length) return;
+    try {
+      await navigator.clipboard.writeText(buildSpec(events));
+      recCopy.textContent = '✓ Copied';
+      setTimeout(() => (recCopy.textContent = '⧉ Copy'), 1500);
+    } catch (_) { /* clipboard blocked */ }
+  });
+
+  // Repaint live as the content script appends events / toggles state.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && (changes[REC_STATE] || changes[REC_EVENTS])) paint();
+  });
+
+  paint();
+
+  // ── Playwright codegen ──────────────────────────────────────────────────────
+  function jsStr(s) {
+    return "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n') + "'";
+  }
+
+  function buildSpec(events) {
+    const first = events.find(e => e.url) || {};
+    const startUrl = first.to || first.url || 'about:blank';
+    const site = /dice\.com/.test(startUrl) ? 'Dice' : /linkedin\.com/.test(startUrl) ? 'LinkedIn' : 'Web';
+    const when = new Date(events[0]?.ts || Date.now()).toISOString();
+
+    const lines = [];
+    lines.push("import { test, expect } from '@playwright/test';");
+    lines.push('');
+    lines.push(`// Auto-recorded ${site} recruiter session — ${when}`);
+    lines.push(`// ${events.length} actions captured by SCOUT.`);
+    lines.push('');
+    lines.push(`test('recruiter session — ${site}', async ({ page }) => {`);
+    lines.push(`  await page.goto(${jsStr(startUrl)});`);
+
+    let prevTs = events[0]?.ts || 0;
+    let didFirstGoto = true;
+
+    for (const e of events) {
+      // Reproduce recruiter pacing / dwell time between actions.
+      const gap = e.ts - prevTs;
+      prevTs = e.ts;
+      if (gap >= 800) lines.push(`  await page.waitForTimeout(${Math.min(gap, 20000)});`);
+
+      const L = e.loc ? `page.${e.loc}` : null;
+      switch (e.t) {
+        case 'enter':
+          if (didFirstGoto) { didFirstGoto = false; break; } // startUrl already handled
+          lines.push(`  await page.goto(${jsStr(e.to)});`);
+          break;
+        case 'nav':
+          lines.push(`  // → navigated to ${e.to}`);
+          break;
+        case 'view':
+          lines.push(`  // 👀 viewing: ${e.section}`);
+          break;
+        case 'click':
+          if (L) lines.push(`  await ${L}.click();${e.label ? `  // ${e.label}` : ''}`);
+          break;
+        case 'fill':
+          if (L) lines.push(`  await ${L}.fill(${jsStr(e.value)});`);
+          break;
+        case 'select':
+          if (L) lines.push(`  await ${L}.selectOption(${jsStr(e.value)});`);
+          break;
+        case 'check':
+          if (L) lines.push(`  await ${L}.check();`);
+          break;
+        case 'uncheck':
+          if (L) lines.push(`  await ${L}.uncheck();`);
+          break;
+        case 'press':
+          if (L) lines.push(`  await ${L}.press(${jsStr(e.key)});`);
+          break;
+        case 'hover':
+          if (L) lines.push(`  await ${L}.hover();${e.label ? `  // ${e.label}` : ''}`);
+          break;
+        case 'scroll':
+          lines.push(`  await page.evaluate(() => window.scrollTo(${e.x || 0}, ${e.y || 0}));`);
+          break;
+        case 'stop':
+          break;
+      }
+    }
+    lines.push('});');
+    lines.push('');
+    return lines.join('\n');
+  }
+})();

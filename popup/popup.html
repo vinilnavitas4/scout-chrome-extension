@@ -21,6 +21,27 @@
   <div id="main-view">
     <div class="body">
 
+      <!-- Session recorder — captures recruiter actions → Playwright .spec.js -->
+      <div class="rec-card" id="rec-card">
+        <div class="rec-row">
+          <button class="btn btn-record" id="rec-btn">
+            <span class="rec-dot" id="rec-dot"></span>
+            <span id="rec-btn-label">Record session</span>
+          </button>
+        </div>
+        <button class="btn btn-primary rec-extract" id="extract-btn">Start extraction</button>
+        <div class="rec-meta" id="rec-meta" style="display:none">
+          <span class="rec-live" id="rec-live">● REC</span>
+          <span id="rec-count">0 actions</span>
+          <span id="rec-timer">0:00</span>
+        </div>
+        <div class="rec-actions" id="rec-actions" style="display:none">
+          <button class="btn btn-secondary rec-mini" id="rec-download">⬇ Download .spec.js</button>
+          <button class="btn btn-secondary rec-mini" id="rec-copy">⧉ Copy</button>
+          <button class="btn btn-secondary rec-mini rec-clear" id="rec-clear">Clear</button>
+        </div>
+      </div>
+
       <!-- Profile card (hidden until profile is read) -->
       <div class="profile-card" id="profile-card">
         <div class="profile-name" id="profile-name"></div>
