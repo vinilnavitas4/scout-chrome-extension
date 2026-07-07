@@ -72,6 +72,36 @@ const SKILL_ALIASES = new Map([
   ["continuous integration", "ci/cd"],
   ["continuous integration/continuous delivery", "ci/cd"],
   ["ci cd", "ci/cd"],
+  // Security clearance — level-specific. Each wording variant normalizes to its
+  // own canonical level label (matching detectClearance), so levels stay distinct
+  // (TS/SCI ≠ Secret) instead of collapsing to a generic "clearance".
+  // TS/SCI
+  ["ts/sci", "ts/sci"],
+  ["ts sci", "ts/sci"],
+  ["tssci", "ts/sci"],
+  ["ts/sci clearance", "ts/sci"],
+  ["top secret/sci", "ts/sci"],
+  ["top secret sci", "ts/sci"],
+  ["sensitive compartmented information", "ts/sci"],
+  // Top Secret
+  ["top secret", "top secret"],
+  ["top secret clearance", "top secret"],
+  ["ts clearance", "top secret"],
+  // Secret
+  ["secret", "secret"],
+  ["secret clearance", "secret"],
+  ["dod secret", "secret"],
+  ["interim secret", "secret"],
+  // Public Trust
+  ["public trust", "public trust"],
+  ["public trust clearance", "public trust"],
+  // Generic — only unnamed/typo variants fall back to "clearance".
+  ["clearence", "clearance"],
+  ["security clearance", "clearance"],
+  ["security clearence", "clearance"],
+  ["active clearance", "clearance"],
+  ["cleared", "clearance"],
+  ["clearable", "clearance"],
 ]);
 
 function canonicalSkill(s) {
@@ -412,6 +442,26 @@ function cosine(a, b) {
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
   return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+
+// Parse a résumé PDF (base64) via pdf.js in the offscreen doc — the Dice content
+// script can fetch the bytes but can't load pdf.js in its world, so it hands the
+// bytes here. Returns { text, links, pages }. Retries while offscreen spins up.
+async function parseResumePdf(b64) {
+  await ensureOffscreen();
+  let lastErr;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const res = await chrome.runtime.sendMessage({ target: "offscreen-pdf", b64 });
+      if (!res?.ok) throw new Error(res?.error || "pdf parse failed");
+      return res;
+    } catch (e) {
+      lastErr = e;
+      if (!/Receiving end does not exist|message port closed/i.test(e.message)) throw e;
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+  throw lastErr;
 }
 
 // ── Backend-authoritative scoring ─────────────────────────────────────────────
@@ -895,8 +945,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.runtime.sendMessage({ type: "MODEL_READY" }).catch(() => {});
     return;
   }
-  if (message?.target === "offscreen-embed" || message?.target === "offscreen-embed-status") return;
+  if (message?.target === "offscreen-embed" || message?.target === "offscreen-embed-status" || message?.target === "offscreen-pdf") return;
   const { type, payload } = message;
+
+  // ── PARSE_RESUME_PDF — content script fetched résumé bytes but can't load
+  // pdf.js in its world; parse them in the offscreen doc and return the text. ──
+  if (type === "PARSE_RESUME_PDF") {
+    parseResumePdf(message.b64).then(
+      r => sendResponse({ ok: true, text: r.text, links: r.links, pages: r.pages }),
+      e => sendResponse({ ok: false, error: e.message })
+    );
+    return true; // async
+  }
 
   // ── OPEN_PANEL — open the side panel for the sender's tab ─────────────────
   // Works when the message rides a user gesture (transient activation, e.g.

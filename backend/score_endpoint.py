@@ -123,6 +123,36 @@ SKILL_ALIASES = {
     "continuous integration": "ci/cd",
     "continuous integration/continuous delivery": "ci/cd",
     "ci cd": "ci/cd",
+    # Security clearance — level-specific. Each wording variant normalizes to its
+    # own canonical level label (matching detect_clearance), so levels stay distinct
+    # (TS/SCI != Secret) instead of collapsing to a generic "clearance".
+    # TS/SCI
+    "ts/sci": "ts/sci",
+    "ts sci": "ts/sci",
+    "tssci": "ts/sci",
+    "ts/sci clearance": "ts/sci",
+    "top secret/sci": "ts/sci",
+    "top secret sci": "ts/sci",
+    "sensitive compartmented information": "ts/sci",
+    # Top Secret
+    "top secret": "top secret",
+    "top secret clearance": "top secret",
+    "ts clearance": "top secret",
+    # Secret
+    "secret": "secret",
+    "secret clearance": "secret",
+    "dod secret": "secret",
+    "interim secret": "secret",
+    # Public Trust
+    "public trust": "public trust",
+    "public trust clearance": "public trust",
+    # Generic — only unnamed/typo variants fall back to "clearance".
+    "clearence": "clearance",
+    "security clearance": "clearance",
+    "security clearence": "clearance",
+    "active clearance": "clearance",
+    "cleared": "clearance",
+    "clearable": "clearance",
 }
 
 

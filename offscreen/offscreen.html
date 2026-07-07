@@ -4,6 +4,10 @@
   <body>
     <!-- Hidden offscreen document. Runs the embedding model (WASM) off the
          service worker, which is too short-lived / memory-limited for it. -->
+    <!-- pdf.js (UMD) as a classic script — reliably sets window.pdfjsLib here on
+         a real extension page, unlike the Dice content-script world where the
+         same file fails to register. Used to parse résumé PDFs into text. -->
+    <script src="../lib/pdf.min.js"></script>
     <script type="module" src="offscreen.js"></script>
   </body>
 </html>
