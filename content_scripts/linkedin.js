@@ -524,6 +524,30 @@ function detectClearance(text) {
   return "";
 }
 
+// Tech-keyword scan over free text (experience descriptions, About) → skills.
+// LinkedIn's Skills section is often thin/curated; the real stack shows up in the
+// role write-ups. Mirrors the scorer's TOOL_KEYWORDS / findKeywords and Dice's
+// RESUME_SKILL_KEYWORDS so client-derived skills match what the scorer extracts.
+const TEXT_SKILL_KEYWORDS = [
+  "AWS","Azure","GCP","Docker","Kubernetes","Terraform","Jenkins","CI/CD","Linux","Ansible","Helm",
+  "Java","Python","JavaScript","TypeScript","React","Angular","Vue","Spring Boot","Node.js","Flask","Django","FastAPI",".NET","C#","C++","Go","Rust","GraphQL",
+  "SQL","Power BI","Power Apps","Power Automate","SharePoint","DAX","Power Query","Spark","ETL","Kafka","dbt","Airflow","Databricks","Snowflake","Tableau","Looker","MongoDB","PostgreSQL","MySQL","Redis","Elasticsearch","Neo4j",
+  "LLM","GPT","OpenAI","LangChain","TensorFlow","PyTorch","Scikit","RAG",
+  "Top Secret","TS/SCI","Secret clearance","FISMA","FedRAMP","NIST","DISA","STIGs",
+  "REST","API","Microservices","Git","Maven","Hibernate","JUnit","Selenium","Agile","Scrum","Jira","ServiceNow","Salesforce","AEM",
+];
+const TEXT_CASE_SENSITIVE = new Set(["Go","Rust","React","Spark","Helm","DAX","RAG","Secret clearance"]);
+function skillsFromText(text) {
+  if (!text) return [];
+  const found = [];
+  for (const kw of TEXT_SKILL_KEYWORDS) {
+    const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?<![A-Za-z0-9])${esc}(?:e?s)?(?![A-Za-z0-9+#])`, TEXT_CASE_SENSITIVE.has(kw) ? "" : "i");
+    if (re.test(text) && !found.includes(kw)) found.push(kw);
+  }
+  return found;
+}
+
 // Clicks "Show all skills" → extracts from the modal that renders in-place in the live DOM.
 // The detail page is client-rendered (no componentkeys in fetched HTML), so fetch won't work.
 async function expandAndExtractAllSkills(profile) {
@@ -1042,7 +1066,33 @@ function runExtraction(force = false) {
 
     await expandAndExtractAllSkills(profile);
 
-    console.log('[SCOUT] LinkedIn parsed:', profile);
+    // Mine skills from every experience description + About — the Skills section
+    // is often thin, but the real stack is written up in the role bullets. Merge
+    // the keyword hits into the DOM skills, de-duped case-insensitively.
+    const expText = (profile.experience || []).map(e => e && e.description).filter(Boolean).join("\n");
+    const textSkills = skillsFromText([expText, profile.about].filter(Boolean).join("\n"));
+    if (textSkills.length) {
+      profile.skills = Array.isArray(profile.skills) ? profile.skills : [];
+      const seen = new Set(profile.skills.map(s => String(s).toLowerCase()));
+      for (const s of textSkills) if (!seen.has(s.toLowerCase())) { profile.skills.push(s); seen.add(s.toLowerCase()); }
+      console.log(`[SCOUT] +${textSkills.length} skills mined from experience/about`);
+    }
+
+    // Recompute clearance now that About + the full skills list are populated.
+    // The first extractProfile() runs inside scrollAndExtract, before fetchAbout()
+    // and expandAndExtractAllSkills() finish — on slower devices that first pass
+    // sees empty About / partial skills and misses a résumé-stated clearance,
+    // which then also zeroes the clearance score. Re-scan the complete profile.
+    const clr = detectClearance([
+      profile.about,
+      (profile.skills || []).join(" "),
+      profile.title,
+      (profile.experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
+      (profile.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
+    ].filter(Boolean).join("\n"));
+    if (clr) profile.clearance = clr;
+
+    console.log('[SCOUT] LinkedIn parsed:', profile, '| clearance:', profile.clearance || 'None');
     chrome.storage.session.set({ scout_candidate: profile });
     // Extraction finished — surface the result in the side panel.
     requestPanelOpen();
