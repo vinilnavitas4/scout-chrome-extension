@@ -106,7 +106,12 @@ function findResumePdfUrl() {
   const json = getDiceJson();
   const ids = [];
   if (json) { [json.resumeId, json.resumeDocumentId, json.id].forEach(v => v && ids.push(v)); }
-  const urls = performance.getEntriesByType('resource').map(e => e.name);
+  // Newest-first: the download URL carries a short-lived JWT token, so a stale
+  // entry from page load fails "Failed to fetch". Scrolling the résumé into view
+  // re-requests it with a fresh token; take the most recent matching resource.
+  const urls = performance.getEntriesByType('resource')
+    .sort((a, b) => b.startTime - a.startTime)
+    .map(e => e.name);
   for (const id of ids) {
     const hit = urls.find(u => u.includes(id));
     if (hit) return hit;
@@ -129,27 +134,98 @@ function arrayBufferToB64(buf) {
 // JazzHR on "Add to SCOUT" so the Dice résumé attaches without a manual upload.
 let resumePdfMeta = null;
 
+// Scan raw PDF bytes for mailto:/tel: link actions and any plaintext email.
+// Résumé contact links are stored as `/URI (mailto:john@x.com)` action objects
+// and are frequently OUTSIDE the compressed content streams, so a byte-level
+// regex recovers the email/phone even when pdf.js isn't loaded or getTextContent
+// misses a link-only address. Bytes are decoded latin1 (1:1 byte→char).
+function contactsFromPdfBytes(buf) {
+  let s = '';
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  let links = '';
+  for (const m of s.match(/(?:mailto|tel):[^\s)>\]]+/gi) || []) {
+    links += ' ' + m.replace(/^(mailto|tel):/i, '').split('?')[0];
+  }
+  return links;
+}
+
 // Fetch + parse the résumé PDF the page already loaded. Captures both the text
-// (for scoring) and the raw bytes as base64 (for the JazzHR attachment).
+// (for scoring) and the raw bytes as base64 (for the JazzHR attachment). The
+// byte fetch + b64 + contact-link scan do NOT depend on pdf.js — only the full
+// text-layer extraction does — so a missing/broken pdfjsLib still yields the
+// résumé bytes, the JazzHR attachment, and the email/phone link targets.
 async function fetchResumePdf() {
   try {
-    if (typeof pdfjsLib === 'undefined') { console.warn('[SCOUT] pdf.js not loaded'); return null; }
-    const url = findResumePdfUrl();
-    if (!url) { console.warn('[SCOUT] résumé PDF url not found in resource timeline'); return null; }
-    const res = await fetch(url, { credentials: 'include' });
-    if (!res.ok) { console.warn('[SCOUT] résumé fetch HTTP', res.status); return null; }
+    // The download URL's JWT token is short-lived and can 302 to a cross-origin
+    // store — either yields "Failed to fetch". Retry, re-picking the newest URL
+    // each pass (scrolling the résumé re-mints a fresh token in the timeline).
+    let url = '', res = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      url = findResumePdfUrl();
+      if (!url) { await sleep(1000); continue; }
+      try {
+        const r = await fetch(url, { credentials: 'include' });
+        if (r.ok) { res = r; break; }
+        console.warn('[SCOUT] résumé fetch HTTP', r.status, '— retry');
+      } catch (e) {
+        console.warn('[SCOUT] résumé fetch rejected:', e.message, '— retry');
+      }
+      // Nudge the résumé section so react-pdf re-requests with a fresh token.
+      const sec = sectionByHeading('Resume');
+      if (sec) { sec.scrollIntoView({ block: 'start' }); const sc = sec.querySelector('.overflow-auto'); if (sc) sc.scrollTop = sc.scrollHeight; }
+      await sleep(1200);
+    }
+    if (!res) { console.warn('[SCOUT] résumé PDF fetch failed after retries'); return null; }
     const buf = await res.arrayBuffer();
     const mime = (res.headers.get('content-type') || 'application/pdf').split(';')[0];
     const b64 = arrayBufferToB64(buf);                 // before pdf.js (it may detach the buffer)
-    pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdf.worker.min.js');
-    const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
+    let links = contactsFromPdfBytes(buf);             // pdf.js-independent contact recovery
+
     let out = '';
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const content = await (await pdf.getPage(i)).getTextContent();
-      out += content.items.map(it => it.str).join(' ') + '\n';
+    if (typeof pdfjsLib !== 'undefined') {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdf.worker.min.js');
+      const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        out += content.items.map(it => it.str).join(' ') + '\n';
+        // Emails/phones are often hyperlink annotations (mailto:/tel:), not
+        // rendered text items — getTextContent misses them. Pull the URL targets.
+        try {
+          for (const a of await page.getAnnotations()) {
+            const u = a && a.url;
+            if (typeof u === 'string' && /^(mailto:|tel:)/i.test(u)) {
+              links += ' ' + u.replace(/^(mailto:|tel:)/i, '').split('?')[0];
+            }
+          }
+        } catch (_) { /* annotation read is best-effort */ }
+      }
+    } else {
+      // pdf.js won't register in the Dice content-script world — hand the bytes
+      // to the offscreen document (via the SW) where pdf.js loads reliably, so we
+      // still get the full multi-page text (clearance/skills often sit on later
+      // pages the DOM text layer never renders). Byte-level links remain as a
+      // fallback if the offscreen parse fails.
+      try {
+        const r = await chrome.runtime.sendMessage({ type: 'PARSE_RESUME_PDF', b64 });
+        if (r && r.ok) {
+          out = r.text || '';
+          if (r.links) links += ' ' + r.links;
+          console.log(`[SCOUT] résumé parsed via offscreen: ${out.length} chars, ${r.pages} pages`);
+        } else {
+          console.warn('[SCOUT] offscreen PDF parse failed:', r && r.error, '— byte-scan + DOM only');
+        }
+      } catch (e) {
+        console.warn('[SCOUT] offscreen PDF parse request failed:', e.message, '— byte-scan + DOM only');
+      }
     }
-    const text = out.replace(/\s+/g, ' ').trim();
-    console.log(`[SCOUT] résumé via PDF fetch: ${text.length} chars, ${b64.length} b64 from ${url}`);
+
+    const text = (out + ' ' + links).replace(/\s+/g, ' ').trim();
+    console.log(`[SCOUT] résumé via PDF fetch: ${out.length} text chars, ${b64.length} b64, links="${links.trim()}", email=${realEmailFrom(text)||'∅'}, phone=${phoneFrom(text)||'∅'} from ${url}`);
     return { text, b64, mime };
   } catch (e) {
     console.warn('[SCOUT] résumé PDF parse failed:', e.message);
@@ -164,13 +240,38 @@ async function bestResumeText() {
   const dom = resumeText();
   const pdf = await fetchResumePdf();
   resumePdfMeta = pdf;
-  return (pdf && pdf.text.length > dom.length) ? pdf.text : dom;
+  // Pick the richer body text, but ALWAYS fold in the PDF's mailto:/tel: link
+  // targets — when pdf.js isn't loaded the PDF text is just those links (shorter
+  // than the DOM), yet they carry the email/phone the DOM text layer lacks.
+  const body = (pdf && pdf.text.length > dom.length) ? pdf.text : dom;
+  const links = (pdf && pdf.text) ? pdf.text.match(/(?:[^\s]+@[^\s]+|\+?\d[\d\s().\-]{7,}\d)/g) || [] : [];
+  return links.length ? (body + ' ' + links.join(' ')) : body;
 }
 
-const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+// Email scan tolerant of the stray spaces the PDF text layer injects between
+// glyphs — pdf.js joins text items with " ", so a résumé email can arrive as
+// "john . doe @ gmail . com". Allow optional whitespace around @ and dots, then
+// strip it back out of the match. The masked @mail.dice.com relay is skipped.
+const EMAIL_RE = /[a-zA-Z0-9._%+\-]+(?:\s*[.]\s*[a-zA-Z0-9._%+\-]+)*\s*@\s*[a-zA-Z0-9\-]+(?:\s*[.]\s*[a-zA-Z0-9\-]+)*\s*[.]\s*[a-zA-Z]{2,}/g;
 function realEmailFrom(text) {
-  for (const e of (text || '').match(EMAIL_RE) || []) {
+  for (const raw of (text || '').match(EMAIL_RE) || []) {
+    const e = raw.replace(/\s+/g, '');
     if (!/mail\.dice\.com$/i.test(e.split('@')[1] || '')) return e;
+  }
+  return '';
+}
+
+// Phone scan over résumé text — Dice's tel: link (domPhone) is the primary
+// source, but many profiles have no tel: link and the number lives only in the
+// résumé PDF. Tolerant of the separators/spaces the PDF text layer injects
+// (+1, parens, dashes, dots, spaces). Returns digits (leading + kept).
+const PHONE_RE = /(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)/g;
+function phoneFrom(text) {
+  for (const raw of (text || '').match(PHONE_RE) || []) {
+    const digits = raw.replace(/[^\d+]/g, '');
+    // A valid US number is 10 digits, or 11 with a leading country code.
+    const n = digits.replace(/^\+/, '').length;
+    if (n === 10 || n === 11) return digits;
   }
   return '';
 }
@@ -198,6 +299,27 @@ function skillsFromResume(text) {
     if (re.test(text) && !found.includes(kw)) found.push(kw);
   }
   return found;
+}
+
+// Security clearance scan — clearance is a hard hiring constraint on cleared
+// roles, so surface it as its own candidate field instead of leaving it buried
+// in the generic skill list. Ordered high→low; the highest level found wins
+// (a TS/SCI holder also satisfies a Secret requirement). Mirrors the scorer's
+// detectClearance in service_worker.js / score_endpoint.py.
+const CLEARANCE_LEVELS = [
+  { label: "TS/SCI",       re: /\bTS\s*\/?\s*SCI\b|\bsensitive compartmented\b/i },
+  { label: "Top Secret",   re: /\btop\s+secret\b/i },
+  { label: "Secret",       re: /\bsecret(?:\s+clearance)?\b/i },
+  { label: "Public Trust", re: /\bpublic\s+trust\b/i },
+  // Generic fallback — any mention of clearance/cleared without a named level.
+  // Mirrors detectClearance in score_endpoint.py so a headline/résumé that just
+  // says "active clearance" or "cleared" is still surfaced as a clearance hold.
+  { label: "Clearance",    re: /\bclear(?:ance|ence|ances|ences)\b|\bcleared\b|\bclearable\b/i },
+];
+function detectClearance(text) {
+  if (!text) return "";
+  for (const lvl of CLEARANCE_LEVELS) if (lvl.re.test(text)) return lvl.label;
+  return "";
 }
 
 // ── Embedded flight JSON ──────────────────────────────────────────────────────
@@ -261,7 +383,7 @@ function extractProfile(resumeOverride) {
   let experience  = domExperience();
   let education   = domEducation();
   let skills      = domSkills();
-  let phone       = domPhone();
+  let phone       = domPhone() || phoneFrom(resume);
   let email       = realEmailFrom(resume);
 
   const yrsTxt = domText('[data-testid="years-of-experience"] .text-xl, [data-testid="years-of-experience"] .font-semibold');
@@ -301,9 +423,22 @@ function extractProfile(resumeOverride) {
   const resumeSkills = skillsFromResume(resume);
   if (resumeSkills.length) skills = resumeSkills;
 
+  // Clearance from résumé + profile (skills/title) — highest level found.
+  const clearance = detectClearance([resume, (skills || []).join(" "), title].filter(Boolean).join("\n"));
+
+  // Clearance is also a skill for scoring — a cleared candidate should score on
+  // clearance the same way they score on a tech keyword. Append the detected
+  // level (e.g. "Secret", "Top Secret") when it isn't already in the list.
+  if (clearance) {
+    skills = Array.isArray(skills) ? skills : [];
+    if (!skills.some(s => String(s).toLowerCase() === clearance.toLowerCase())) {
+      skills = [...skills, clearance];
+    }
+  }
+
   return {
     source: 'dice',
-    name, title, location, skills, experience_years,
+    name, title, location, skills, experience_years, clearance,
     profileUrl: window.location.href.split('?')[0],
     experience, about: resume.slice(0, 4000), education, openToWork,
     email, phone,
@@ -442,13 +577,37 @@ async function watchResume(profile, id) {
       profile.about = text.slice(0, 4000);
       const email = realEmailFrom(text);
       if (email) profile.email = email;
+      if (!profile.phone) { const p = phoneFrom(text); if (p) profile.phone = p; }
       const skills = skillsFromResume(text);
       if (skills.length) profile.skills = skills;
+      // Recompute clearance from the now-fuller résumé — the first extract often
+      // runs before react-pdf finishes, so clearance stated in the résumé body is
+      // missed on the first pass. Re-scan résumé + skills + title, then re-inject
+      // the detected level into skills so it also scores as a skill.
+      const clearance = detectClearance([text, (profile.skills || []).join(" "), profile.title].filter(Boolean).join("\n"));
+      if (clearance) {
+        profile.clearance = clearance;
+        profile.skills = Array.isArray(profile.skills) ? profile.skills : [];
+        if (!profile.skills.some(s => String(s).toLowerCase() === clearance.toLowerCase())) {
+          profile.skills = [...profile.skills, clearance];
+        }
+      }
       chrome.storage.session.set({ scout_candidate: profile });
       chrome.runtime.sendMessage({ type: 'DICE_PROFILE_UPDATED', profile }, () => void chrome.runtime.lastError);
       console.log(`[SCOUT] Dice résumé updated: ${text.length} chars, ${skills.length} skills`);
     }
   }
+  // Extraction finished — reading the résumé scrolled the page (and the résumé
+  // scroller) down. Return the viewport to the top so the recruiter lands on the
+  // profile header, not mid-résumé.
+  if (diceProfileId(window.location.href) === id) scrollToTop();
+}
+
+// Reset the page (and Dice's inner scroll containers) back to the top.
+function scrollToTop() {
+  window.scrollTo(0, 0);
+  if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+  for (const el of document.querySelectorAll('.overflow-auto, .overflow-y-auto')) el.scrollTop = 0;
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

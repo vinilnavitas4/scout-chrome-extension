@@ -85,6 +85,22 @@
             <div class="score-label" id="score-label">—</div>
             <div class="score-rationale" id="score-rationale">—</div>
           </div>
+
+          <!-- Auto-scheduling gate (doc §4) -->
+          <div class="auto-gate" id="auto-gate" style="display:none"></div>
+
+          <!-- Per-category weighted breakdown (doc §3.4) -->
+          <div class="score-breakdown" id="score-breakdown"></div>
+
+          <!-- Matched vs missing required skills (doc §3.4) -->
+          <div class="skill-lists" id="skill-lists"></div>
+        </div>
+
+        <!-- Cross-JD fit check — scores the candidate against every JD -->
+        <button class="btn btn-secondary" id="scan-jds-btn">🔎 Check fit across all JDs</button>
+        <div class="bestfit" id="bestfit" style="display:none">
+          <div class="bestfit-status" id="bestfit-status"></div>
+          <div class="bestfit-list" id="bestfit-list"></div>
         </div>
 
         <!-- Optional resume upload — appears once score is ready -->

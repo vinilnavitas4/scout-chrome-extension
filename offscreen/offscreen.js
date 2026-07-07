@@ -40,10 +40,45 @@ function getExtractor() {
 // download cost — model files are cached in browser Cache Storage after this.
 getExtractor().catch(() => {});
 
+// Parse a résumé PDF (base64) → full text + mailto:/tel: link targets. pdf.js is
+// loaded here as a classic script (window.pdfjsLib); the Dice content-script
+// world fails to register it, so parsing is delegated to this offscreen page.
+async function parsePdfB64(b64) {
+  const lib = globalThis.pdfjsLib;
+  if (!lib) throw new Error("pdfjsLib not loaded in offscreen");
+  lib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("lib/pdf.worker.min.js");
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const pdf = await lib.getDocument({ data: bytes }).promise;
+  let out = "";
+  let links = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    out += content.items.map(it => it.str).join(" ") + "\n";
+    try {
+      for (const a of await page.getAnnotations()) {
+        const u = a && a.url;
+        if (typeof u === "string" && /^(mailto:|tel:)/i.test(u)) {
+          links += " " + u.replace(/^(mailto:|tel:)/i, "").split("?")[0];
+        }
+      }
+    } catch (_) { /* best-effort */ }
+  }
+  return { text: out.trim(), links: links.trim(), pages: pdf.numPages };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target === "offscreen-embed-status") {
     sendResponse({ ok: true, ready: modelReady });
     return true;
+  }
+  if (message?.target === "offscreen-pdf") {
+    parsePdfB64(message.b64)
+      .then(r => sendResponse({ ok: true, ...r }))
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true; // async
   }
   if (message?.target !== "offscreen-embed") return; // not for us
   (async () => {
