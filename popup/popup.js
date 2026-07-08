@@ -1,50 +1,50 @@
-const profileCard = document.getElementById('profile-card');
-const profileName = document.getElementById('profile-name');
-const profileTitle = document.getElementById('profile-title');
-const profileLoc = document.getElementById('profile-location');
-const profileExp = document.getElementById('profile-exp');
-const profileEmail = document.getElementById('profile-email');
+const profileCard    = document.getElementById('profile-card');
+const profileName    = document.getElementById('profile-name');
+const profileTitle   = document.getElementById('profile-title');
+const profileLoc     = document.getElementById('profile-location');
+const profileExp     = document.getElementById('profile-exp');
+const profileEmail   = document.getElementById('profile-email');
 const profileEmailFound = document.getElementById('profile-email-found');
-const profilePhone = document.getElementById('profile-phone');
+const profilePhone   = document.getElementById('profile-phone');
 const profilePhoneFound = document.getElementById('profile-phone-found');
-const sourceBadge = document.getElementById('source-badge');
-const jdSelect = document.getElementById('jd-select');
-const jdSpinner = document.getElementById('jd-spinner');
-const scoreCard = document.getElementById('score-card');
-const scoreHeading = document.getElementById('score-heading');
-const scoreCircle = document.getElementById('score-circle');
-const scoreNumber = document.getElementById('score-number');
-const scoreLabel = document.getElementById('score-label');
+const sourceBadge    = document.getElementById('source-badge');
+const jdSelect       = document.getElementById('jd-select');
+const jdSpinner      = document.getElementById('jd-spinner');
+const scoreCard      = document.getElementById('score-card');
+const scoreHeading   = document.getElementById('score-heading');
+const scoreCircle    = document.getElementById('score-circle');
+const scoreNumber    = document.getElementById('score-number');
+const scoreLabel     = document.getElementById('score-label');
 const scoreRationale = document.getElementById('score-rationale');
 const scoreBreakdown = document.getElementById('score-breakdown');
-const skillLists = document.getElementById('skill-lists');
-const autoGate = document.getElementById('auto-gate');
-const addBtn = document.getElementById('add-btn');
-const jazzhrBtn = document.getElementById('jazzhr-btn');
-const statusEl = document.getElementById('status');
-const mockDuplicate = document.getElementById('mock-duplicate');
-const resumeUpload = document.getElementById('resume-upload');
-const resumeFile = document.getElementById('resume-file');
-const resumeName = document.getElementById('resume-name');
-const resumeClear = document.getElementById('resume-clear');
-const scanJdsBtn = document.getElementById('scan-jds-btn');
-const bestfit = document.getElementById('bestfit');
-const bestfitStatus = document.getElementById('bestfit-status');
-const bestfitList = document.getElementById('bestfit-list');
-const mainView = document.getElementById('main-view');
-const emptyView = document.getElementById('empty-view');
-const matchSection = document.getElementById('match-section');
-const closeBtn = document.getElementById('close-btn');
-const refreshBtn = document.getElementById('refresh-btn');
-const vapiSection = document.getElementById('vapi-section');
-const vapiPhoneRow = document.getElementById('vapi-phone-row');
+const skillLists     = document.getElementById('skill-lists');
+const autoGate       = document.getElementById('auto-gate');
+const addBtn         = document.getElementById('add-btn');
+const jazzhrBtn      = document.getElementById('jazzhr-btn');
+const statusEl       = document.getElementById('status');
+const mockDuplicate  = document.getElementById('mock-duplicate');
+const resumeUpload   = document.getElementById('resume-upload');
+const resumeFile     = document.getElementById('resume-file');
+const resumeName     = document.getElementById('resume-name');
+const resumeClear    = document.getElementById('resume-clear');
+const scanJdsBtn     = document.getElementById('scan-jds-btn');
+const bestfit        = document.getElementById('bestfit');
+const bestfitStatus  = document.getElementById('bestfit-status');
+const bestfitList    = document.getElementById('bestfit-list');
+const mainView       = document.getElementById('main-view');
+const emptyView      = document.getElementById('empty-view');
+const matchSection   = document.getElementById('match-section');
+const closeBtn       = document.getElementById('close-btn');
+const refreshBtn     = document.getElementById('refresh-btn');
+const vapiSection    = document.getElementById('vapi-section');
+const vapiPhoneRow   = document.getElementById('vapi-phone-row');
 const vapiPhoneInput = document.getElementById('vapi-phone-input');
-const vapiStatusEl = document.getElementById('vapi-status');
+const vapiStatusEl   = document.getElementById('vapi-status');
 const vapiScheduleCheck = document.getElementById('vapi-schedule-check');
-const vapiScheduleRow = document.getElementById('vapi-schedule-row');
-const vapiDtInput = document.getElementById('vapi-dt-input');
-const vapiTzSelect = document.getElementById('vapi-tz-select');
-const vapiScheduleBtn = document.getElementById('vapi-schedule-btn');
+const vapiScheduleRow   = document.getElementById('vapi-schedule-row');
+const vapiDtInput       = document.getElementById('vapi-dt-input');
+const vapiTzSelect      = document.getElementById('vapi-tz-select');
+const vapiScheduleBtn   = document.getElementById('vapi-schedule-btn');
 
 // Close the side panel. window.close() works in the side panel on recent Chrome;
 // the SW fallback (disable → re-enable) covers versions where it's a no-op.
@@ -85,17 +85,17 @@ profilePhone.addEventListener('input', () => {
   saveLastProfile();
 });
 
-let candidate = null;   // set when profile fetch completes
-let selectedJd = null;
+let candidate       = null;   // set when profile fetch completes
+let selectedJd      = null;
 let selectedJdTitle = null;
-let currentScore = null;
-let profilePending = true;   // true while profile fetch is in flight
-let scoreVersion = 0;      // incremented on each new score request to discard stale AI responses
-let modelReady = false;  // true once offscreen ML model finishes loading
-let resumeB64 = '';     // base64-encoded resume file if recruiter attached one
-let resumeFileName = '';     // original filename — JazzHR needs it to attach the resume
-let resumeMime = '';     // file MIME type, sent alongside the base64
-let resumeText = '';     // plain text parsed from the attached resume (for skill re-scoring)
+let currentScore    = null;
+let profilePending  = true;   // true while profile fetch is in flight
+let scoreVersion    = 0;      // incremented on each new score request to discard stale AI responses
+let modelReady      = false;  // true once offscreen ML model finishes loading
+let resumeB64       = '';     // base64-encoded resume file if recruiter attached one
+let resumeFileName  = '';     // original filename — JazzHR needs it to attach the resume
+let resumeMime      = '';     // file MIME type, sent alongside the base64
+let resumeText      = '';     // plain text parsed from the attached resume (for skill re-scoring)
 let addedApplicantId = null;  // JazzHR prospect_id set after successful add
 
 // ── Resume file picker ────────────────────────────────────────────────────────
@@ -111,9 +111,9 @@ resumeFile.addEventListener('change', async () => {
   resumeClear.style.display = 'inline';
 
   // 1. Base64 + metadata for the backend → JazzHR resume attachment.
-  resumeB64 = await fileToB64(file);
+  resumeB64      = await fileToB64(file);
   resumeFileName = file.name || 'resume';
-  resumeMime = file.type || '';
+  resumeMime     = file.type || '';
 
   // 2. Parse résumé text once — reused for contact fill + skill re-scoring.
   showStatus('Reading résumé…', 'loading');
@@ -153,7 +153,7 @@ resumeClear.addEventListener('click', () => {
 function fileToB64(file) {
   return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = (e) => resolve((e.target.result.split(',')[1]) || '');
+    reader.onload  = (e) => resolve((e.target.result.split(',')[1]) || '');
     reader.onerror = () => resolve('');
     reader.readAsDataURL(file);
   });
@@ -181,9 +181,9 @@ function fillContactFromResume(text) {
 // unzip + tag strip, everything else (txt/doc/rtf/odt) → best-effort raw text.
 async function extractResumeText(file) {
   const name = (file.name || '').toLowerCase();
-  const ext = name.slice(name.lastIndexOf('.') + 1);
+  const ext  = name.slice(name.lastIndexOf('.') + 1);
 
-  if (ext === 'pdf' || file.type === 'application/pdf') return extractPdfText(file);
+  if (ext === 'pdf'  || file.type === 'application/pdf')  return extractPdfText(file);
   if (ext === 'docx') return extractDocxText(file);
   return file.text();   // txt + graceful fallback for doc/rtf/odt
 }
@@ -202,9 +202,9 @@ async function extractPdfText(file) {
 
 async function extractDocxText(file) {
   if (!window.fflate) throw new Error('DOCX library not loaded');
-  const buf = new Uint8Array(await file.arrayBuffer());
+  const buf   = new Uint8Array(await file.arrayBuffer());
   const files = fflate.unzipSync(buf);
-  const xml = files['word/document.xml'];
+  const xml   = files['word/document.xml'];
   if (!xml) return '';
   return fflate.strFromU8(xml).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 }
@@ -302,25 +302,25 @@ function resetPerProfileState() {
 // on a profile switch. Not called on the refresh-button rescan, which keeps the
 // selected JD (and re-fetches the JD list preserving it).
 function clearJdAndResume() {
-  selectedJd = null;
+  selectedJd      = null;
   selectedJdTitle = null;
-  jdSelect.value = '';
-  currentScore = null;
+  jdSelect.value  = '';
+  currentScore    = null;
   scoreCard.classList.remove('show');
   resumeUpload.style.display = 'none';
 
-  resumeB64 = '';
+  resumeB64      = '';
   resumeFileName = '';
-  resumeMime = '';
-  resumeText = '';
+  resumeMime     = '';
+  resumeText     = '';
   resumeFile.value = '';
   resumeName.textContent = 'No file chosen';
   resumeClear.style.display = 'none';
 }
 
 function startScan(tabId, scriptFile, force = false) {
-  candidate = null;
-  currentScore = null;
+  candidate      = null;
+  currentScore   = null;
   profilePending = true;
   scoreVersion++;
 
@@ -349,7 +349,7 @@ async function handleActiveTab() {
   // navigate away mid-review); the empty state only shows before any extraction.
   if (!onProfile && !candidate) await restoreLastProfile();
   const showMain = onProfile || !!candidate;
-  mainView.style.display = showMain ? '' : 'none';
+  mainView.style.display  = showMain ? '' : 'none';
   emptyView.style.display = showMain ? 'none' : 'block';
   if (!onProfile) return;
 
@@ -428,11 +428,11 @@ async function saveLastProfile() {
   const cache = await getProfileCache();
   cache[lastProfileSlug] = {
     candidate,
-    source: sourceBadge.textContent,
-    jdId: selectedJd,
+    source:  sourceBadge.textContent,
+    jdId:    selectedJd,
     jdTitle: selectedJdTitle,
-    score: currentScore,
-    resume: resumeB64
+    score:   currentScore,
+    resume:  resumeB64
       ? { b64: resumeB64, name: resumeFileName, mime: resumeMime, text: resumeText }
       : null,
     ts: Date.now()
@@ -450,15 +450,15 @@ async function saveLastProfile() {
 // Restore the JD selection + attached résumé saved with a cached profile.
 function applyCachedExtras(hit) {
   if (hit.jdId) {
-    selectedJd = hit.jdId;
+    selectedJd      = hit.jdId;
     selectedJdTitle = hit.jdTitle || hit.jdId;
-    jdSelect.value = hit.jdId;   // no-op if the JD list hasn't loaded yet — loadJds re-applies it
+    jdSelect.value  = hit.jdId;   // no-op if the JD list hasn't loaded yet — loadJds re-applies it
   }
   if (hit.resume?.b64) {
-    resumeB64 = hit.resume.b64;
+    resumeB64      = hit.resume.b64;
     resumeFileName = hit.resume.name || 'resume';
-    resumeMime = hit.resume.mime || '';
-    resumeText = hit.resume.text || '';
+    resumeMime     = hit.resume.mime || '';
+    resumeText     = hit.resume.text || '';
     resumeName.textContent = resumeFileName;
     resumeClear.style.display = 'inline';
   }
@@ -483,7 +483,7 @@ async function restoreLastProfile() {
     if (!lastSlug) return;
     const hit = (await getProfileCache())[lastSlug];
     if (!hit?.candidate) return;
-    candidate = hit.candidate;
+    candidate      = hit.candidate;
     profilePending = false;
     sourceBadge.textContent = hit.source || '';
     matchSection.style.display = 'block';
@@ -496,8 +496,8 @@ async function restoreLastProfile() {
 // Returned to an already-scanned profile → show its cached details instead of
 // rescanning, then re-score against the selected JD.
 function adoptCachedProfile(hit) {
-  candidate = hit.candidate;
-  currentScore = null;
+  candidate      = hit.candidate;
+  currentScore   = null;
   profilePending = false;
   scoreVersion++;
 
@@ -513,7 +513,7 @@ function adoptCachedProfile(hit) {
 }
 
 function onProfileLoaded(profile) {
-  candidate = profile;
+  candidate     = profile;
   profilePending = false;
   refreshBtn.classList.remove('spinning');
   renderProfile(profile);
@@ -538,10 +538,10 @@ function onProfileFailed(msg) {
 // ── Profile card ──────────────────────────────────────────────────────────────
 
 function renderProfile(p) {
-  profileName.textContent = p.name || '—';
-  profileTitle.textContent = p.title || '';
-  profileLoc.textContent = p.location || '';
-  profileExp.textContent = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
+  profileName.textContent  = p.name     || '—';
+  profileTitle.textContent = p.title    || '';
+  profileLoc.textContent   = p.location || '';
+  profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
 
   // Email/phone found on LinkedIn/résumé show read-only above; the editable
   // fields stay empty for a manual add/override. candidate.email/.phone default
@@ -617,7 +617,7 @@ jdSelect.addEventListener('change', () => {
     return;
   }
 
-  selectedJd = jdId;
+  selectedJd      = jdId;
   selectedJdTitle = jdSelect.selectedOptions[0]?.dataset.title || jdId;
   scoreCard.classList.remove('show');
   addBtn.disabled = true;
@@ -645,8 +645,8 @@ function requestScore(jdId) {
   scoreCard.classList.remove('show');
   // Wipe the previous JD's breakdown so nothing stale shows during the re-score.
   if (scoreBreakdown) scoreBreakdown.innerHTML = '';
-  if (skillLists) skillLists.innerHTML = '';
-  if (autoGate) autoGate.style.display = 'none';
+  if (skillLists)     skillLists.innerHTML = '';
+  if (autoGate)       autoGate.style.display = 'none';
   showStatus(modelReady ? 'Matching profile to JD…' : 'Loading AI model (first time only)…', 'loading');
 
   // Prefer a manually-attached résumé; otherwise fall back to the résumé text
@@ -670,8 +670,8 @@ function renderScore(data, updated = false) {
   const { score, label, rationale } = data;
   // "Updated Score" heading appears once a résumé has folded skills into the score.
   if (scoreHeading) scoreHeading.style.display = updated ? 'block' : 'none';
-  scoreNumber.textContent = score;
-  scoreLabel.textContent = label;
+  scoreNumber.textContent    = score;
+  scoreLabel.textContent     = label;
   scoreRationale.textContent = rationale;
 
   scoreCircle.className = 'score-circle';
@@ -697,9 +697,9 @@ function renderAutoGate(data) {
 
   const labels = {
     required_skills: 'Required Skills',
-    certifications: 'Certifications',
-    clearance: 'Clearance',
-    locality: 'Commute / Locality',
+    certifications:  'Certifications',
+    clearance:       'Clearance',
+    locality:        'Commute / Locality',
   };
   const failed = Object.keys(labels).filter(k => !gates[k]);
 
@@ -724,7 +724,7 @@ function renderBreakdown(categories) {
   if (!categories || !categories.length) { scoreBreakdown.innerHTML = ''; return; }
 
   const rows = categories.filter(c => c.active).map(c => {
-    const pct = Math.round((c.fill || 0) * 100);
+    const pct  = Math.round((c.fill || 0) * 100);
     const tone = pct >= 100 ? 'excellent' : pct >= 60 ? 'good' : pct >= 30 ? 'fair' : 'poor';
     let detail = '';
     if (c.key === 'clearance' || c.key === 'education') {
@@ -826,35 +826,35 @@ addBtn.addEventListener('click', () => {
   // Manual upload wins; otherwise attach the résumé scraped from the profile
   // (Dice candidates carry the résumé PDF bytes on the candidate) so JazzHR gets
   // the résumé without a separate upload.
-  const rB64 = resumeB64 || candidate.resumeB64 || '';
+  const rB64  = resumeB64 || candidate.resumeB64 || '';
   const rName = resumeB64 ? resumeFileName : (candidate.resumeName || 'resume.pdf');
   const rMime = resumeB64 ? resumeMime : (candidate.resumeMime || 'application/pdf');
 
   const payload = {
-    job_id: selectedJd,
-    job_title: selectedJdTitle || '',
-    resume_b64: rB64 || undefined,
+    job_id:      selectedJd,
+    job_title:   selectedJdTitle || '',
+    resume_b64:  rB64 || undefined,
     resume_name: rB64 ? rName : undefined,
     resume_mime: rB64 ? rMime : undefined,
     candidate: {
-      name: candidate.name,
-      title: candidate.title,
-      location: candidate.location,
-      skills: candidate.skills,
+      name:             candidate.name,
+      title:            candidate.title,
+      location:         candidate.location,
+      skills:           candidate.skills,
       experience_years: candidate.experience_years,
-      profileUrl: candidate.profileUrl,
-      email: (candidate.email || '').trim(),
-      phone: normalizePhone(candidate.phone),
-      experience: candidate.experience || [],
-      about: candidate.about || '',
-      education: candidate.education || [],
-      certifications: candidate.certifications || [],
-      endorsements: candidate.endorsements || {},
-      openToWork: candidate.openToWork || false,
-      source: candidate.source,
-      score: currentScore?.score,
-      score_label: currentScore?.label,
-      rationale: currentScore?.rationale,
+      profileUrl:       candidate.profileUrl,
+      email:            (candidate.email || '').trim(),
+      phone:            normalizePhone(candidate.phone),
+      experience:       candidate.experience || [],
+      about:            candidate.about      || '',
+      education:        candidate.education  || [],
+      certifications:   candidate.certifications || [],
+      endorsements:     candidate.endorsements   || {},
+      openToWork:       candidate.openToWork || false,
+      source:           candidate.source,
+      score:            currentScore?.score,
+      score_label:      currentScore?.label,
+      rationale:        currentScore?.rationale,
     }
   };
 
@@ -866,10 +866,10 @@ addBtn.addEventListener('click', () => {
     statusEl.classList.remove('show');
     if (res?.ok) {
       addBtn.textContent = 'Added to SCOUT ✓';
-      addBtn.className = 'btn btn-success';
+      addBtn.className   = 'btn btn-success';
       resumeUpload.style.display = 'none';
       if (res.jazzhr_url) {
-        jazzhrBtn.href = res.jazzhr_url;
+        jazzhrBtn.href          = res.jazzhr_url;
         jazzhrBtn.style.display = 'flex';
       }
       // Show the AI phone-screen scheduling section
@@ -891,14 +891,14 @@ mockDuplicate.addEventListener('change', () => {
 
 function renderDuplicateState() {
   addBtn.textContent = 'Already in SCOUT — view record →';
-  addBtn.className = 'btn btn-duplicate';
-  addBtn.disabled = false;
+  addBtn.className   = 'btn btn-duplicate';
+  addBtn.disabled    = false;
 }
 
 function resetAddButton() {
   addBtn.textContent = 'Add to SCOUT';
-  addBtn.className = 'btn btn-primary';
-  addBtn.disabled = !selectedJd;
+  addBtn.className   = 'btn btn-primary';
+  addBtn.disabled    = !selectedJd;
 }
 
 // ── Vapi AI phone screen ──────────────────────────────────────────────────────
@@ -922,7 +922,7 @@ if (vapiScheduleCheck) {
       d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
       const pad = n => String(n).padStart(2, '0');
       vapiDtInput.value =
-        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     }
   });
 }
@@ -935,12 +935,12 @@ if (vapiScheduleBtn) {
     if (!phone) {
       vapiPhoneRow.style.display = 'block';
       vapiPhoneInput.focus();
-      vapiStatusEl.textContent = 'Enter a phone number to schedule a call.';
+      vapiStatusEl.textContent   = 'Enter a phone number to schedule a call.';
       vapiStatusEl.style.display = 'block';
       return;
     }
     if (!vapiDtInput.value) {
-      vapiStatusEl.textContent = 'Pick a date and time first.';
+      vapiStatusEl.textContent   = 'Pick a date and time first.';
       vapiStatusEl.style.display = 'block';
       return;
     }
@@ -950,29 +950,29 @@ if (vapiScheduleBtn) {
     const tz = vapiTzSelect.value;
     const scheduledUtc = wallClockToUtc(vapiDtInput.value, tz);
     if (scheduledUtc <= new Date()) {
-      vapiStatusEl.textContent = 'Pick a time in the future.';
+      vapiStatusEl.textContent   = 'Pick a time in the future.';
       vapiStatusEl.style.display = 'block';
       return;
     }
 
-    vapiScheduleBtn.disabled = true;
+    vapiScheduleBtn.disabled  = true;
     vapiScheduleBtn.textContent = '🗓 Scheduling…';
-    vapiStatusEl.textContent = 'Scheduling AI phone screen…';
+    vapiStatusEl.textContent   = 'Scheduling AI phone screen…';
     vapiStatusEl.style.display = 'block';
 
     chrome.runtime.sendMessage({
       type: 'SCHEDULE_CALL',
       payload: {
-        applicant_id: addedApplicantId,
-        job_id: selectedJd,
-        phone: phone,
+        applicant_id:   addedApplicantId,
+        job_id:         selectedJd,
+        phone:          phone,
         candidate_name: candidate.name || '',
-        job_title: selectedJdTitle || '',
-        scheduled_at: scheduledUtc.toISOString(),
-        timezone: tz,
+        job_title:      selectedJdTitle || '',
+        scheduled_at:   scheduledUtc.toISOString(),
+        timezone:       tz,
       },
     }, (res) => {
-      vapiScheduleBtn.disabled = false;
+      vapiScheduleBtn.disabled  = false;
       vapiScheduleBtn.textContent = '🗓 Schedule call';
       if (!res?.ok) {
         vapiStatusEl.textContent = '✕ ' + (res?.error || 'Could not schedule call');
@@ -993,7 +993,7 @@ if (vapiScheduleBtn) {
 function wallClockToUtc(localStr, tz) {
   const [datePart, timePart] = localStr.split('T');
   const [y, mo, d] = datePart.split('-').map(Number);
-  const [h, mi] = timePart.split(':').map(Number);
+  const [h, mi]    = timePart.split(':').map(Number);
   // Start from the naive UTC guess, then correct by the tz offset at that instant.
   const guess = new Date(Date.UTC(y, mo - 1, d, h, mi));
   const asInTz = new Date(guess.toLocaleString('en-US', { timeZone: tz }));
@@ -1022,15 +1022,15 @@ function escapeHtml(s) {
 
 function showStatus(msg, type) {
   statusEl.textContent = msg;
-  statusEl.className = `status ${type} show`;
+  statusEl.className   = `status ${type} show`;
 }
 
 // Clean a phone string for the backend/JazzHR: drop "(Mobile)" tags and any
 // punctuation/spacing, keep digits and a leading +. Empty if no digits.
 function normalizePhone(s) {
   if (!s) return '';
-  const t = String(s).replace(/\((mobile|home|work|cell)\)/ig, '').trim();
+  const t      = String(s).replace(/\((mobile|home|work|cell)\)/ig, '').trim();
   const hasPlus = /^\s*\+/.test(t);
-  const digits = t.replace(/\D/g, '');
+  const digits  = t.replace(/\D/g, '');
   return digits ? (hasPlus ? '+' : '') + digits : '';
 }

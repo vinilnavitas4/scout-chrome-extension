@@ -3,7 +3,7 @@
   "name": "SCOUT — Candidate Fit Scorer",
   "version": "1.0",
   "description": "AI-powered fit scores on LinkedIn. Push candidates to SCOUT with one click.",
-  "permissions": ["activeTab", "storage", "scripting", "sidePanel", "offscreen", "cookies", "alarms"],
+  "permissions": ["activeTab", "storage", "scripting", "sidePanel", "offscreen", "cookies"],
   "host_permissions": [
     "https://www.linkedin.com/*",
     "https://www.dice.com/*",
