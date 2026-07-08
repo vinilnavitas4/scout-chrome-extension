@@ -663,6 +663,7 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
 # ── Request/response models + route ───────────────────────────────────────────
 
 class Candidate(BaseModel):
+    title: str = ""                 # profile headline, e.g. "Java Developer | TS/SCI"
     skills: list[str] = []
     experience_years: float = 0
     location: str = ""
@@ -698,9 +699,12 @@ def score(req: ScoreRequest) -> dict:
         if resume_skills:
             skills = resume_skills
 
-    # Clearance text = client-detected label + résumé text fallback, so an older
-    # client that doesn't send candidate.clearance still scores clearance.
-    clearance_text = " ".join(t for t in (req.candidate.clearance, req.resume_text) if t)
+    # Clearance text = client-detected label + headline + résumé text fallback, so
+    # an older client that doesn't send candidate.clearance still scores clearance.
+    # The headline often states it directly, e.g. "Java Developer | TS/SCI".
+    clearance_text = " ".join(
+        t for t in (req.candidate.clearance, req.candidate.title, req.resume_text) if t
+    )
 
     # Education text = flattened profile education lines + About/résumé fallback,
     # so an older client that doesn't send candidate.education still scores it.

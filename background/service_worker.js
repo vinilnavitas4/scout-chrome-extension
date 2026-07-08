@@ -484,6 +484,7 @@ async function backendScore(jd_id, candidate, resume_text) {
     jd_id,
     resume_text: resume_text || undefined, // backend applies résumé-replace rule
     candidate: {
+      title:            candidate.title || "",   // headline — backend scans it for clearance
       skills:           candidate.skills || [],
       experience_years: candidate.experience_years || 0,
       location:         candidate.location  || "",
@@ -617,6 +618,7 @@ async function computeScore(requirements, jobTitle, candidate) {
   const reqClr  = requirements.required_clearance || { rank: 0, label: "" };
   const candClr = detectClearance([
     candidate.clearance,
+    candidate.title,   // headline often states the clearance, e.g. "Java Developer | TS/SCI"
     candidate.about,
     (candidate.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
     (candidate.experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
