@@ -30,7 +30,14 @@
           <span id="profile-exp"></span>
         </div>
         <div class="profile-contact">
-          <a class="profile-email" id="profile-email"></a>
+          <!-- Email found on LinkedIn / résumé — read-only display -->
+          <a class="profile-email-found" id="profile-email-found" style="display:none"></a>
+          <!-- Manual email entry — always editable, overrides the found address -->
+          <div class="profile-email-row">
+            <span class="profile-email-icon">✉️</span>
+            <input class="profile-email-input" id="profile-email" type="email"
+              placeholder="Add email  e.g. jane@example.com" />
+          </div>
           <!-- Phone found on LinkedIn / résumé — read-only display -->
           <a class="profile-phone-found" id="profile-phone-found" style="display:none"></a>
           <!-- Manual phone entry — always editable, overrides the found number -->

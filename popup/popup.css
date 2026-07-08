@@ -128,7 +128,7 @@ body {
   gap: 3px;
 }
 
-.profile-email,
+.profile-email-found,
 .profile-phone-found {
   font-size: 11px;
   color: #0284c7;
@@ -136,22 +136,25 @@ body {
   word-break: break-all;
 }
 
-.profile-email:hover,
+.profile-email-found:hover,
 .profile-phone-found:hover {
   text-decoration: underline;
 }
 
+.profile-email-row,
 .profile-phone-row {
   display: flex;
   align-items: center;
   gap: 5px;
 }
 
+.profile-email-icon,
 .profile-phone-icon {
   font-size: 11px;
   flex: 0 0 auto;
 }
 
+.profile-email-input,
 .profile-phone-input {
   flex: 1 1 auto;
   font-size: 11px;
@@ -163,6 +166,7 @@ body {
   background: #fff;
 }
 
+.profile-email-input:focus,
 .profile-phone-input:focus {
   border-color: #0284c7;
   box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.15);

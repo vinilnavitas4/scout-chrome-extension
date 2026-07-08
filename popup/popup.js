@@ -4,6 +4,7 @@ const profileTitle   = document.getElementById('profile-title');
 const profileLoc     = document.getElementById('profile-location');
 const profileExp     = document.getElementById('profile-exp');
 const profileEmail   = document.getElementById('profile-email');
+const profileEmailFound = document.getElementById('profile-email-found');
 const profilePhone   = document.getElementById('profile-phone');
 const profilePhoneFound = document.getElementById('profile-phone-found');
 const sourceBadge    = document.getElementById('source-badge');
@@ -66,13 +67,18 @@ refreshBtn.addEventListener('click', async () => {
   startScan(tab.id, site.script, true); // force = bypass content-script extraction cache
 });
 
-// Phone found on LinkedIn / résumé — used unless the recruiter types a manual
-// override into the editable field.
+// Email/phone found on LinkedIn / résumé — used unless the recruiter types a
+// manual override into the editable field.
+let foundEmail = '';
 let foundPhone = '';
 
-// Manual phone edits flow straight into the candidate so Add-to-SCOUT and the
-// AI call both use the recruiter-entered number. Empty field falls back to the
-// found number.
+// Manual email/phone edits flow straight into the candidate so Add-to-SCOUT and
+// the AI call both use the recruiter-entered value. Empty field falls back to
+// the found one.
+profileEmail.addEventListener('input', () => {
+  if (candidate) candidate.email = profileEmail.value.trim() || foundEmail;
+});
+
 profilePhone.addEventListener('input', () => {
   if (candidate) candidate.phone = profilePhone.value.trim() || foundPhone;
 });
@@ -242,6 +248,7 @@ chrome.runtime.onMessage.addListener((message) => {
   // candidate (real email + résumé skills + résumé text) and re-score.
   if (message?.type === "DICE_PROFILE_UPDATED" && message.profile) {
     candidate = message.profile;
+    foundEmail = candidate.email || foundEmail;
     foundPhone = candidate.phone || foundPhone;
     renderProfile(candidate);
     if (selectedJd) requestScore(selectedJd);
@@ -391,16 +398,19 @@ function renderProfile(p) {
   profileLoc.textContent   = p.location || '';
   profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
 
-  if (p.email) {
-    profileEmail.textContent = p.email;
-    profileEmail.href = `mailto:${p.email}`;
-    profileEmail.style.display = 'block';
+  // Email/phone found on LinkedIn/résumé show read-only above; the editable
+  // fields stay empty for a manual add/override. candidate.email/.phone default
+  // to the found values until the recruiter types one in.
+  foundEmail = p.email || '';
+  if (foundEmail) {
+    profileEmailFound.textContent = foundEmail;
+    profileEmailFound.href = `mailto:${foundEmail}`;
+    profileEmailFound.style.display = 'block';
   } else {
-    profileEmail.style.display = 'none';
+    profileEmailFound.style.display = 'none';
   }
-  // Phone found on LinkedIn/résumé shows read-only above; the editable field
-  // stays empty for a manual add/override. candidate.phone defaults to the
-  // found number until the recruiter types one in.
+  profileEmail.value = '';
+
   foundPhone = p.phone || '';
   if (foundPhone) {
     profilePhoneFound.textContent = foundPhone;
