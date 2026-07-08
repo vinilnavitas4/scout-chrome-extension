@@ -939,6 +939,15 @@ function scrollAndExtract() {
     const capturedOpenToWork = extractOpenToWork();
     console.log('[SCOUT] OpenToWork (pre-scroll):', capturedOpenToWork);
 
+    // Capture the headline pre-scroll too — the topcard unloads when scrolled out,
+    // so extractProfile() at the bottom of the scroll can read an empty title and
+    // miss a clearance stated in the headline. Restored below if title comes back blank.
+    const capturedHeadline =
+      (document.querySelector('.text-body-medium.break-words')
+        || document.querySelector('.pv-text-details__left-panel .text-body-medium'))
+        ?.innerText?.trim() || '';
+    console.log('[SCOUT] Headline (pre-scroll):', capturedHeadline || '(empty)');
+
     function step() {
       pos += scrollStep;
       window.scrollTo(0, pos);
@@ -956,6 +965,7 @@ function scrollAndExtract() {
         } else {
           const profile = extractProfile();
           if (capturedAbout) profile.about = capturedAbout;
+          if (!profile.title && capturedHeadline) profile.title = capturedHeadline;
           profile.openToWork = capturedOpenToWork;
 
           if (!profile.about) {
