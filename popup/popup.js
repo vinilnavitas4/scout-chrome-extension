@@ -36,15 +36,6 @@ const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
 const closeBtn       = document.getElementById('close-btn');
 const refreshBtn     = document.getElementById('refresh-btn');
-const vapiSection    = document.getElementById('vapi-section');
-const vapiPhoneRow   = document.getElementById('vapi-phone-row');
-const vapiPhoneInput = document.getElementById('vapi-phone-input');
-const vapiStatusEl   = document.getElementById('vapi-status');
-const vapiScheduleCheck = document.getElementById('vapi-schedule-check');
-const vapiScheduleRow   = document.getElementById('vapi-schedule-row');
-const vapiDtInput       = document.getElementById('vapi-dt-input');
-const vapiTzSelect      = document.getElementById('vapi-tz-select');
-const vapiScheduleBtn   = document.getElementById('vapi-schedule-btn');
 
 // Close the side panel. window.close() works in the side panel on recent Chrome;
 // the SW fallback (disable → re-enable) covers versions where it's a no-op.
@@ -96,7 +87,6 @@ let resumeB64       = '';     // base64-encoded resume file if recruiter attache
 let resumeFileName  = '';     // original filename — JazzHR needs it to attach the resume
 let resumeMime      = '';     // file MIME type, sent alongside the base64
 let resumeText      = '';     // plain text parsed from the attached resume (for skill re-scoring)
-let addedApplicantId = null;  // JazzHR prospect_id set after successful add
 
 // ── Resume file picker ────────────────────────────────────────────────────────
 // PDF.js needs its worker pointed at the bundled local file (CSP forbids remote).
@@ -173,8 +163,6 @@ function fillContactFromResume(text) {
 
   renderProfile(candidate);
   saveLastProfile();
-  // Phone may now exist → refresh the "Call with AI" button availability.
-  if (vapiSection && vapiSection.style.display === 'block') showVapiSection(addedApplicantId);
 }
 
 // Extract plain text from a résumé file by type. PDF → PDF.js, DOCX → fflate
@@ -291,13 +279,6 @@ function siteFor(url) {
   return null;
 }
 
-// Clear state tied to the previous candidate (JazzHR add + AI-call section)
-// when switching to a different profile.
-function resetPerProfileState() {
-  addedApplicantId = null;
-  vapiSection.style.display = 'none';
-}
-
 // JD selection + attached résumé belong to the previous candidate — clear both
 // on a profile switch. Not called on the refresh-button rescan, which keeps the
 // selected JD (and re-fetches the JD list preserving it).
@@ -327,7 +308,6 @@ function startScan(tabId, scriptFile, force = false) {
   profileCard.classList.remove('show');
   scoreCard.classList.remove('show');
   jazzhrBtn.style.display = 'none';
-  resetPerProfileState();
   resetAddButton();
   addBtn.disabled = true;
 
@@ -503,7 +483,6 @@ function adoptCachedProfile(hit) {
 
   scoreCard.classList.remove('show');
   jazzhrBtn.style.display = 'none';
-  resetPerProfileState();
   resetAddButton();
 
   applyCachedExtras(hit);
@@ -872,9 +851,6 @@ addBtn.addEventListener('click', () => {
         jazzhrBtn.href          = res.jazzhr_url;
         jazzhrBtn.style.display = 'flex';
       }
-      // Show the AI phone-screen scheduling section
-      addedApplicantId = res.applicant_id || null;
-      showVapiSection(addedApplicantId);
     } else {
       showStatus(res?.error || 'Failed to add.', 'error');
       addBtn.disabled = false;
@@ -899,115 +875,6 @@ function resetAddButton() {
   addBtn.textContent = 'Add to SCOUT';
   addBtn.className   = 'btn btn-primary';
   addBtn.disabled    = !selectedJd;
-}
-
-// ── Vapi AI phone screen ──────────────────────────────────────────────────────
-
-function showVapiSection(applicantId) {
-  if (!vapiSection) return;
-  vapiSection.style.display = 'block';
-
-  const phone = candidate?.phone || '';
-  vapiPhoneRow.style.display = phone ? 'none' : 'block';
-  if (!phone) vapiPhoneInput.value = '';
-}
-
-// ── Schedule for later ────────────────────────────────────────────────────────
-if (vapiScheduleCheck) {
-  vapiScheduleCheck.addEventListener('change', () => {
-    vapiScheduleRow.style.display = vapiScheduleCheck.checked ? 'flex' : 'none';
-    if (vapiScheduleCheck.checked && !vapiDtInput.value) {
-      // Default to one hour from now, rounded to the next quarter hour
-      const d = new Date(Date.now() + 60 * 60 * 1000);
-      d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
-      const pad = n => String(n).padStart(2, '0');
-      vapiDtInput.value =
-        `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    }
-  });
-}
-
-if (vapiScheduleBtn) {
-  vapiScheduleBtn.addEventListener('click', async () => {
-    if (!candidate || !selectedJd) return;
-
-    const phone = normalizePhone(candidate.phone || vapiPhoneInput?.value || '');
-    if (!phone) {
-      vapiPhoneRow.style.display = 'block';
-      vapiPhoneInput.focus();
-      vapiStatusEl.textContent   = 'Enter a phone number to schedule a call.';
-      vapiStatusEl.style.display = 'block';
-      return;
-    }
-    if (!vapiDtInput.value) {
-      vapiStatusEl.textContent   = 'Pick a date and time first.';
-      vapiStatusEl.style.display = 'block';
-      return;
-    }
-
-    // The datetime-local value is wall-clock time in the chosen timezone.
-    // Convert it to an absolute UTC instant for that timezone.
-    const tz = vapiTzSelect.value;
-    const scheduledUtc = wallClockToUtc(vapiDtInput.value, tz);
-    if (scheduledUtc <= new Date()) {
-      vapiStatusEl.textContent   = 'Pick a time in the future.';
-      vapiStatusEl.style.display = 'block';
-      return;
-    }
-
-    vapiScheduleBtn.disabled  = true;
-    vapiScheduleBtn.textContent = '🗓 Scheduling…';
-    vapiStatusEl.textContent   = 'Scheduling AI phone screen…';
-    vapiStatusEl.style.display = 'block';
-
-    chrome.runtime.sendMessage({
-      type: 'SCHEDULE_CALL',
-      payload: {
-        applicant_id:   addedApplicantId,
-        job_id:         selectedJd,
-        phone:          phone,
-        candidate_name: candidate.name || '',
-        job_title:      selectedJdTitle || '',
-        scheduled_at:   scheduledUtc.toISOString(),
-        timezone:       tz,
-      },
-    }, (res) => {
-      vapiScheduleBtn.disabled  = false;
-      vapiScheduleBtn.textContent = '🗓 Schedule call';
-      if (!res?.ok) {
-        vapiStatusEl.textContent = '✕ ' + (res?.error || 'Could not schedule call');
-        return;
-      }
-      const when = scheduledUtc.toLocaleString('en-US', {
-        timeZone: tz, month: 'short', day: 'numeric',
-        hour: 'numeric', minute: '2-digit',
-      });
-      vapiStatusEl.textContent = `✓ Scheduled for ${when} (${tzShort(tz)})`;
-      vapiScheduleCheck.checked = false;
-      vapiScheduleRow.style.display = 'none';
-    });
-  });
-}
-
-// Convert a "YYYY-MM-DDTHH:mm" wall-clock string in `tz` to an absolute Date (UTC instant).
-function wallClockToUtc(localStr, tz) {
-  const [datePart, timePart] = localStr.split('T');
-  const [y, mo, d] = datePart.split('-').map(Number);
-  const [h, mi]    = timePart.split(':').map(Number);
-  // Start from the naive UTC guess, then correct by the tz offset at that instant.
-  const guess = new Date(Date.UTC(y, mo - 1, d, h, mi));
-  const asInTz = new Date(guess.toLocaleString('en-US', { timeZone: tz }));
-  const offset = guess.getTime() - asInTz.getTime();
-  return new Date(guess.getTime() + offset);
-}
-
-function tzShort(tz) {
-  const map = {
-    'America/New_York': 'EST', 'Asia/Kolkata': 'IST',
-    'America/Los_Angeles': 'PST', 'America/Chicago': 'CST',
-    'Europe/London': 'GMT',
-  };
-  return map[tz] || tz;
 }
 
 function escapeHtml(s) {
