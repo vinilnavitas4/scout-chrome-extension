@@ -1,4 +1,4 @@
-const BASE_URL = "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
+const BASE_URL = "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
 // Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
 // Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
@@ -843,8 +843,8 @@ async function refreshJobsCache() {
 
 // Prime the cache + model when the browser/extension starts, so the first panel
 // open is already warm instead of paying the cold fetch then.
-chrome.runtime.onStartup?.addListener(() => { refreshJobsCache(); ensureOffscreen().catch(() => {}); });
-chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); });
+chrome.runtime.onStartup?.addListener(() => { refreshJobsCache(); ensureOffscreen().catch(() => {}); syncScoutSession(); });
+chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); syncScoutSession(); });
 
 // ── Pre-fetch all job descriptions in background ──────────────────────────────
 // Called after GET_JDS returns. Populates jobCache so GET_SCORE is instant.
@@ -938,6 +938,48 @@ async function getJazzhrToken() {
     return "";
   }
 }
+
+// ── Scout service session auto-sync ───────────────────────────────────────────
+// Whenever Chrome is logged into JazzHR as scout@, push that session cookie to
+// the backend (→ Key Vault) so headless/scheduled updates can act as scout@.
+// Runs on startup and every 30 min via an alarm. Skips the OTP-challenge token
+// and expired/other-user sessions.
+const SCOUT_SESSION_COOKIES = ["imagicaa_pass", "sandcastle_ticket"];
+
+function _decodeJwtPayload(jwt) {
+  try {
+    let b = jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    b += "=".repeat((4 - (b.length % 4)) % 4);
+    return JSON.parse(atob(b));
+  } catch (_) { return null; }
+}
+
+async function syncScoutSession() {
+  try {
+    const cookies = await chrome.cookies.getAll({ url: "https://api.jazz.co/" });
+    let chosen = null;
+    for (const name of SCOUT_SESSION_COOKIES) {
+      const c = cookies.find(x => x.name === name);
+      if (!c || (c.value.match(/\./g) || []).length !== 2) continue;
+      const p = _decodeJwtPayload(c.value);
+      if (!p || p.isOtpToken) continue;                 // skip OTP challenge token
+      if (p.exp && p.exp * 1000 < Date.now()) continue; // skip expired
+      chosen = `${name}=${c.value}`;
+      break;
+    }
+    if (!chosen) return;
+    await fetch(`${BASE_URL}/api/scout/set-session`, {
+      method: "POST",
+      headers: scoutHeaders(),
+      body: JSON.stringify({ cookie: chosen }),
+    });
+  } catch (_) { /* cookies/network unavailable — non-fatal */ }
+}
+
+chrome.alarms?.create("scoutSessionSync", { periodInMinutes: 30 });
+chrome.alarms?.onAlarm.addListener((a) => {
+  if (a.name === "scoutSessionSync") syncScoutSession();
+});
 
 // ── Message listener ──────────────────────────────────────────────────────────
 
