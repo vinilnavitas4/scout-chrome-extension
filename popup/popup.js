@@ -47,11 +47,6 @@ const vapiScheduleRow   = document.getElementById('vapi-schedule-row');
 const vapiDtInput       = document.getElementById('vapi-dt-input');
 const vapiTzSelect      = document.getElementById('vapi-tz-select');
 const vapiScheduleBtn   = document.getElementById('vapi-schedule-btn');
-const autosourceBtn  = document.getElementById('autosource-btn');
-const autoPager      = document.getElementById('auto-pager');
-const autoPrev       = document.getElementById('auto-prev');
-const autoNext       = document.getElementById('auto-next');
-const autoLabel      = document.getElementById('auto-label');
 
 // Close the side panel. window.close() works in the side panel on recent Chrome;
 // the SW fallback (disable → re-enable) covers versions where it's a no-op.
@@ -64,10 +59,6 @@ closeBtn.addEventListener('click', () => {
 
 // Re-scan: reset state and run the whole pipeline again (profile → JDs → score)
 refreshBtn.addEventListener('click', async () => {
-  // Leave auto-source mode so the single-profile flow resumes.
-  autoResults = [];
-  autoPager.style.display = 'none';
-
   const tab = await getTargetTab();
   const site = siteFor(tab?.url);
   if (!site) return;
@@ -110,11 +101,6 @@ let resumeMime      = '';     // file MIME type, sent alongside the base64
 let resumeText      = '';     // plain text parsed from the attached resume (for skill re-scoring)
 let addedApplicantId = null;  // JazzHR prospect_id set after successful add
 let callPollTimer    = null;  // setInterval id for call-status polling
-
-// ── Auto-source (top-5 LinkedIn search) state ──────────────────────────────────
-let autoSourcing = false;     // true while the search/scrape/score loop is running
-let autoResults  = [];        // [{ candidate, score }] for the top results
-let autoIndex    = 0;         // currently shown candidate in the pager
 
 // ── Resume file picker ────────────────────────────────────────────────────────
 // PDF.js needs its worker pointed at the bundled local file (CSP forbids remote).
@@ -322,14 +308,9 @@ function startScan(tabId, scriptFile, force = false) {
   requestProfile(tabId, scriptFile, force);
 }
 
-// Sync panel to the active tab. The JD picker + auto-source button are always
-// available (auto-source works from any page). When the tab IS a candidate
-// profile, also auto-scan it for the single-candidate flow. Suppressed while the
-// auto-source loop is driving the tab through profiles.
+// Sync panel to the active tab. The JD picker is always available. When the tab
+// IS a candidate profile, also auto-scan it for the single-candidate flow.
 async function handleActiveTab() {
-  if (autoSourcing) return;          // our own navigation — don't react to it
-  if (autoResults.length) return;    // showing top-5 results — keep them on screen
-
   const tab = await getTargetTab();
   mainView.style.display  = '';
   emptyView.style.display = 'none';
@@ -503,9 +484,8 @@ jdSelect.addEventListener('change', () => {
     // Profile still loading — show holding message, score fires in onProfileLoaded
     showStatus('Reading profile… will score when ready.', 'loading');
   } else {
-    // Not on a candidate profile — run the full pipeline: search the JD title,
-    // open People, then scrape + score the top 5.
-    runAutoSource();
+    // Not on a candidate profile — nothing to score yet.
+    showStatus('Open a candidate profile to score against this JD.', 'loading');
   }
 });
 
@@ -1013,266 +993,6 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
-
-// ── Auto-source: search LinkedIn by JD, score the top 5 ─────────────────────────
-// Recruiter picks a JD then clicks "Find top 5". We drive the active tab:
-//   search-results page → scrape 5 profile URLs → visit each → scrape + score.
-// Results are cached in autoResults and browsed one-by-one with the ‹ › pager.
-
-const delay = (ms) => new Promise(r => setTimeout(r, ms));
-
-// Reduce a JD's title field to a clean role title for the LinkedIn search box.
-// Some JD titles carry extra context (client, location, "5+ years…") after a
-// dash/pipe/bullet or on later lines — keep only the leading role phrase.
-function cleanJobTitle(s) {
-  return String(s || '')
-    .split('\n')[0]                 // first line only
-    .split(/\s[-–|·•]\s/)[0]        // drop " - client", " | location", etc.
-    .replace(/[^A-Za-z ]+/g, ' ')   // letters + spaces only (no digits/symbols)
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 100);
-}
-
-// Injected into the LinkedIn page: type the JD title into the global search bar
-// and submit (Enter), exactly as a recruiter would. LinkedIn's search box is a
-// React-controlled typeahead, so set the value via the native setter and fire an
-// `input` event before dispatching Enter, otherwise React ignores the change.
-// Returns {ok} so the caller can fall back to direct URL navigation if the bar
-// isn't present (e.g. layout variant).
-function scoutFillSearch(keywords, submit) {
-  const input = document.querySelector(
-    'input[data-testid="typeahead-input"], input[componentkey="SearchResults_SearchTyahInputRef"], input[placeholder="Search"]'
-  );
-  if (!input) return { ok: false, error: 'search input not found' };
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-  setter.call(input, keywords);
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.focus();
-  if (submit) {
-    for (const type of ['keydown', 'keypress', 'keyup']) {
-      input.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-    }
-  }
-  return { ok: true };
-}
-
-// Type the JD title into the page's search bar. submit=true also presses Enter to
-// run the search. Resolves after the injected function runs.
-function fillSearchBar(tabId, keywords, submit = true) {
-  return new Promise((resolve) => {
-    chrome.scripting.executeScript(
-      { target: { tabId }, func: scoutFillSearch, args: [keywords, submit] },
-      (res) => { void chrome.runtime.lastError; resolve(res?.[0]?.result || { ok: false }); }
-    );
-  });
-}
-
-// Injected: click the "People" vertical filter on the all-results page so the
-// results narrow to people. The pill is an <a> that navigates to the people URL.
-function scoutClickPeople() {
-  const el = document.querySelector(
-    'a[aria-label="Filter by People"], a[href*="/search/results/people/"]'
-  );
-  if (!el) return { ok: false };
-  el.click();
-  return { ok: true };
-}
-
-function clickPeopleFilter(tabId) {
-  return new Promise((resolve) => {
-    chrome.scripting.executeScript(
-      { target: { tabId }, func: scoutClickPeople },
-      (res) => { void chrome.runtime.lastError; resolve(res?.[0]?.result || { ok: false }); }
-    );
-  });
-}
-
-// Resolve once the tab finishes loading (or after a timeout — SPA content keeps
-// streaming after `complete`, and the per-profile scrapers do their own waiting).
-function waitForTabLoad(tabId, timeout = 20000) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      chrome.tabs.onUpdated.removeListener(onUpd);
-      resolve();
-    };
-    const onUpd = (id, info) => { if (id === tabId && info.status === 'complete') finish(); };
-    chrome.tabs.onUpdated.addListener(onUpd);
-    chrome.tabs.get(tabId, (t) => { if (!chrome.runtime.lastError && t?.status === 'complete') finish(); });
-    setTimeout(finish, timeout);
-  });
-}
-
-// Inject the search scraper and ask it for the top profile URLs.
-function getSearchResults(tabId, count = 5) {
-  return new Promise((resolve) => {
-    chrome.scripting.executeScript(
-      { target: { tabId }, files: ['content_scripts/linkedin_search.js'] },
-      () => {
-        if (chrome.runtime.lastError) { resolve([]); return; }
-        chrome.tabs.sendMessage(tabId, { action: 'getSearchResults', count }, (res) => {
-          void chrome.runtime.lastError;
-          resolve(res?.results || []);
-        });
-      }
-    );
-  });
-}
-
-// Scrape one profile tab (forces a fresh extraction). Mirrors requestProfile's
-// inject-fallback but returns a promise instead of mutating UI state.
-function getProfilePromise(tabId) {
-  return new Promise((resolve) => {
-    const ask = (cb) => chrome.tabs.sendMessage(tabId, { action: 'getProfile', force: true }, cb);
-    ask((resp) => {
-      if (chrome.runtime.lastError || !resp?.profile) {
-        chrome.scripting.executeScript(
-          { target: { tabId }, files: ['content_scripts/linkedin.js'] },
-          () => {
-            if (chrome.runtime.lastError) { resolve(null); return; }
-            setTimeout(() => ask((r2) => { void chrome.runtime.lastError; resolve(r2?.profile || null); }), 400);
-          }
-        );
-        return;
-      }
-      resolve(resp.profile);
-    });
-  });
-}
-
-// Score a scraped candidate against the selected JD (promise wrapper for GET_SCORE).
-function scorePromise(jdId, cand) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'GET_SCORE', payload: { jd_id: jdId, candidate: cand } }, (res) => {
-      void chrome.runtime.lastError;
-      resolve(res?.ok ? res.data : null);
-    });
-  });
-}
-
-async function runAutoSource() {
-  if (!selectedJd) { showStatus('Pick a Job Description first.', 'error'); return; }
-
-  autoSourcing = true;
-  autoResults  = [];
-  autoPager.style.display = 'none';
-  profileCard.classList.remove('show');
-  scoreCard.classList.remove('show');
-  autosourceBtn.disabled = true;
-  showStatus('Searching LinkedIn…', 'loading');
-
-  try {
-    const keywords  = cleanJobTitle(selectedJdTitle);
-    const searchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(keywords)}`;
-
-    // Need a LinkedIn page that has the global search bar. Reuse the active tab
-    // if it's already on LinkedIn; otherwise open the feed.
-    const tab = await getTargetTab();
-    let workTabId;
-    if (tab && /https:\/\/www\.linkedin\.com\//.test(tab.url || '')) {
-      workTabId = tab.id;
-    } else {
-      const created = await chrome.tabs.create({ url: 'https://www.linkedin.com/feed/', active: true });
-      workTabId = created.id;
-      await waitForTabLoad(workTabId);
-      await delay(1500);
-    }
-
-    // Type the JD title into the search bar and submit (visible recruiter action).
-    await fillSearchBar(workTabId, keywords, true);
-    await waitForTabLoad(workTabId);
-    await delay(1500);
-
-    // Click the People filter on the all-results page. Fall back to the people
-    // URL if the pill isn't present (layout variant / search bar missed).
-    showStatus('Opening People results…', 'loading');
-    const ppl = await clickPeopleFilter(workTabId);
-    if (!ppl?.ok) await chrome.tabs.update(workTabId, { url: searchUrl, active: true });
-    await waitForTabLoad(workTabId);
-    await delay(2000);
-
-    showStatus('Reading top candidates…', 'loading');
-    const results = (await getSearchResults(workTabId, 5)).slice(0, 5);
-    if (!results.length) {
-      showStatus('No people found for this JD on LinkedIn.', 'error');
-      return;
-    }
-
-    for (let i = 0; i < results.length; i++) {
-      showStatus(`Reading candidate ${i + 1} of ${results.length}…`, 'loading');
-      await chrome.tabs.update(workTabId, { url: results[i].url, active: true });
-      await waitForTabLoad(workTabId);
-      await delay(1500);
-
-      const profile = await getProfilePromise(workTabId);
-      if (!profile) continue;
-      const score = await scorePromise(selectedJd, profile);
-      autoResults.push({ candidate: profile, score });
-    }
-
-    // Avoid the tab listener re-scanning the last visited profile after we finish.
-    lastProfileSlug = siteFor(results[results.length - 1].url)?.slug || lastProfileSlug;
-
-    if (!autoResults.length) {
-      showStatus('Could not read any candidate profiles.', 'error');
-      return;
-    }
-
-    // Rank best-fit first.
-    autoResults.sort((a, b) => (b.score?.score || 0) - (a.score?.score || 0));
-    autoIndex = 0;
-    statusEl.classList.remove('show');
-    showAutoResult();
-  } catch (e) {
-    console.error('[SCOUT] auto-source error:', e);
-    showStatus('Auto-source failed: ' + e.message, 'error');
-  } finally {
-    autoSourcing = false;
-    autosourceBtn.disabled = false;
-  }
-}
-
-// Render the currently-selected auto-source candidate into the existing profile +
-// score cards, reusing the normal single-candidate UI (Add to SCOUT, Vapi, etc.).
-function showAutoResult() {
-  const item = autoResults[autoIndex];
-  if (!item) return;
-
-  candidate      = item.candidate;
-  currentScore   = item.score;
-  profilePending = false;
-
-  // Reset per-candidate transient state (résumé attachment, added/call status).
-  resumeB64 = ''; resumeFileName = ''; resumeMime = ''; resumeText = '';
-  resumeFile.value = ''; resumeName.textContent = 'No file chosen'; resumeClear.style.display = 'none';
-  addedApplicantId = null;
-  if (vapiSection) vapiSection.style.display = 'none';
-  jazzhrBtn.style.display = 'none';
-
-  renderProfile(candidate);
-  if (currentScore) {
-    renderScore(currentScore, false);
-  } else {
-    scoreCard.classList.remove('show');
-    showStatus('Could not score this candidate.', 'error');
-  }
-
-  autoLabel.textContent = `${autoIndex + 1} / ${autoResults.length}`;
-  autoPrev.disabled = autoIndex === 0;
-  autoNext.disabled = autoIndex === autoResults.length - 1;
-  autoPager.style.display = 'flex';
-}
-
-autosourceBtn.addEventListener('click', runAutoSource);
-autoPrev.addEventListener('click', () => {
-  if (autoIndex > 0) { autoIndex--; showAutoResult(); }
-});
-autoNext.addEventListener('click', () => {
-  if (autoIndex < autoResults.length - 1) { autoIndex++; showAutoResult(); }
-});
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
