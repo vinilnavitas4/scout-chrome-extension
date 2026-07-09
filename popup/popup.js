@@ -246,6 +246,15 @@ chrome.runtime.onMessage.addListener((message) => {
     saveLastProfile();
     if (selectedJd) requestScore(selectedJd);
   }
+
+  // Floating button clicked. The panel may already be open on a profile the user
+  // reached via SPA navigation (no tabs.onUpdated fired), so re-evaluate the
+  // active tab now. Clearing lastProfileSlug forces handleActiveTab to re-run the
+  // scan/cache path for the current profile instead of deduping it away.
+  if (message?.type === "SCOUT_RESCAN") {
+    lastProfileSlug = '';
+    handleActiveTab();
+  }
 });
 
 // ── Init + tab watching ───────────────────────────────────────────────────────
@@ -728,19 +737,30 @@ function renderBreakdown(categories) {
   scoreBreakdown.innerHTML = `<div class="breakdown-title">Category Breakdown</div>${rows}`;
 }
 
-// Doc §3.4 — matched vs missing required skills as chips.
+// Doc §3.4 — matched vs missing required + preferred skills as chips.
 function renderSkillLists(categories) {
   if (!skillLists) return;
-  const req = (categories || []).find(c => c.key === 'required');
+  const cats = categories || [];
+  const req = cats.find(c => c.key === 'required');
   if (!req) { skillLists.innerHTML = ''; return; }
 
   const chip = (s, cls) => `<span class="skill-chip ${cls}">${escapeHtml(s)}</span>`;
-  const matched = (req.matched || []).map(s => chip(s, 'matched')).join('');
-  const missing = (req.missing || []).map(s => chip(s, 'missing')).join('');
+  const group = (label, chips) =>
+    chips ? `<div class="skill-group"><span class="skill-group-label">${label}</span><div class="skill-chips">${chips}</div></div>` : '';
+  const section = (cat) => {
+    const matched = (cat.matched || []).map(s => chip(s, 'matched')).join('');
+    const missing = (cat.missing || []).map(s => chip(s, 'missing')).join('');
+    return group('Matched', matched) + group('Missing', missing);
+  };
 
-  let html = '';
-  if (matched) html += `<div class="skill-group"><span class="skill-group-label">Matched</span><div class="skill-chips">${matched}</div></div>`;
-  if (missing) html += `<div class="skill-group"><span class="skill-group-label">Missing</span><div class="skill-chips">${missing}</div></div>`;
+  let html = `<div class="skill-section"><span class="skill-section-label">Required</span>${section(req)}</div>`;
+
+  // Preferred section — only when the JD actually lists preferred skills.
+  const pref = cats.find(c => c.key === 'preferred' && c.active &&
+    ((c.matched || []).length || (c.missing || []).length));
+  if (pref) {
+    html += `<div class="skill-section"><span class="skill-section-label">Preferred</span>${section(pref)}</div>`;
+  }
   skillLists.innerHTML = html;
 }
 

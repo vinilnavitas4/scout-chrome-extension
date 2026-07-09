@@ -63,6 +63,55 @@ function findSkillsSection() {
     || null;
 }
 
+// Clean one raw skill row into { name, endorsements }. name is '' when the row
+// is not a valid skill (endorsement count leak, "Show all", too short/long).
+// Shared by extractProfile's addSkill and the scroll-loop skill capture so both
+// normalize identically (strip the inline "· 12 endorsements" tail, etc.).
+function cleanSkillRow(raw) {
+  let s = (raw || '').trim().split('\n')[0].trim();
+  const endMatch = s.match(/(\d+)\s*endorsements?/i);
+  s = s.replace(/\s*[·•|–-]\s*(?:\d+\s*endorsements?|endorsed by\b.*)$/i, '');
+  s = s.replace(/\s*\d+\s*endorsements?$/i, '');
+  s = s.replace(/\s*[·•|]\s*$/, '').trim();
+  const low = s.toLowerCase();
+  const valid = s && s.length < 80 && s.length > 1 &&
+    !low.includes('show all') && !low.includes('endorse') && !/^\d+$/.test(s);
+  return { name: valid ? s : '', endorsements: endMatch ? parseInt(endMatch[1], 10) : null };
+}
+
+// Harvest skill names from the main-page Skills section, feeding each raw row to
+// addSkill(). Returns false when the section isn't in the DOM. Tiered by layout;
+// broad fallbacks fire only when richer selectors yield nothing.
+function harvestSkillSection(addSkill) {
+  const skillSection = findSkillsSection();
+  if (!skillSection) return false;
+
+  const names = [];
+  // New LinkedIn layout: skill componentkeys (prefix occasionally changes)
+  Array.from(skillSection.querySelectorAll('div[componentkey*="profile.skill" i]'))
+    .filter(el => {
+      const ck = el.getAttribute('componentkey') || '';
+      return !ck.endsWith('-divider') && el.querySelector('p');
+    })
+    .forEach(item => names.push(item.querySelector('p')?.innerText));
+
+  // Classic layout: skill name is a bold hoverable link per row
+  if (names.filter(Boolean).length === 0) {
+    skillSection.querySelectorAll(
+      'a[data-field="skill_card_skill_topic"] span[aria-hidden="true"], ' +
+      '.hoverable-link-text.t-bold span[aria-hidden="true"]'
+    ).forEach(el => names.push(el.innerText));
+  }
+  // Old layout fallback
+  if (names.filter(Boolean).length === 0) {
+    skillSection.querySelectorAll('.t-bold span[aria-hidden="true"]').forEach(el =>
+      names.push(el.innerText));
+  }
+
+  names.forEach(addSkill);
+  return true;
+}
+
 // Experience section finder — heading lookup, then anchors. Mirrors the skills
 // finder so the section is located even when the heading text/structure differs
 // across LinkedIn layouts (the cause of experience missing on some devices).
@@ -402,59 +451,16 @@ function extractProfile() {
   const endorsements = {};   // skill name (lowercased) → endorsement count, when shown
 
   function addSkill(raw) {
-    // First line only, then drop any endorsement tail LinkedIn appends inline
-    // ("Python · 12 endorsements", "AWS · Endorsed by 3 colleagues") and the
-    // leftover middot/separator so only the skill name remains.
-    let s = (raw || '').trim().split('\n')[0].trim();
-    // Capture the endorsement count (doc §3.1) before stripping the tail.
-    const endMatch = s.match(/(\d+)\s*endorsements?/i);
-    // Drop the endorsement tail in either form: "· 12 endorsements" or
-    // "· Endorsed by 3 colleagues", plus the leftover middot/separator.
-    s = s.replace(/\s*[·•|–-]\s*(?:\d+\s*endorsements?|endorsed by\b.*)$/i, '');
-    s = s.replace(/\s*\d+\s*endorsements?$/i, '');
-    s = s.replace(/\s*[·•|]\s*$/, '').trim();
-    const low = s.toLowerCase();
-    if (s && s.length < 80 && s.length > 1 &&
-      !low.includes('show all') &&
-      !low.includes('endorse') &&
-      !/^\d+$/.test(s) &&                // pure endorsement count leaked as a row
-      !seen.has(low)) {
-      seen.add(low);
-      skills.push(s);
-      if (endMatch) endorsements[low] = parseInt(endMatch[1], 10);
-    }
+    const { name, endorsements: n } = cleanSkillRow(raw);
+    if (!name) return;
+    const low = name.toLowerCase();
+    if (seen.has(low)) return;
+    seen.add(low);
+    skills.push(name);
+    if (n != null) endorsements[low] = n;
   }
 
-  const skillSection = findSkillsSection();
-  if (skillSection) {
-    // New LinkedIn layout: skill componentkeys (prefix occasionally changes — match loosely)
-    const skillItems = Array.from(
-      skillSection.querySelectorAll('div[componentkey*="profile.skill" i]')
-    ).filter(el => {
-      const ck = el.getAttribute('componentkey') || '';
-      return !ck.endsWith('-divider') && el.querySelector('p');
-    });
-
-    skillItems.forEach(item => {
-      // First <p> in each skill item = skill name (confirmed from DOM inspection)
-      addSkill(item.querySelector('p')?.innerText);
-    });
-
-    // Classic layout: skill name is a bold hoverable link per list row
-    if (skills.length === 0) {
-      skillSection.querySelectorAll(
-        'a[data-field="skill_card_skill_topic"] span[aria-hidden="true"], ' +
-        '.hoverable-link-text.t-bold span[aria-hidden="true"]'
-      ).forEach(el => addSkill(el.innerText));
-    }
-
-    // Old layout fallback
-    if (skills.length === 0) {
-      skillSection.querySelectorAll('.t-bold span[aria-hidden="true"]').forEach(el =>
-        addSkill(el.innerText)
-      );
-    }
-
+  if (harvestSkillSection(addSkill)) {
     console.log(`[SCOUT] Skills section found, extracted ${skills.length} from main page`);
   } else {
     console.warn('[SCOUT] Skills section NOT found on page');
@@ -935,6 +941,20 @@ function scrollAndExtract() {
     let capturedAbout = '';
     const mainEl = document.querySelector('main#workspace') || document.querySelector('main') || document.documentElement;
 
+    // Capture skills as the section scrolls into view. LinkedIn virtualizes the
+    // Skills section out of the DOM once scrolled well past it, so extractProfile()
+    // at the bottom of the scroll can find no section at all ("Skills section NOT
+    // found"). Harvest incrementally each step and merge in below.
+    const capturedSkills = [];
+    const capturedSeen = new Set();
+    function captureSkills() {
+      harvestSkillSection(raw => {
+        const { name } = cleanSkillRow(raw);
+        const low = name.toLowerCase();
+        if (name && !capturedSeen.has(low)) { capturedSeen.add(low); capturedSkills.push(name); }
+      });
+    }
+
     // Capture OTW before scrolling — topcard lazy-unloads when scrolled out of viewport
     const capturedOpenToWork = extractOpenToWork();
     console.log('[SCOUT] OpenToWork (pre-scroll):', capturedOpenToWork);
@@ -960,11 +980,18 @@ function scrollAndExtract() {
           capturedAbout = extractAbout();
           if (capturedAbout) console.log('[SCOUT] About captured at scroll pos', pos);
         }
+        captureSkills();
         if (pos < maxScroll) {
           step();
         } else {
           const profile = extractProfile();
           if (capturedAbout) profile.about = capturedAbout;
+          // Merge skills captured mid-scroll (section may be virtualized out now).
+          if (capturedSkills.length) {
+            const have = new Set(profile.skills.map(s => s.toLowerCase()));
+            capturedSkills.forEach(s => { if (!have.has(s.toLowerCase())) profile.skills.push(s); });
+            console.log(`[SCOUT] merged ${capturedSkills.length} scroll-captured skills; total ${profile.skills.length}`);
+          }
           if (!profile.title && capturedHeadline) profile.title = capturedHeadline;
           profile.openToWork = capturedOpenToWork;
 
