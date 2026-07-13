@@ -18,9 +18,11 @@ const scoreLabel     = document.getElementById('score-label');
 const scoreRationale = document.getElementById('score-rationale');
 const scoreBreakdown = document.getElementById('score-breakdown');
 const skillLists     = document.getElementById('skill-lists');
+const autoGate       = document.getElementById('auto-gate');
 const addBtn         = document.getElementById('add-btn');
 const jazzhrBtn      = document.getElementById('jazzhr-btn');
 const statusEl       = document.getElementById('status');
+const mockDuplicate  = document.getElementById('mock-duplicate');
 const resumeUpload   = document.getElementById('resume-upload');
 const resumeFile     = document.getElementById('resume-file');
 const resumeName     = document.getElementById('resume-name');
@@ -632,6 +634,7 @@ function requestScore(jdId) {
   // Wipe the previous JD's breakdown so nothing stale shows during the re-score.
   if (scoreBreakdown) scoreBreakdown.innerHTML = '';
   if (skillLists)     skillLists.innerHTML = '';
+  if (autoGate)       autoGate.style.display = 'none';
   showStatus(modelReady ? 'Matching profile to JD…' : 'Loading AI model (first time only)…', 'loading');
 
   // Prefer a manually-attached résumé; otherwise fall back to the résumé text
@@ -663,6 +666,7 @@ function renderScore(data, updated = false) {
   const tone = score >= 80 ? 'excellent' : score >= 65 ? 'good' : score >= 45 ? 'fair' : 'poor';
   scoreCircle.classList.add(tone);
 
+  renderAutoGate(data);
   renderBreakdown(data.categories);
   renderSkillLists(data.categories);
 
@@ -670,6 +674,35 @@ function renderScore(data, updated = false) {
   resumeUpload.style.display = 'block';
   addBtn.disabled = false;
   resetAddButton();
+}
+
+// Doc §4 — auto-scheduling gate. Shows whether the candidate clears all four
+// critical gates (required skills, certs, clearance, locality) at score ≥ 80.
+function renderAutoGate(data) {
+  if (!autoGate) return;
+  const gates = data.gates;
+  if (!gates) { autoGate.style.display = 'none'; return; }
+
+  const labels = {
+    required_skills: 'Required Skills',
+    certifications:  'Certifications',
+    clearance:       'Clearance',
+    locality:        'Commute / Locality',
+  };
+  const failed = Object.keys(labels).filter(k => !gates[k]);
+
+  autoGate.className = 'auto-gate ' + (data.auto_schedule ? 'pass' : 'hold');
+  if (data.auto_schedule) {
+    autoGate.innerHTML = `<span class="auto-gate-icon">✓</span>` +
+      `<span>Auto-schedule eligible — score ≥ 80 and all critical gates passed.</span>`;
+  } else {
+    const reason = data.score < 80
+      ? `score below 80`
+      : `unmet: ${failed.map(k => labels[k]).join(', ')}`;
+    autoGate.innerHTML = `<span class="auto-gate-icon">•</span>` +
+      `<span>Standard pipeline — no auto-scheduling (${escapeHtml(reason)}).</span>`;
+  }
+  autoGate.style.display = 'flex';
 }
 
 // Doc §3.4 — per-category breakdown: weight, sub-score, and a fill bar. Only the
@@ -778,6 +811,8 @@ function renderBestFit(list) {
 // ── Add to SCOUT → backend API ────────────────────────────────────────────────
 
 addBtn.addEventListener('click', () => {
+  if (mockDuplicate.checked) { renderDuplicateState(); return; }
+
   if (!candidate) {
     showStatus('Profile not loaded yet — wait and try again.', 'error');
     return;
@@ -824,12 +859,12 @@ addBtn.addEventListener('click', () => {
 
   addBtn.disabled = true;
   jazzhrBtn.style.display = 'none';
-  showStatus('Adding to JazzHR…', 'loading');
+  showStatus('Adding to SCOUT…', 'loading');
 
   chrome.runtime.sendMessage({ type: 'ADD_CANDIDATE', payload }, (res) => {
     statusEl.classList.remove('show');
     if (res?.ok) {
-      addBtn.textContent = 'Added to JazzHR ✓';
+      addBtn.textContent = 'Added to SCOUT ✓';
       addBtn.className   = 'btn btn-success';
       resumeUpload.style.display = 'none';
       if (res.jazzhr_url) {
@@ -843,8 +878,21 @@ addBtn.addEventListener('click', () => {
   });
 });
 
+// ── Mock ──────────────────────────────────────────────────────────────────────
+
+mockDuplicate.addEventListener('change', () => {
+  if (mockDuplicate.checked && selectedJd) renderDuplicateState();
+  else resetAddButton();
+});
+
+function renderDuplicateState() {
+  addBtn.textContent = 'Already in SCOUT — view record →';
+  addBtn.className   = 'btn btn-duplicate';
+  addBtn.disabled    = false;
+}
+
 function resetAddButton() {
-  addBtn.textContent = 'Add to JazzHR';
+  addBtn.textContent = 'Add to SCOUT';
   addBtn.className   = 'btn btn-primary';
   addBtn.disabled    = !selectedJd;
 }

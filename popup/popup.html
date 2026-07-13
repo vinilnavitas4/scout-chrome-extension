@@ -77,6 +77,9 @@
             <div class="score-rationale" id="score-rationale">—</div>
           </div>
 
+          <!-- Auto-scheduling gate (doc §4) -->
+          <div class="auto-gate" id="auto-gate" style="display:none"></div>
+
           <!-- Per-category weighted breakdown (doc §3.4) -->
           <div class="score-breakdown" id="score-breakdown"></div>
 
@@ -102,7 +105,7 @@
           <input type="file" id="resume-file" accept=".pdf,.doc,.docx,.odt,.rtf,.txt" style="display:none" />
         </div>
 
-        <button class="btn btn-primary" id="add-btn" disabled>Add to JazzHR</button>
+        <button class="btn btn-primary" id="add-btn" disabled>Add to SCOUT</button>
 
         <a class="btn btn-jazzhr" id="jazzhr-btn" target="_blank" style="display:none">
           View in JazzHR →
@@ -111,6 +114,13 @@
       </div>
     </div>
 
+    <div class="dev-bar">
+      <span>DEV</span>
+      <label>
+        <input type="checkbox" id="mock-duplicate" />
+        Mock "Already in SCOUT"
+      </label>
+    </div>
   </div>
 
   <div id="empty-view" style="display:none">
