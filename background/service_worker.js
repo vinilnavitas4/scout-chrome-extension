@@ -250,26 +250,6 @@ function detectEducation(text) {
   return { rank: 0, label: "" };
 }
 
-// ── Certification signals ─────────────────────────────────────────────────────
-// Not a scored bucket, but the auto-scheduling gate (doc §4) needs a pass/fail on
-// "Required Certifications". Whole-word scan for named certs; a JD with none
-// required passes the gate automatically.
-const CERT_KEYWORDS = [
-  "PMP","CISSP","CISM","CISA","CEH","Security+","Network+","A+","CCNA","CCNP","CCIE",
-  "AWS Certified","Azure Certified","GCP Certified","CKA","CKAD","Terraform Associate",
-  "CompTIA","ITIL","CSM","PSM","SAFe","Six Sigma","CPA","PE license",
-];
-function findCerts(text) {
-  if (!text) return [];
-  const found = [];
-  for (const kw of CERT_KEYWORDS) {
-    const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, "i");
-    if (re.test(text) && !found.includes(kw)) found.push(kw);
-  }
-  return found;
-}
-
 // ── Off-list skill mining (#1) ────────────────────────────────────────────────
 // TOOL_KEYWORDS can't enumerate every tool, so a JD requiring something off-list
 // would never score it. Mine extra skill phrases from explicit enumerations only
@@ -369,11 +349,9 @@ function parseRequirements(description) {
   // Education requirement — prefer the "Need" section, fall back to the whole JD.
   // Only scores when the JD actually states a degree requirement.
   const required_education = detectEducation(needSection).rank ? detectEducation(needSection) : detectEducation(text);
-  // Required certifications — only gate the auto-schedule rule when the JD names one.
-  const required_certs = findCerts(needSection.length ? needSection : text);
 
   return { required_skills, preferred_skills, required_years, prominence,
-           required_clearance, jd_state, jd_remote, required_education, required_certs };
+           required_clearance, jd_state, jd_remote, required_education };
 }
 
 // ── Semantic skill matching via embeddings (offscreen model) ──────────────────
@@ -521,8 +499,7 @@ async function backendScore(jd_id, candidate, resume_text) {
       if (!d || typeof d.score !== "number") return null; // malformed → local
       return {
         score: d.score, label: d.label || "", rationale: d.rationale || "",
-        categories: d.categories || null, gates: d.gates || null,
-        auto_schedule: !!d.auto_schedule,
+        categories: d.categories || null,
       };
     } catch (e) {                                    // network / abort(timeout) → transient, retry
       console.warn(`[SCOUT] backendScore ${e.name === "AbortError" ? "timeout" : "network"} (attempt ${attempt + 1})`);
@@ -698,27 +675,6 @@ async function computeScore(requirements, jobTitle, candidate) {
       fill: locationFill, detected: candState || (candidate.location || "").trim() || "Unknown", required: jdLoc || "Any" },
   ];
 
-  // ── Auto-scheduling gate (doc §4) — pass/fail on the four critical categories,
-  // independent of the composite. required_certs gate passes when the JD names
-  // no cert; else the candidate text must mention every required cert.
-  const certText = [
-    (candidate.skills || []).join(" "),
-    candidate.about,
-    (candidate.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
-    (candidate.experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
-  ].filter(Boolean).join("\n");
-  const reqCerts    = requirements.required_certs || [];
-  const candCerts   = findCerts(certText);
-  const missingCerts = reqCerts.filter(c => !candCerts.includes(c));
-  const gates = {
-    required_skills: reqFill >= 1,
-    certifications:  missingCerts.length === 0,
-    clearance:       !clearanceActive || clearanceFill >= 1,
-    locality:        !locationActive  || locationFill  >= 1,
-  };
-  const auto_schedule = score >= 80 && gates.required_skills && gates.certifications
-                        && gates.clearance && gates.locality;
-
   const parts = [];
   if (matchedReq.length > 0) {
     const shown = matchedReq.slice(0, 4).join(", ");
@@ -761,7 +717,7 @@ async function computeScore(requirements, jobTitle, candidate) {
         : `Located in ${candState}, outside the ${jdState} job location.`);
   }
 
-  return { score, label, rationale: parts.join(" "), categories, gates, auto_schedule };
+  return { score, label, rationale: parts.join(" "), categories };
 }
 
 // ── Score one candidate against one JD (backend-first, local fallback) ────────

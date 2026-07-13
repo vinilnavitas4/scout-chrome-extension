@@ -323,27 +323,6 @@ def detect_education(text: str) -> dict:
     return {"rank": 0, "label": ""}
 
 
-# ── Certification signals (mirror of service_worker.js) ───────────────────────
-# Not scored, but the auto-scheduling gate (doc §4) needs a pass/fail on
-# "Required Certifications".
-CERT_KEYWORDS = [
-    "PMP","CISSP","CISM","CISA","CEH","Security+","Network+","A+","CCNA","CCNP","CCIE",
-    "AWS Certified","Azure Certified","GCP Certified","CKA","CKAD","Terraform Associate",
-    "CompTIA","ITIL","CSM","PSM","SAFe","Six Sigma","CPA","PE license",
-]
-
-
-def find_certs(text: str) -> list[str]:
-    if not text:
-        return []
-    found: list[str] = []
-    for kw in CERT_KEYWORDS:
-        esc = re.escape(kw)
-        if re.search(rf"(?<![A-Za-z0-9]){esc}(?![A-Za-z0-9])", text, re.IGNORECASE) and kw not in found:
-            found.append(kw)
-    return found
-
-
 # ── Off-list skill mining (#1) ────────────────────────────────────────────────
 # TOOL_KEYWORDS can't enumerate every tool; mine extra skills from explicit
 # enumerations (a "skills cue" followed by a delimited list) so off-list skills
@@ -441,7 +420,6 @@ def parse_requirements(description: str) -> dict:
 
     # Education requirement — prefer the "Need" section, fall back to whole JD.
     required_education = detect_education(need) if detect_education(need)["rank"] else detect_education(text)
-    required_certs = find_certs(need if need else text)
 
     return {
         "required_skills": required_skills,
@@ -452,7 +430,6 @@ def parse_requirements(description: str) -> dict:
         "jd_state": jd_state,
         "jd_remote": jd_remote,
         "required_education": required_education,
-        "required_certs": required_certs,
     }
 
 
@@ -597,21 +574,6 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
          "required": jd_loc or "Any"},
     ]
 
-    # ── Auto-scheduling gate (doc §4) — pass/fail on the four critical
-    # categories, independent of the composite.
-    cert_text = "\n".join(t for t in (" ".join(skills or []), certifications, about) if t)
-    req_certs = requirements.get("required_certs") or []
-    cand_certs = find_certs(cert_text)
-    missing_certs = [c for c in req_certs if c not in cand_certs]
-    gates = {
-        "required_skills": req_fill >= 1,
-        "certifications":  len(missing_certs) == 0,
-        "clearance":       (not clearance_active) or clearance_fill >= 1,
-        "locality":        (not location_active) or location_fill >= 1,
-    }
-    auto_schedule = (score >= 80 and gates["required_skills"] and gates["certifications"]
-                     and gates["clearance"] and gates["locality"])
-
     parts = []
     if matched_req:
         shown = ", ".join(matched_req[:4])
@@ -657,7 +619,7 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
             parts.append(f"Located in {cand_state}, outside the {jd_state} job location.")
 
     return {"score": score, "label": label, "rationale": " ".join(parts),
-            "categories": categories, "gates": gates, "auto_schedule": auto_schedule}
+            "categories": categories}
 
 
 # ── Request/response models + route ───────────────────────────────────────────
