@@ -22,7 +22,6 @@ const autoGate       = document.getElementById('auto-gate');
 const addBtn         = document.getElementById('add-btn');
 const jazzhrBtn      = document.getElementById('jazzhr-btn');
 const statusEl       = document.getElementById('status');
-const mockDuplicate  = document.getElementById('mock-duplicate');
 const resumeUpload   = document.getElementById('resume-upload');
 const resumeFile     = document.getElementById('resume-file');
 const resumeName     = document.getElementById('resume-name');
@@ -811,8 +810,6 @@ function renderBestFit(list) {
 // ── Add to SCOUT → backend API ────────────────────────────────────────────────
 
 addBtn.addEventListener('click', () => {
-  if (mockDuplicate.checked) { renderDuplicateState(); return; }
-
   if (!candidate) {
     showStatus('Profile not loaded yet — wait and try again.', 'error');
     return;
@@ -859,12 +856,12 @@ addBtn.addEventListener('click', () => {
 
   addBtn.disabled = true;
   jazzhrBtn.style.display = 'none';
-  showStatus('Adding to SCOUT…', 'loading');
+  showStatus('Adding to JazzHR…', 'loading');
 
   chrome.runtime.sendMessage({ type: 'ADD_CANDIDATE', payload }, (res) => {
     statusEl.classList.remove('show');
     if (res?.ok) {
-      addBtn.textContent = 'Added to SCOUT ✓';
+      addBtn.textContent = 'Added to JazzHR ✓';
       addBtn.className   = 'btn btn-success';
       resumeUpload.style.display = 'none';
       if (res.jazzhr_url) {
@@ -878,21 +875,8 @@ addBtn.addEventListener('click', () => {
   });
 });
 
-// ── Mock ──────────────────────────────────────────────────────────────────────
-
-mockDuplicate.addEventListener('change', () => {
-  if (mockDuplicate.checked && selectedJd) renderDuplicateState();
-  else resetAddButton();
-});
-
-function renderDuplicateState() {
-  addBtn.textContent = 'Already in SCOUT — view record →';
-  addBtn.className   = 'btn btn-duplicate';
-  addBtn.disabled    = false;
-}
-
 function resetAddButton() {
-  addBtn.textContent = 'Add to SCOUT';
+  addBtn.textContent = 'Add to JazzHR';
   addBtn.className   = 'btn btn-primary';
   addBtn.disabled    = !selectedJd;
 }
