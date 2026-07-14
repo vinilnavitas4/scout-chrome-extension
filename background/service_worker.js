@@ -523,6 +523,10 @@ async function backendScore(jd_id, candidate, resume_text) {
       certifications:   (candidate.certifications || [])
                           .map(c => `${c.name || ""} ${c.issuer || ""}`.trim())
                           .filter(Boolean),
+      // Full experience descriptions — backend scans them so a JD skill only
+      // mentioned in role bullets (not the Skills section) still matches.
+      experience_text:  (candidate.experience || [])
+                          .map(e => e && e.description).filter(Boolean).join("\n"),
     },
   });
 
@@ -561,10 +565,52 @@ async function backendScore(jd_id, candidate, resume_text) {
 
 // ── Score candidate against requirements (local fallback) ─────────────────────
 
-async function computeScore(requirements, jobTitle, candidate) {
+// Lexical scan of raw candidate text (experience descriptions, or the résumé
+// when one is attached) — a JD skill counts as matched when its phrase appears
+// in that text, so skills only written up in role bullets (never listed in the
+// Skills section, and outside the TOOL_KEYWORDS whitelist) still score.
+// Ambiguous names (Go, Rust, Spark…) match case-sensitively against the raw
+// text so prose ("go through logs") doesn't give false credit.
+// Mirrored verbatim in score_endpoint.py.
+function makeTextMatcher(rawText) {
+  const raw  = " " + String(rawText || "") + " ";
+  const text = " " + normalizeSkill(rawText) + " ";
+  if (!text.trim()) return () => false;
+  const escWord = w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const phraseRe = (s) =>
+    new RegExp(`(?:^|[^A-Za-z0-9])${s.split(/\s+/).map(escWord).join("\\s+")}(?:$|[^A-Za-z0-9+#])`);
+  return (target) => {
+    // Match the target's canonical + raw forms AND every alias variant that
+    // canonicalizes to it — the text may use the alias ("k8s") while the JD
+    // uses the full name ("Kubernetes"), or vice versa.
+    const tn = canonicalSkill(target);
+    const forms = new Set([tn, normalizeSkill(target)]);
+    for (const [alias, canon] of SKILL_ALIASES) if (canon === tn) forms.add(alias);
+    for (const f of forms) {
+      if (!f) continue;
+      const csKeyword = [...CASE_SENSITIVE_KEYWORDS].find(k => k.toLowerCase() === f);
+      if (csKeyword) {
+        if (phraseRe(csKeyword).test(raw)) return true;
+      } else if (phraseRe(f).test(text)) {
+        return true;
+      }
+    }
+    return false;
+  };
+}
+
+async function computeScore(requirements, jobTitle, candidate, resumeText = "") {
   const { required_skills, preferred_skills, required_years } = requirements;
   const cSkills  = candidate.skills || [];
   const expYears = candidate.experience_years || 0;
+
+  // Text scanned for skills beyond the skills list: résumé replaces the profile
+  // (same authority rule as the skills-replace above), else every experience
+  // description is read for skill mentions.
+  const textHas = makeTextMatcher(
+    resumeText ||
+    (candidate.experience || []).map(e => e && e.description).filter(Boolean).join("\n")
+  );
 
   if (required_skills.length === 0) {
     return { score: 50, label: "Fair Fit", rationale: "Could not extract skills from JD to score." };
@@ -608,7 +654,7 @@ async function computeScore(requirements, jobTitle, candidate) {
       // the score across devices.
       const cv = vecMap.get(cn);
       return tv && cv && cosine(tv, cv) >= SIM_ACCEPT;
-    });
+    }) || textHas(target); // skill written up in experience bullets / résumé text
   }
 
   const matchedReq  = required_skills.filter(isMatch);
@@ -833,7 +879,7 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     cached = { title: job.title, requirements: parseRequirements(job.description || "") };
     jobCache.set(jd_id, cached);
   }
-  const result = await computeScore(cached.requirements, cached.title, scored);
+  const result = await computeScore(cached.requirements, cached.title, scored, resume_text);
   return { ...result, source: "local" };
 }
 

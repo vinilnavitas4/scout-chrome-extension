@@ -494,9 +494,48 @@ def parse_requirements(description: str) -> dict:
 
 # ── Scoring (port of computeScore) ────────────────────────────────────────────
 
+def make_text_matcher(raw_text: str):
+    """Lexical scan of raw candidate text (experience descriptions, or the
+    résumé when one is attached) — a JD skill counts as matched when its phrase
+    appears in that text, so skills only written up in role bullets (never
+    listed in the Skills section, and outside the TOOL_KEYWORDS whitelist)
+    still score. Ambiguous names (Go, Rust, Spark…) match case-sensitively
+    against the raw text so prose ("go through logs") doesn't give false
+    credit. Mirror of makeTextMatcher in service_worker.js."""
+    raw = " " + (raw_text or "") + " "
+    text = " " + normalize_skill(raw_text or "") + " "
+    if not text.strip():
+        return lambda target: False
+
+    def phrase_re(s: str) -> re.Pattern:
+        body = r"\s+".join(re.escape(w) for w in s.split())
+        return re.compile(rf"(?:^|[^A-Za-z0-9]){body}(?:$|[^A-Za-z0-9+#])")
+
+    def has(target: str) -> bool:
+        # Match the target's canonical + raw forms AND every alias variant that
+        # canonicalizes to it — the text may use the alias ("k8s") while the JD
+        # uses the full name ("Kubernetes"), or vice versa.
+        tn = canonical_skill(target)
+        forms = {tn, normalize_skill(target)}
+        forms.update(a for a, c in SKILL_ALIASES.items() if c == tn)
+        for f in forms:
+            if not f:
+                continue
+            cs_keyword = next((k for k in CASE_SENSITIVE_KEYWORDS if k.lower() == f), None)
+            if cs_keyword:
+                if phrase_re(cs_keyword).search(raw):
+                    return True
+            elif phrase_re(f).search(text):
+                return True
+        return False
+
+    return has
+
+
 def compute_score(requirements: dict, job_title: str, skills: list[str], exp_years: float,
                   location: str = "", clearance: str = "",
-                  education: str = "", about: str = "", certifications: str = "") -> dict:
+                  education: str = "", about: str = "", certifications: str = "",
+                  scan_text: str = "") -> dict:
     required = requirements["required_skills"]
     preferred = requirements["preferred_skills"]
     required_years = requirements["required_years"]
@@ -507,6 +546,7 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
 
     c_skills = skills or []
     vec_map = _embed([canonical_skill(s) for s in (required + preferred + c_skills)])
+    text_has = make_text_matcher(scan_text)
 
     def is_match(target: str) -> bool:
         tn = canonical_skill(target)
@@ -528,7 +568,8 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
             cv = vec_map.get(cn)
             if tv is not None and cv is not None and _cosine(tv, cv) >= SIM_ACCEPT:
                 return True
-        return False
+        # Skill written up in experience bullets / résumé text.
+        return text_has(target)
 
     matched_req = [s for s in required if is_match(s)]
     matched_pref = [s for s in preferred if is_match(s)]
@@ -709,6 +750,7 @@ class Candidate(BaseModel):
     about: str = ""
     education: list[str] = []       # flattened "degree school" lines from the profile
     certifications: list[str] = []  # flattened "name issuer" lines from the profile
+    experience_text: str = ""       # joined experience descriptions — scanned for skill mentions
 
 
 class ScoreRequest(BaseModel):
@@ -761,6 +803,12 @@ def score(req: ScoreRequest) -> dict:
     about_text = " ".join(t for t in (req.candidate.about, req.resume_text) if t)
     cert_text = "\n".join(req.candidate.certifications or [])
 
+    # Text scanned for skill mentions beyond the skills list: résumé replaces the
+    # profile (same authority rule as the skills-replace above), else every
+    # experience description is read.
+    scan_text = req.resume_text or req.candidate.experience_text
+
     return compute_score(requirements, title, skills, req.candidate.experience_years,
                          location=req.candidate.location, clearance=clearance_text,
-                         education=education_text, about=about_text, certifications=cert_text)
+                         education=education_text, about=about_text, certifications=cert_text,
+                         scan_text=scan_text)
