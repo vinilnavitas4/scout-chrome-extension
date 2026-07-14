@@ -305,8 +305,10 @@ def detect_remote(text: str) -> bool:
 # higher degree satisfies a lower requirement.
 EDUCATION_LEVELS = [
     (4, "Doctorate",  re.compile(r"\b(?:ph\.?\s?d|doctorate|doctoral|d\.?sc\.?|ed\.?d)\b", re.IGNORECASE)),
-    (3, "Master's",   re.compile(r"\b(?:master'?s?|m\.?s\.?c?\.?|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b", re.IGNORECASE)),
-    (2, "Bachelor's", re.compile(r"\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?eng\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b", re.IGNORECASE)),
+    (3, "Master's",   re.compile(r"\b(?:master'?s?|m\.?s\.?c?\.?|m\.?\s?tech\b|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b", re.IGNORECASE)),
+    # "b\.e\.?" needs its dot — bare "BE" would false-match the common word "be"
+    # in About/résumé prose that this detector also scans.
+    (2, "Bachelor's", re.compile(r"\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?\s?tech\b|b\.?eng\.?|b\.e\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b", re.IGNORECASE)),
     # Bare dotless "AS"/"AA" omitted — "as" is a common word and would false-match.
     (1, "Associate",  re.compile(r"\b(?:associate'?s?|a\.?a\.?s\.?|a\.s|two[\s-]?year degree)\b", re.IGNORECASE)),
 ]
@@ -321,6 +323,40 @@ def detect_education(text: str) -> dict:
     if re.search(r"\bdegree\b", text, re.IGNORECASE):
         return {"rank": 2, "label": "Degree"}
     return {"rank": 0, "label": ""}
+
+
+# Résumé Education-section slicer — when a résumé is attached, the candidate's
+# degree level is read ONLY from the résumé's Education section, never from
+# prose elsewhere in the résumé. PDF extraction flattens layout (words joined
+# by spaces, one newline per page), so this slices the flowing text from the
+# Education heading to the next section heading. Returns "" when no Education
+# heading is found. Mirror of resumeEducationSection in service_worker.js.
+RESUME_EDU_HEADING_RE = re.compile(
+    r"\b(?:education(?:al)?(?:\s+(?:qualifications?|background|details|history))?"
+    r"|academic\s+(?:qualifications?|background|details|history))\b\s*:?",
+    re.IGNORECASE)
+RESUME_NEXT_SECTION_RE = re.compile(
+    r"\b(?:(?:work|professional|employment)\s+(?:experience|history)|experience"
+    r"|technical\s+skills|skills|projects?|certifications?|licen[cs]es?|awards?"
+    r"|achievements?|publications?|languages|interests|hobbies|references?"
+    r"|declaration|summary|objective)\b\s*:?",
+    re.IGNORECASE)
+
+
+def resume_education_section(text: str) -> str:
+    if not text:
+        return ""
+    # Prefer ALL-CAPS ("EDUCATION") or line-start matches — those are real
+    # headings, not prose mentions ("passionate about education").
+    matches = list(RESUME_EDU_HEADING_RE.finditer(text))
+    if not matches:
+        return ""
+    pick = (next((m for m in matches if m.group(0) == m.group(0).upper()), None)
+            or next((m for m in matches if m.start() == 0 or text[m.start() - 1] == "\n"), None)
+            or matches[0])
+    rest = text[pick.end():]
+    nxt = RESUME_NEXT_SECTION_RE.search(rest)
+    return (rest[:nxt.start()] if nxt else rest).strip()
 
 
 # ── Certification signals (mirror of service_worker.js) ───────────────────────
@@ -528,9 +564,11 @@ def compute_score(requirements: dict, job_title: str, skills: list[str], exp_yea
         clearance_fill = 0.0
 
     # Education bucket — active ONLY when the JD states a degree requirement.
-    # Meets/exceeds → full; holds a lower degree → half; none → zero.
+    # Meets/exceeds → full; holds a lower degree → half; none → zero. Candidate
+    # degree level read from the Education section entries ONLY — About/résumé
+    # prose is excluded so a stray "master's"/"degree" mention can't inflate it.
     req_edu = requirements.get("required_education") or {"rank": 0, "label": ""}
-    cand_edu = detect_education("\n".join(t for t in (education, about) if t))
+    cand_edu = detect_education(education)
     education_active = req_edu["rank"] > 0
     if not education_active:
         education_fill = 0.0
@@ -711,9 +749,15 @@ def score(req: ScoreRequest) -> dict:
                     req.resume_text) if t
     )
 
-    # Education text = flattened profile education lines + About/résumé fallback,
-    # so an older client that doesn't send candidate.education still scores it.
+    # Education text = flattened profile Education-section lines ONLY (no
+    # About/résumé-prose fallback — degree level must come from an Education
+    # section). Résumé attached → its Education section replaces the profile's.
+    # Guard: no Education heading in the résumé keeps the profile entries.
     education_text = "\n".join(req.candidate.education or [])
+    if req.resume_text:
+        resume_edu = resume_education_section(req.resume_text)
+        if resume_edu:
+            education_text = resume_edu
     about_text = " ".join(t for t in (req.candidate.about, req.resume_text) if t)
     cert_text = "\n".join(req.candidate.certifications or [])
 

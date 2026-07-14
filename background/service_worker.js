@@ -236,8 +236,10 @@ function detectRemote(text) {
 // ask). Mirrored verbatim in score_endpoint.py so client and backend agree.
 const EDUCATION_LEVELS = [
   { rank: 4, label: "Doctorate",  re: /\b(?:ph\.?\s?d|doctorate|doctoral|d\.?sc\.?|ed\.?d)\b/i },
-  { rank: 3, label: "Master's",   re: /\b(?:master'?s?|m\.?s\.?c?\.?|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b/i },
-  { rank: 2, label: "Bachelor's", re: /\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?eng\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b/i },
+  { rank: 3, label: "Master's",   re: /\b(?:master'?s?|m\.?s\.?c?\.?|m\.?\s?tech\b|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b/i },
+  // "b\.e\.?" needs its dot — bare "BE" would false-match the common word "be"
+  // in About/résumé prose that this detector also scans.
+  { rank: 2, label: "Bachelor's", re: /\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?\s?tech\b|b\.?eng\.?|b\.e\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b/i },
   // Bare dotless "AS"/"AA" omitted on purpose — "as" is a common word and would
   // false-match. Accept spelled-out forms and dotted abbreviations only.
   { rank: 1, label: "Associate",  re: /\b(?:associate'?s?|a\.?a\.?s\.?|a\.s|two[\s-]?year degree)\b/i },
@@ -248,6 +250,29 @@ function detectEducation(text) {
   // Bare "degree" with no named level → treat as a Bachelor's-level ask/hold.
   if (/\bdegree\b/i.test(text)) return { rank: 2, label: "Degree" };
   return { rank: 0, label: "" };
+}
+
+// Résumé Education-section slicer — when a résumé is attached, the candidate's
+// degree level is read ONLY from the résumé's Education section, never from
+// prose elsewhere in the résumé. PDF extraction flattens layout (words joined
+// by spaces, one newline per page), so this slices the flowing text from the
+// Education heading to the next section heading. Returns "" when no Education
+// heading is found. Mirrored verbatim in score_endpoint.py.
+const RESUME_EDU_HEADING_RE = /\b(?:education(?:al)?(?:\s+(?:qualifications?|background|details|history))?|academic\s+(?:qualifications?|background|details|history))\b\s*:?/gi;
+const RESUME_NEXT_SECTION_RE = /\b(?:(?:work|professional|employment)\s+(?:experience|history)|experience|technical\s+skills|skills|projects?|certifications?|licen[cs]es?|awards?|achievements?|publications?|languages|interests|hobbies|references?|declaration|summary|objective)\b\s*:?/i;
+function resumeEducationSection(text) {
+  if (!text) return "";
+  // Prefer ALL-CAPS ("EDUCATION") or line-start matches — those are real
+  // headings, not prose mentions ("passionate about education").
+  const matches = [...text.matchAll(RESUME_EDU_HEADING_RE)];
+  if (matches.length === 0) return "";
+  const pick =
+    matches.find(m => m[0] === m[0].toUpperCase()) ||
+    matches.find(m => m.index === 0 || text[m.index - 1] === "\n") ||
+    matches[0];
+  const rest = text.slice(pick.index + pick[0].length);
+  const next = rest.search(RESUME_NEXT_SECTION_RE);
+  return (next >= 0 ? rest.slice(0, next) : rest).trim();
 }
 
 // ── Certification signals ─────────────────────────────────────────────────────
@@ -636,12 +661,11 @@ async function computeScore(requirements, jobTitle, candidate) {
 
   // Education bucket — active ONLY when the JD states a degree requirement. Meets
   // or exceeds → full; holds a lower degree → half; none → zero. Candidate degree
-  // level read from the Education section entries (fallback: About/résumé text).
+  // level read from the Education section entries ONLY — About/résumé prose is
+  // excluded so a stray "master's"/"degree" mention can't inflate the level.
   const reqEdu  = requirements.required_education || { rank: 0, label: "" };
-  const eduText = [
-    (candidate.education || []).map(e => `${e.degree || ""} ${e.school || ""}`).join("\n"),
-    candidate.about,
-  ].filter(Boolean).join("\n");
+  const eduText = (candidate.education || [])
+    .map(e => `${e.degree || ""} ${e.school || ""}`).join("\n");
   const candEdu = detectEducation(eduText);
   const educationActive = reqEdu.rank > 0;
   const educationFill = !educationActive ? 0
@@ -789,6 +813,11 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
   if (resume_text) {
     const resumeSkills = findKeywords(resume_text);
     if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
+    // Résumé also replaces education — but ONLY its Education section text, so
+    // degree words in résumé prose can't inflate the level. Guard: no Education
+    // heading found keeps the profile's Education-section entries.
+    const resumeEdu = resumeEducationSection(resume_text);
+    if (resumeEdu) scored = { ...scored, education: [{ degree: resumeEdu, school: "" }] };
   }
 
   // 1) Backend scoring (consistent across devices).
