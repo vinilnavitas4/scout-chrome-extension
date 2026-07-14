@@ -242,9 +242,20 @@ async function fetchAbout() {
   return '';
 }
 
+// Education section finder — heading lookup, then anchors. Mirrors the
+// experience finder so the section is located even when the heading text or
+// structure differs across LinkedIn layouts (classic layout uses a
+// <div id="education"> anchor inside the section).
+function findEducationSection() {
+  return findSectionByHeading('Education')
+    || document.querySelector('#education')?.closest('section')
+    || document.querySelector('a[href*="/details/education"]')?.closest('section')
+    || null;
+}
+
 function extractEducation() {
   const education = [];
-  const section = findSectionByHeading('Education');
+  const section = findEducationSection();
   if (!section) return education;
   getSectionItems(section).forEach(item => {
     const editLink = item.querySelector('a[href*="edit/forms/"]');
@@ -400,7 +411,12 @@ async function extractExperienceWithWait(maxMs = 6000) {
   return experience;
 }
 
-function extractProfile() {
+// Topcard fields (name / headline / location). Separate from extractProfile so
+// scrollAndExtract can capture them BEFORE scrolling — LinkedIn unloads the
+// topcard when it leaves the viewport, so a read at the bottom of the scroll
+// (or before the topcard finishes reloading at the top) returns blanks. This
+// was why location came back empty on some devices: only reload timing differs.
+function extractTopcard() {
   const column = findTopcardColumn();
 
   const name = (() => {
@@ -441,6 +457,12 @@ function extractProfile() {
       '.pv-text-details__left-panel span.text-body-small'
     ]);
   })();
+
+  return { name, title, location };
+}
+
+function extractProfile() {
+  const { name, title, location } = extractTopcard();
 
   // Experience
   const experience = extractExperience();
@@ -959,14 +981,25 @@ function scrollAndExtract() {
     const capturedOpenToWork = extractOpenToWork();
     console.log('[SCOUT] OpenToWork (pre-scroll):', capturedOpenToWork);
 
-    // Capture the headline pre-scroll too — the topcard unloads when scrolled out,
-    // so extractProfile() at the bottom of the scroll can read an empty title and
-    // miss a clearance stated in the headline. Restored below if title comes back blank.
-    const capturedHeadline =
-      (document.querySelector('.text-body-medium.break-words')
-        || document.querySelector('.pv-text-details__left-panel .text-body-medium'))
-        ?.innerText?.trim() || '';
-    console.log('[SCOUT] Headline (pre-scroll):', capturedHeadline || '(empty)');
+    // Capture the whole topcard pre-scroll too — the topcard unloads when scrolled
+    // out, so extractProfile() at the bottom of the scroll can read empty name/
+    // title/location and miss a clearance stated in the headline. Restored below
+    // for any field that comes back blank.
+    const capturedTopcard = extractTopcard();
+    console.log('[SCOUT] Topcard (pre-scroll):', capturedTopcard);
+
+    // Capture education/certifications as their sections scroll into view —
+    // same virtualization problem as skills: by the bottom of the scroll the
+    // sections can be out of the DOM, and on slow devices they may not have
+    // rendered yet when a single bottom-of-scroll read happens.
+    let capturedEducation = [];
+    let capturedCerts = [];
+    function captureSections() {
+      const edu = extractEducation();
+      if (edu.length > capturedEducation.length) capturedEducation = edu;
+      const certs = extractCertifications();
+      if (certs.length > capturedCerts.length) capturedCerts = certs;
+    }
 
     function step() {
       pos += scrollStep;
@@ -981,6 +1014,7 @@ function scrollAndExtract() {
           if (capturedAbout) console.log('[SCOUT] About captured at scroll pos', pos);
         }
         captureSkills();
+        captureSections();
         if (pos < maxScroll) {
           step();
         } else {
@@ -992,8 +1026,28 @@ function scrollAndExtract() {
             capturedSkills.forEach(s => { if (!have.has(s.toLowerCase())) profile.skills.push(s); });
             console.log(`[SCOUT] merged ${capturedSkills.length} scroll-captured skills; total ${profile.skills.length}`);
           }
-          if (!profile.title && capturedHeadline) profile.title = capturedHeadline;
+          // Restore topcard fields lost to the topcard unloading mid-scroll.
+          if (!profile.name && capturedTopcard.name) profile.name = capturedTopcard.name;
+          if (!profile.title && capturedTopcard.title) profile.title = capturedTopcard.title;
+          if (!profile.location && capturedTopcard.location) profile.location = capturedTopcard.location;
+          // Prefer the scroll-captured education/certs when the bottom-of-scroll
+          // read saw fewer items (section virtualized out or not yet rendered).
+          if (capturedEducation.length > (profile.education?.length || 0)) profile.education = capturedEducation;
+          if (capturedCerts.length > (profile.certifications?.length || 0)) profile.certifications = capturedCerts;
           profile.openToWork = capturedOpenToWork;
+
+          // After scrolling back to the top the topcard reloads — one last read
+          // there fills any field that was blank both pre-scroll and at bottom
+          // (e.g. panel opened mid-render so the pre-scroll capture was empty).
+          const finish = () => {
+            if (!profile.name || !profile.title || !profile.location) {
+              const tc = extractTopcard();
+              if (!profile.name && tc.name) profile.name = tc.name;
+              if (!profile.title && tc.title) profile.title = tc.title;
+              if (!profile.location && tc.location) profile.location = tc.location;
+            }
+            resolve(profile);
+          };
 
           if (!profile.about) {
             // About lazy-loads only when its container is in viewport (between topcard and activity).
@@ -1008,12 +1062,12 @@ function scrollAndExtract() {
               window.scrollTo(0, 0);
               mainEl.scrollTop = 0;
               // Wait 700ms for topcard to reload before contact-info extraction runs
-              setTimeout(() => resolve(profile), 700);
+              setTimeout(finish, 700);
             }, 1200);
           } else {
             window.scrollTo(0, 0);
             mainEl.scrollTop = 0;
-            setTimeout(() => resolve(profile), 700);
+            setTimeout(finish, 700);
           }
         }
       }, scrollDelay);
@@ -1095,6 +1149,22 @@ function runExtraction(force = false) {
         profile.experience = exp;
         profile.experience_years = calcExperienceYears(exp);
       }
+    }
+
+    // Education loses the same lazy-render race on slower machines. If still
+    // empty, scroll its section into view and poll until items stream in.
+    if (!profile.education || profile.education.length === 0) {
+      console.log('[SCOUT] education empty after scroll — waiting for lazy render');
+      let edu = extractEducation();
+      const start = Date.now();
+      while (edu.length === 0 && Date.now() - start < 5000) {
+        findEducationSection()?.scrollIntoView({ block: 'center' });
+        await new Promise(r => setTimeout(r, 300));
+        edu = extractEducation();
+      }
+      if (edu.length > 0) profile.education = edu;
+      console.log(`[SCOUT] education retry: ${edu.length} items after ${Date.now() - start}ms`);
+      window.scrollTo(0, 0);
     }
 
     if (!profile.about) {

@@ -699,11 +699,16 @@ def score(req: ScoreRequest) -> dict:
         if resume_skills:
             skills = resume_skills
 
-    # Clearance text = client-detected label + headline + résumé text fallback, so
-    # an older client that doesn't send candidate.clearance still scores clearance.
-    # The headline often states it directly, e.g. "Java Developer | TS/SCI".
+    # Clearance text = client-detected label + headline + About + certifications
+    # + résumé text fallback, so an older client that doesn't send
+    # candidate.clearance still scores clearance. The headline often states it
+    # directly ("Java Developer | TS/SCI"); the About section often states it in
+    # prose ("Active Secret clearance").
     clearance_text = " ".join(
-        t for t in (req.candidate.clearance, req.candidate.title, req.resume_text) if t
+        t for t in (req.candidate.clearance, req.candidate.title,
+                    req.candidate.about,
+                    "\n".join(req.candidate.certifications or []),
+                    req.resume_text) if t
     )
 
     # Education text = flattened profile education lines + About/résumé fallback,
