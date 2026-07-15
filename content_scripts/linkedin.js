@@ -570,7 +570,10 @@ function skillsFromText(text) {
   const found = [];
   for (const kw of TEXT_SKILL_KEYWORDS) {
     const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`(?<![A-Za-z0-9])${esc}(?:e?s)?(?![A-Za-z0-9+#])`, TEXT_CASE_SENSITIVE.has(kw) ? "" : "i");
+    // Skip the leading word-boundary check for keywords starting with a non-alphanumeric
+    // char (".NET") so they still match mid-token ("ASP.NET").
+    const lead = /^[A-Za-z0-9]/.test(kw) ? "(?<![A-Za-z0-9])" : "";
+    const re = new RegExp(`${lead}${esc}s?(?![A-Za-z0-9+#])`, TEXT_CASE_SENSITIVE.has(kw) ? "" : "i");
     if (re.test(text) && !found.includes(kw)) found.push(kw);
   }
   return found;
