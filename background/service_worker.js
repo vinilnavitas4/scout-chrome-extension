@@ -1,4 +1,4 @@
-const BASE_URL = "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
+const BASE_URL = "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
 // Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
 // Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
@@ -236,8 +236,10 @@ function detectRemote(text) {
 // ask). Mirrored verbatim in score_endpoint.py so client and backend agree.
 const EDUCATION_LEVELS = [
   { rank: 4, label: "Doctorate",  re: /\b(?:ph\.?\s?d|doctorate|doctoral|d\.?sc\.?|ed\.?d)\b/i },
-  { rank: 3, label: "Master's",   re: /\b(?:master'?s?|m\.?s\.?c?\.?|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b/i },
-  { rank: 2, label: "Bachelor's", re: /\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?eng\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b/i },
+  { rank: 3, label: "Master's",   re: /\b(?:master'?s?|m\.?s\.?c?\.?|m\.?\s?tech\b|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b/i },
+  // "b\.e\.?" needs its dot — bare "BE" would false-match the common word "be"
+  // in About/résumé prose that this detector also scans.
+  { rank: 2, label: "Bachelor's", re: /\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?\s?tech\b|b\.?eng\.?|b\.e\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b/i },
   // Bare dotless "AS"/"AA" omitted on purpose — "as" is a common word and would
   // false-match. Accept spelled-out forms and dotted abbreviations only.
   { rank: 1, label: "Associate",  re: /\b(?:associate'?s?|a\.?a\.?s\.?|a\.s|two[\s-]?year degree)\b/i },
@@ -248,6 +250,29 @@ function detectEducation(text) {
   // Bare "degree" with no named level → treat as a Bachelor's-level ask/hold.
   if (/\bdegree\b/i.test(text)) return { rank: 2, label: "Degree" };
   return { rank: 0, label: "" };
+}
+
+// Résumé Education-section slicer — when a résumé is attached, the candidate's
+// degree level is read ONLY from the résumé's Education section, never from
+// prose elsewhere in the résumé. PDF extraction flattens layout (words joined
+// by spaces, one newline per page), so this slices the flowing text from the
+// Education heading to the next section heading. Returns "" when no Education
+// heading is found. Mirrored verbatim in score_endpoint.py.
+const RESUME_EDU_HEADING_RE = /\b(?:education(?:al)?(?:\s+(?:qualifications?|background|details|history))?|academic\s+(?:qualifications?|background|details|history))\b\s*:?/gi;
+const RESUME_NEXT_SECTION_RE = /\b(?:(?:work|professional|employment)\s+(?:experience|history)|experience|technical\s+skills|skills|projects?|certifications?|licen[cs]es?|awards?|achievements?|publications?|languages|interests|hobbies|references?|declaration|summary|objective)\b\s*:?/i;
+function resumeEducationSection(text) {
+  if (!text) return "";
+  // Prefer ALL-CAPS ("EDUCATION") or line-start matches — those are real
+  // headings, not prose mentions ("passionate about education").
+  const matches = [...text.matchAll(RESUME_EDU_HEADING_RE)];
+  if (matches.length === 0) return "";
+  const pick =
+    matches.find(m => m[0] === m[0].toUpperCase()) ||
+    matches.find(m => m.index === 0 || text[m.index - 1] === "\n") ||
+    matches[0];
+  const rest = text.slice(pick.index + pick[0].length);
+  const next = rest.search(RESUME_NEXT_SECTION_RE);
+  return (next >= 0 ? rest.slice(0, next) : rest).trim();
 }
 
 // ── Certification signals ─────────────────────────────────────────────────────
@@ -484,6 +509,7 @@ async function backendScore(jd_id, candidate, resume_text) {
     jd_id,
     resume_text: resume_text || undefined, // backend applies résumé-replace rule
     candidate: {
+      title:            candidate.title || "",   // headline — backend scans it for clearance
       skills:           candidate.skills || [],
       experience_years: candidate.experience_years || 0,
       location:         candidate.location  || "",
@@ -497,6 +523,10 @@ async function backendScore(jd_id, candidate, resume_text) {
       certifications:   (candidate.certifications || [])
                           .map(c => `${c.name || ""} ${c.issuer || ""}`.trim())
                           .filter(Boolean),
+      // Full experience descriptions — backend scans them so a JD skill only
+      // mentioned in role bullets (not the Skills section) still matches.
+      experience_text:  (candidate.experience || [])
+                          .map(e => e && e.description).filter(Boolean).join("\n"),
     },
   });
 
@@ -535,10 +565,52 @@ async function backendScore(jd_id, candidate, resume_text) {
 
 // ── Score candidate against requirements (local fallback) ─────────────────────
 
-async function computeScore(requirements, jobTitle, candidate) {
+// Lexical scan of raw candidate text (experience descriptions, or the résumé
+// when one is attached) — a JD skill counts as matched when its phrase appears
+// in that text, so skills only written up in role bullets (never listed in the
+// Skills section, and outside the TOOL_KEYWORDS whitelist) still score.
+// Ambiguous names (Go, Rust, Spark…) match case-sensitively against the raw
+// text so prose ("go through logs") doesn't give false credit.
+// Mirrored verbatim in score_endpoint.py.
+function makeTextMatcher(rawText) {
+  const raw  = " " + String(rawText || "") + " ";
+  const text = " " + normalizeSkill(rawText) + " ";
+  if (!text.trim()) return () => false;
+  const escWord = w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const phraseRe = (s) =>
+    new RegExp(`(?:^|[^A-Za-z0-9])${s.split(/\s+/).map(escWord).join("\\s+")}(?:$|[^A-Za-z0-9+#])`);
+  return (target) => {
+    // Match the target's canonical + raw forms AND every alias variant that
+    // canonicalizes to it — the text may use the alias ("k8s") while the JD
+    // uses the full name ("Kubernetes"), or vice versa.
+    const tn = canonicalSkill(target);
+    const forms = new Set([tn, normalizeSkill(target)]);
+    for (const [alias, canon] of SKILL_ALIASES) if (canon === tn) forms.add(alias);
+    for (const f of forms) {
+      if (!f) continue;
+      const csKeyword = [...CASE_SENSITIVE_KEYWORDS].find(k => k.toLowerCase() === f);
+      if (csKeyword) {
+        if (phraseRe(csKeyword).test(raw)) return true;
+      } else if (phraseRe(f).test(text)) {
+        return true;
+      }
+    }
+    return false;
+  };
+}
+
+async function computeScore(requirements, jobTitle, candidate, resumeText = "") {
   const { required_skills, preferred_skills, required_years } = requirements;
   const cSkills  = candidate.skills || [];
   const expYears = candidate.experience_years || 0;
+
+  // Text scanned for skills beyond the skills list: résumé replaces the profile
+  // (same authority rule as the skills-replace above), else every experience
+  // description is read for skill mentions.
+  const textHas = makeTextMatcher(
+    resumeText ||
+    (candidate.experience || []).map(e => e && e.description).filter(Boolean).join("\n")
+  );
 
   if (required_skills.length === 0) {
     return { score: 50, label: "Fair Fit", rationale: "Could not extract skills from JD to score." };
@@ -582,7 +654,7 @@ async function computeScore(requirements, jobTitle, candidate) {
       // the score across devices.
       const cv = vecMap.get(cn);
       return tv && cv && cosine(tv, cv) >= SIM_ACCEPT;
-    });
+    }) || textHas(target); // skill written up in experience bullets / résumé text
   }
 
   const matchedReq  = required_skills.filter(isMatch);
@@ -617,6 +689,7 @@ async function computeScore(requirements, jobTitle, candidate) {
   const reqClr  = requirements.required_clearance || { rank: 0, label: "" };
   const candClr = detectClearance([
     candidate.clearance,
+    candidate.title,   // headline often states the clearance, e.g. "Java Developer | TS/SCI"
     candidate.about,
     (candidate.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
     (candidate.experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
@@ -634,12 +707,11 @@ async function computeScore(requirements, jobTitle, candidate) {
 
   // Education bucket — active ONLY when the JD states a degree requirement. Meets
   // or exceeds → full; holds a lower degree → half; none → zero. Candidate degree
-  // level read from the Education section entries (fallback: About/résumé text).
+  // level read from the Education section entries ONLY — About/résumé prose is
+  // excluded so a stray "master's"/"degree" mention can't inflate the level.
   const reqEdu  = requirements.required_education || { rank: 0, label: "" };
-  const eduText = [
-    (candidate.education || []).map(e => `${e.degree || ""} ${e.school || ""}`).join("\n"),
-    candidate.about,
-  ].filter(Boolean).join("\n");
+  const eduText = (candidate.education || [])
+    .map(e => `${e.degree || ""} ${e.school || ""}`).join("\n");
   const candEdu = detectEducation(eduText);
   const educationActive = reqEdu.rank > 0;
   const educationFill = !educationActive ? 0
@@ -787,6 +859,11 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
   if (resume_text) {
     const resumeSkills = findKeywords(resume_text);
     if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
+    // Résumé also replaces education — but ONLY its Education section text, so
+    // degree words in résumé prose can't inflate the level. Guard: no Education
+    // heading found keeps the profile's Education-section entries.
+    const resumeEdu = resumeEducationSection(resume_text);
+    if (resumeEdu) scored = { ...scored, education: [{ degree: resumeEdu, school: "" }] };
   }
 
   // 1) Backend scoring (consistent across devices).
@@ -802,7 +879,7 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     cached = { title: job.title, requirements: parseRequirements(job.description || "") };
     jobCache.set(jd_id, cached);
   }
-  const result = await computeScore(cached.requirements, cached.title, scored);
+  const result = await computeScore(cached.requirements, cached.title, scored, resume_text);
   return { ...result, source: "local" };
 }
 
@@ -841,8 +918,8 @@ async function refreshJobsCache() {
 
 // Prime the cache + model when the browser/extension starts, so the first panel
 // open is already warm instead of paying the cold fetch then.
-chrome.runtime.onStartup?.addListener(() => { refreshJobsCache(); ensureOffscreen().catch(() => {}); syncScoutSession(); });
-chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); syncScoutSession(); });
+chrome.runtime.onStartup?.addListener(() => { refreshJobsCache(); ensureOffscreen().catch(() => {}); });
+chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); });
 
 // ── Pre-fetch all job descriptions in background ──────────────────────────────
 // Called after GET_JDS returns. Populates jobCache so GET_SCORE is instant.
@@ -936,54 +1013,6 @@ async function getJazzhrToken() {
     return "";
   }
 }
-
-// ── Scout service session auto-sync ───────────────────────────────────────────
-// Whenever Chrome is logged into JazzHR as scout@, push that session cookie to
-// the backend (→ Key Vault) so headless/scheduled updates can act as scout@.
-// Runs on startup and every 30 min via an alarm. Skips the OTP-challenge token
-// and expired/other-user sessions.
-const SCOUT_SESSION_COOKIES = ["imagicaa_pass", "sandcastle_ticket"];
-
-function _decodeJwtPayload(jwt) {
-  try {
-    let b = jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    b += "=".repeat((4 - (b.length % 4)) % 4);
-    return JSON.parse(atob(b));
-  } catch (_) { return null; }
-}
-
-async function syncScoutSession() {
-  try {
-    // Search ALL jazz.co subdomains — the scout@ session cookie may be scoped to
-    // app.jazz.co (login UI) rather than api.jazz.co, so a single-url lookup
-    // missed it. Dedupe by name, preferring the most specific/fresh value.
-    const cookies = await chrome.cookies.getAll({ domain: "jazz.co" });
-    let chosen = null;
-    for (const name of SCOUT_SESSION_COOKIES) {
-      for (const c of cookies.filter(x => x.name === name)) {
-        if ((c.value.match(/\./g) || []).length !== 2) continue;
-        const p = _decodeJwtPayload(c.value);
-        if (!p || p.isOtpToken) continue;                 // skip OTP challenge token
-        if (p.exp && p.exp * 1000 < Date.now()) continue; // skip expired
-        chosen = `${name}=${c.value}`;
-        break;
-      }
-      if (chosen) break;
-    }
-    if (!chosen) { console.log("[SCOUT] syncScoutSession: no valid session cookie on jazz.co"); return; }
-    const r = await fetch(`${BASE_URL}/api/scout/set-session`, {
-      method: "POST",
-      headers: scoutHeaders(),
-      body: JSON.stringify({ cookie: chosen }),
-    });
-    console.log("[SCOUT] syncScoutSession → set-session", r.status, await r.text().catch(() => ""));
-  } catch (e) { console.log("[SCOUT] syncScoutSession error:", e?.message || e); }
-}
-
-chrome.alarms?.create("scoutSessionSync", { periodInMinutes: 30 });
-chrome.alarms?.onAlarm.addListener((a) => {
-  if (a.name === "scoutSessionSync") syncScoutSession();
-});
 
 // ── Message listener ──────────────────────────────────────────────────────────
 
@@ -1200,67 +1229,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (e) {
         console.error("[SCOUT] ADD_CANDIDATE error:", e.message);
         sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
-      }
-    })();
-    return true;
-  }
-
-  // ── INITIATE_CALL — trigger Vapi AI phone screen ──────────────────────────
-  if (type === "INITIATE_CALL") {
-    (async () => {
-      try {
-        const jazzhr_token = await getJazzhrToken();
-        const r = await fetch(`${BASE_URL}/api/scout/initiate-call`, {
-          method:  "POST",
-          headers: scoutHeaders(),
-          body:    JSON.stringify({ ...payload, jazzhr_token }),
-        });
-        const data = await r.json();
-        sendResponse(data.ok
-          ? { ok: true, call_id: data.call_id, status: data.status }
-          : { ok: false, error: data.error || "Call initiation failed" }
-        );
-      } catch (e) {
-        console.error("[SCOUT] INITIATE_CALL error:", e.message);
-        sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
-      }
-    })();
-    return true;
-  }
-
-  // ── SCHEDULE_CALL — schedule a Vapi AI phone screen for later ──────────────
-  if (type === "SCHEDULE_CALL") {
-    (async () => {
-      try {
-        const jazzhr_token = await getJazzhrToken();
-        const r = await fetch(`${BASE_URL}/api/scout/schedule-call`, {
-          method:  "POST",
-          headers: scoutHeaders(),
-          body:    JSON.stringify({ ...payload, jazzhr_token }),
-        });
-        const data = await r.json();
-        sendResponse(data.ok
-          ? { ok: true, scheduled_id: data.scheduled_id, scheduled_at: data.scheduled_at }
-          : { ok: false, error: data.error || "Scheduling failed" }
-        );
-      } catch (e) {
-        console.error("[SCOUT] SCHEDULE_CALL error:", e.message);
-        sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
-      }
-    })();
-    return true;
-  }
-
-  // ── GET_CALL_STATUS — poll for call result after initiation ───────────────
-  if (type === "GET_CALL_STATUS") {
-    (async () => {
-      try {
-        const { applicant_id } = payload;
-        const r    = await fetch(`${BASE_URL}/api/scout/calls/${applicant_id}`, { headers: scoutHeaders() });
-        const data = await r.json();
-        sendResponse(data);
-      } catch (e) {
-        sendResponse({ ok: false, error: e.message });
       }
     })();
     return true;

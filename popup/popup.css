@@ -398,6 +398,13 @@ body {
 }
 .skill-lists:empty { display: none; }
 
+.skill-section { display: flex; flex-direction: column; gap: 6px; }
+.skill-section + .skill-section { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e2e8f0; }
+.skill-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #475569;
+}
 .skill-group { display: flex; flex-direction: column; gap: 4px; }
 .skill-group-label {
   font-size: 10px;
@@ -568,51 +575,6 @@ body {
   cursor: not-allowed;
 }
 
-/* Auto-source candidate pager (‹ 1/5 ›) */
-.auto-pager {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding: 6px 10px;
-  background: #f1f5f9;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-}
-
-.pager-btn {
-  width: 32px;
-  height: 32px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  background: #fff;
-  color: #0f172a;
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.pager-btn:hover:not(:disabled) { background: #e2e8f0; }
-.pager-btn:disabled { color: #cbd5e1; cursor: not-allowed; }
-
-.pager-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: #334155;
-}
-
-.btn-duplicate {
-  background: #f1f5f9;
-  color: #475569;
-  border: 1px solid #e2e8f0;
-  font-weight: 500;
-}
-
-.btn-duplicate:hover {
-  background: #e2e8f0;
-}
-
 .btn-success {
   background: #dcfce7;
   color: #16a34a;
@@ -672,204 +634,6 @@ body {
   font-size: 12px;
   line-height: 1.5;
 }
-
-/* ── Dev toolbar (mock states) ── */
-.dev-bar {
-  border-top: 1px solid #f1f5f9;
-  padding: 8px 16px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 10px;
-  color: #94a3b8;
-}
-
-.dev-bar label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-}
-
-
-/* ── Vapi AI phone screen ── */
-.vapi-section {
-  margin-top: 8px;
-}
-
-.btn-vapi {
-  width: 100%;
-  padding: 10px;
-  border: 1.5px solid #7c3aed;
-  border-radius: 6px;
-  background: #faf5ff;
-  color: #7c3aed;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  text-align: center;
-}
-
-.btn-vapi:hover:not(:disabled) { background: #7c3aed; color: #fff; }
-
-.btn-vapi:disabled {
-  background: #f5f3ff;
-  color: #a78bfa;
-  border-color: #ddd6fe;
-  cursor: not-allowed;
-}
-
-.btn-vapi.calling {
-  background: #7c3aed;
-  color: #fff;
-  animation: pulse-vapi 1.5s infinite;
-}
-
-@keyframes pulse-vapi {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.7; }
-}
-
-.vapi-schedule-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  font-size: 11px;
-  color: #6b7280;
-  cursor: pointer;
-  user-select: none;
-}
-.vapi-schedule-toggle input { cursor: pointer; }
-
-.vapi-schedule-row {
-  margin-top: 8px;
-  padding: 10px;
-  border: 1px solid #ede9fe;
-  border-radius: 6px;
-  background: #faf5ff;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.vapi-dt-input,
-.vapi-tz-select {
-  width: 100%;
-  padding: 7px 9px;
-  border: 1.5px solid #ddd6fe;
-  border-radius: 6px;
-  font-size: 12px;
-  color: #111827;
-  background: #fff;
-  outline: none;
-}
-.vapi-dt-input:focus,
-.vapi-tz-select:focus { border-color: #7c3aed; }
-
-.btn-vapi-schedule {
-  width: 100%;
-  padding: 9px;
-  border: 1.5px solid #7c3aed;
-  border-radius: 6px;
-  background: #7c3aed;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.btn-vapi-schedule:hover:not(:disabled) { background: #6d28d9; }
-.btn-vapi-schedule:disabled { background: #c4b5fd; border-color: #c4b5fd; cursor: not-allowed; }
-
-.vapi-schedule-hint {
-  font-size: 10px;
-  color: #9ca3af;
-  text-align: center;
-}
-
-.vapi-phone-row {
-  margin-bottom: 6px;
-}
-
-.vapi-phone-input {
-  width: 100%;
-  padding: 8px 10px;
-  border: 1.5px solid #ddd6fe;
-  border-radius: 6px;
-  font-size: 12px;
-  color: #111827;
-  background: #faf5ff;
-  outline: none;
-  transition: border-color 0.15s;
-}
-
-.vapi-phone-input:focus {
-  border-color: #7c3aed;
-}
-
-.vapi-phone-input::placeholder {
-  color: #a78bfa;
-}
-
-.vapi-status {
-  margin-top: 6px;
-  font-size: 11px;
-  color: #7c3aed;
-  text-align: center;
-}
-
-.vapi-result {
-  margin-top: 8px;
-  padding: 10px 12px;
-  background: #faf5ff;
-  border: 1px solid #ddd6fe;
-  border-radius: 8px;
-  font-size: 11px;
-  color: #374151;
-  line-height: 1.5;
-}
-
-.vapi-result-label {
-  font-weight: 700;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #7c3aed;
-  margin-bottom: 4px;
-}
-
-.vapi-result-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 10px;
-  font-weight: 700;
-  margin-bottom: 6px;
-}
-
-.vapi-result-badge.completed { background: #dcfce7; color: #16a34a; }
-.vapi-result-badge.no_answer { background: #fef3c7; color: #d97706; }
-.vapi-result-badge.failed    { background: #fef2f2; color: #dc2626; }
-
-.vapi-summary { color: #374151; line-height: 1.5; }
-
-.vapi-captured {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid #ede9fe;
-}
-
-.vapi-captured-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 3px;
-}
-
-.vapi-captured-key { color: #6b7280; flex-shrink: 0; }
-.vapi-captured-val { color: #111827; font-weight: 600; text-align: right; }
 
 /* ── Footer ── */
 .footer {

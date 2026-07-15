@@ -22,7 +22,6 @@ const autoGate       = document.getElementById('auto-gate');
 const addBtn         = document.getElementById('add-btn');
 const jazzhrBtn      = document.getElementById('jazzhr-btn');
 const statusEl       = document.getElementById('status');
-const mockDuplicate  = document.getElementById('mock-duplicate');
 const resumeUpload   = document.getElementById('resume-upload');
 const resumeFile     = document.getElementById('resume-file');
 const resumeName     = document.getElementById('resume-name');
@@ -36,17 +35,6 @@ const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
 const closeBtn       = document.getElementById('close-btn');
 const refreshBtn     = document.getElementById('refresh-btn');
-const vapiSection    = document.getElementById('vapi-section');
-const vapiPhoneRow   = document.getElementById('vapi-phone-row');
-const vapiPhoneInput = document.getElementById('vapi-phone-input');
-const vapiBtn        = document.getElementById('vapi-btn');
-const vapiStatusEl   = document.getElementById('vapi-status');
-const vapiResultEl   = document.getElementById('vapi-result');
-const vapiScheduleCheck = document.getElementById('vapi-schedule-check');
-const vapiScheduleRow   = document.getElementById('vapi-schedule-row');
-const vapiDtInput       = document.getElementById('vapi-dt-input');
-const vapiTzSelect      = document.getElementById('vapi-tz-select');
-const vapiScheduleBtn   = document.getElementById('vapi-schedule-btn');
 
 // Close the side panel. window.close() works in the side panel on recent Chrome;
 // the SW fallback (disable → re-enable) covers versions where it's a no-op.
@@ -67,40 +55,37 @@ refreshBtn.addEventListener('click', async () => {
   startScan(tab.id, site.script, true); // force = bypass content-script extraction cache
 });
 
-// Email found on LinkedIn / résumé — used unless the recruiter types a manual
-// override into the editable field.
+// Email/phone found on LinkedIn / résumé — used unless the recruiter types a
+// manual override into the editable field.
 let foundEmail = '';
-
-// Manual email edits flow straight into the candidate. Empty field falls back to
-// the found address.
-profileEmail.addEventListener('input', () => {
-  if (candidate) candidate.email = profileEmail.value.trim() || foundEmail;
-});
-
-// Phone found on LinkedIn / résumé — used unless the recruiter types a manual
-// override into the editable field.
 let foundPhone = '';
 
-// Manual phone edits flow straight into the candidate so Add-to-SCOUT and the
-// AI call both use the recruiter-entered number. Empty field falls back to the
-// found number.
+// Manual email/phone edits flow straight into the candidate so Add-to-SCOUT and
+// the AI call both use the recruiter-entered value. Empty field falls back to
+// the found one.
+profileEmail.addEventListener('input', () => {
+  if (!candidate) return;
+  candidate.email = profileEmail.value.trim() || foundEmail;
+  saveLastProfile();
+});
+
 profilePhone.addEventListener('input', () => {
-  if (candidate) candidate.phone = profilePhone.value.trim() || foundPhone;
+  if (!candidate) return;
+  candidate.phone = profilePhone.value.trim() || foundPhone;
+  saveLastProfile();
 });
 
 let candidate       = null;   // set when profile fetch completes
 let selectedJd      = null;
 let selectedJdTitle = null;
 let currentScore    = null;
-let profilePending  = false;  // true while profile fetch is in flight
+let profilePending  = true;   // true while profile fetch is in flight
 let scoreVersion    = 0;      // incremented on each new score request to discard stale AI responses
 let modelReady      = false;  // true once offscreen ML model finishes loading
 let resumeB64       = '';     // base64-encoded resume file if recruiter attached one
 let resumeFileName  = '';     // original filename — JazzHR needs it to attach the resume
 let resumeMime      = '';     // file MIME type, sent alongside the base64
 let resumeText      = '';     // plain text parsed from the attached resume (for skill re-scoring)
-let addedApplicantId = null;  // JazzHR prospect_id set after successful add
-let callPollTimer    = null;  // setInterval id for call-status polling
 
 // ── Resume file picker ────────────────────────────────────────────────────────
 // PDF.js needs its worker pointed at the bundled local file (CSP forbids remote).
@@ -132,6 +117,7 @@ resumeFile.addEventListener('change', async () => {
 
   // Fill only the email/phone LinkedIn left blank.
   fillContactFromResume(resumeText);
+  saveLastProfile();   // persist the attachment with the cached profile
 
   // Re-score with résumé skills folded in (SW unions résumé keywords into
   // candidate skills). Overrides the contact status with the scoring status.
@@ -148,6 +134,7 @@ resumeClear.addEventListener('click', () => {
   resumeFile.value = '';
   resumeName.textContent = 'No file chosen';
   resumeClear.style.display = 'none';
+  saveLastProfile();   // persist the removal
   // Re-score without the résumé contribution.
   if (selectedJd && candidate) requestScore(selectedJd);
 });
@@ -174,8 +161,7 @@ function fillContactFromResume(text) {
   if (needPhone && got.phone) candidate.phone = got.phone;
 
   renderProfile(candidate);
-  // Phone may now exist → refresh the "Call with AI" button availability.
-  if (vapiSection && vapiSection.style.display === 'block') showVapiSection(addedApplicantId);
+  saveLastProfile();
 }
 
 // Extract plain text from a résumé file by type. PDF → PDF.js, DOCX → fflate
@@ -253,9 +239,20 @@ chrome.runtime.onMessage.addListener((message) => {
   // candidate (real email + résumé skills + résumé text) and re-score.
   if (message?.type === "DICE_PROFILE_UPDATED" && message.profile) {
     candidate = message.profile;
+    foundEmail = candidate.email || foundEmail;
     foundPhone = candidate.phone || foundPhone;
     renderProfile(candidate);
+    saveLastProfile();
     if (selectedJd) requestScore(selectedJd);
+  }
+
+  // Floating button clicked. The panel may already be open on a profile the user
+  // reached via SPA navigation (no tabs.onUpdated fired), so re-evaluate the
+  // active tab now. Clearing lastProfileSlug forces handleActiveTab to re-run the
+  // scan/cache path for the current profile instead of deduping it away.
+  if (message?.type === "SCOUT_RESCAN") {
+    lastProfileSlug = '';
+    handleActiveTab();
   }
 });
 
@@ -290,6 +287,26 @@ function siteFor(url) {
   return null;
 }
 
+// JD selection + attached résumé belong to the previous candidate — clear both
+// on a profile switch. Not called on the refresh-button rescan, which keeps the
+// selected JD (and re-fetches the JD list preserving it).
+function clearJdAndResume() {
+  selectedJd      = null;
+  selectedJdTitle = null;
+  jdSelect.value  = '';
+  currentScore    = null;
+  scoreCard.classList.remove('show');
+  resumeUpload.style.display = 'none';
+
+  resumeB64      = '';
+  resumeFileName = '';
+  resumeMime     = '';
+  resumeText     = '';
+  resumeFile.value = '';
+  resumeName.textContent = 'No file chosen';
+  resumeClear.style.display = 'none';
+}
+
 function startScan(tabId, scriptFile, force = false) {
   candidate      = null;
   currentScore   = null;
@@ -308,21 +325,33 @@ function startScan(tabId, scriptFile, force = false) {
   requestProfile(tabId, scriptFile, force);
 }
 
-// Sync panel to the active tab. The JD picker is always available. When the tab
-// IS a candidate profile, also auto-scan it for the single-candidate flow.
+// Sync panel to the active tab: empty state off LinkedIn, auto-scan when a
+// (new) profile is showing. Runs at open and on every tab switch/navigation.
 async function handleActiveTab() {
   const tab = await getTargetTab();
-  mainView.style.display  = '';
-  emptyView.style.display = 'none';
-  matchSection.style.display = 'block';
+  if (!tab) return;
+  const site = siteFor(tab.url);
+  const onProfile = !!site;
 
-  const site = tab && siteFor(tab.url);
-  sourceBadge.textContent = site ? site.source : '—';
-  if (!site) return;
+  // Off-profile pages keep the last extracted candidate on screen (recruiters
+  // navigate away mid-review); the empty state only shows before any extraction.
+  if (!onProfile && !candidate) await restoreLastProfile();
+  const showMain = onProfile || !!candidate;
+  mainView.style.display  = showMain ? '' : 'none';
+  emptyView.style.display = showMain ? 'none' : 'block';
+  if (!onProfile) return;
+
+  sourceBadge.textContent = site.source;
+  matchSection.style.display = 'block';
 
   if (site.slug !== lastProfileSlug) {
     lastProfileSlug = site.slug;
-    startScan(tab.id, site.script);
+    clearJdAndResume();
+    // Previously scanned profile → restore from cache (keeps manual edits);
+    // brand-new profile → fresh scan, which clears the old details first.
+    const hit = (await getProfileCache())[site.slug];
+    if (hit?.candidate) adoptCachedProfile(hit);
+    else startScan(tab.id, site.script);
   }
 }
 
@@ -369,11 +398,113 @@ function requestProfile(tabId, scriptFile, force = false) {
   });
 }
 
+// Per-profile candidate cache for the browser session, keyed by slug. Lets the
+// panel restore a previously scanned profile (including manual contact edits)
+// when the recruiter returns to it, and survive panel close/reopen. Evicts the
+// oldest entries beyond the cap.
+const PROFILE_CACHE_MAX = 20;
+
+async function getProfileCache() {
+  try {
+    const { profileCache } = await chrome.storage.session.get('profileCache');
+    return profileCache || {};
+  } catch (_) { return {}; }
+}
+
+async function saveLastProfile() {
+  if (!candidate || !lastProfileSlug) return;
+  const cache = await getProfileCache();
+  cache[lastProfileSlug] = {
+    candidate,
+    source:  sourceBadge.textContent,
+    jdId:    selectedJd,
+    jdTitle: selectedJdTitle,
+    score:   currentScore,
+    resume:  resumeB64
+      ? { b64: resumeB64, name: resumeFileName, mime: resumeMime, text: resumeText }
+      : null,
+    ts: Date.now()
+  };
+  const slugs = Object.keys(cache);
+  if (slugs.length > PROFILE_CACHE_MAX) {
+    slugs.sort((a, b) => (cache[a].ts || 0) - (cache[b].ts || 0));
+    for (const s of slugs.slice(0, slugs.length - PROFILE_CACHE_MAX)) delete cache[s];
+  }
+  try {
+    await chrome.storage.session.set({ profileCache: cache, lastSlug: lastProfileSlug });
+  } catch (_) { /* storage unavailable — cache is best-effort */ }
+}
+
+// Restore the JD selection + attached résumé saved with a cached profile.
+function applyCachedExtras(hit) {
+  if (hit.jdId) {
+    selectedJd      = hit.jdId;
+    selectedJdTitle = hit.jdTitle || hit.jdId;
+    jdSelect.value  = hit.jdId;   // no-op if the JD list hasn't loaded yet — loadJds re-applies it
+  }
+  if (hit.resume?.b64) {
+    resumeB64      = hit.resume.b64;
+    resumeFileName = hit.resume.name || 'resume';
+    resumeMime     = hit.resume.mime || '';
+    resumeText     = hit.resume.text || '';
+    resumeName.textContent = resumeFileName;
+    resumeClear.style.display = 'inline';
+  }
+}
+
+// Show the cached score without re-calling the AI; falls back to a re-score
+// when a JD was selected but its score never finished.
+function renderCachedScore(hit) {
+  if (hit.score) {
+    currentScore = hit.score;
+    renderScore(currentScore, !!(resumeText || candidate?.resumeText));
+  } else if (selectedJd) {
+    showStatus('Matching profile to selected JD…', 'loading');
+    requestScore(selectedJd);
+  }
+}
+
+// Panel reopened on a non-profile page → bring back the most recent candidate.
+async function restoreLastProfile() {
+  try {
+    const { lastSlug } = await chrome.storage.session.get('lastSlug');
+    if (!lastSlug) return;
+    const hit = (await getProfileCache())[lastSlug];
+    if (!hit?.candidate) return;
+    candidate      = hit.candidate;
+    profilePending = false;
+    sourceBadge.textContent = hit.source || '';
+    matchSection.style.display = 'block';
+    applyCachedExtras(hit);
+    renderProfile(candidate);
+    renderCachedScore(hit);
+  } catch (_) { /* storage unavailable — keep empty state */ }
+}
+
+// Returned to an already-scanned profile → show its cached details instead of
+// rescanning, then re-score against the selected JD.
+function adoptCachedProfile(hit) {
+  candidate      = hit.candidate;
+  currentScore   = null;
+  profilePending = false;
+  scoreVersion++;
+
+  scoreCard.classList.remove('show');
+  jazzhrBtn.style.display = 'none';
+  resetAddButton();
+
+  applyCachedExtras(hit);
+  renderProfile(candidate);
+  renderCachedScore(hit);   // sets currentScore before the save below
+  saveLastProfile();        // refresh ts + lastSlug pointer
+}
+
 function onProfileLoaded(profile) {
   candidate     = profile;
   profilePending = false;
   refreshBtn.classList.remove('spinning');
   renderProfile(profile);
+  saveLastProfile();
   // If user already picked a JD while profile was loading → score now
   if (selectedJd) {
     showStatus('Matching profile to selected JD…', 'loading');
@@ -399,9 +530,9 @@ function renderProfile(p) {
   profileLoc.textContent   = p.location || '';
   profileExp.textContent   = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
 
-  // Email found on LinkedIn/résumé shows read-only above; the editable field
-  // stays empty for a manual add/override. candidate.email defaults to the
-  // found address until the recruiter types one in.
+  // Email/phone found on LinkedIn/résumé show read-only above; the editable
+  // fields stay empty for a manual add/override. candidate.email/.phone default
+  // to the found values until the recruiter types one in.
   foundEmail = p.email || '';
   if (foundEmail) {
     profileEmailFound.textContent = foundEmail;
@@ -411,9 +542,7 @@ function renderProfile(p) {
     profileEmailFound.style.display = 'none';
   }
   profileEmail.value = '';
-  // Phone found on LinkedIn/résumé shows read-only above; the editable field
-  // stays empty for a manual add/override. candidate.phone defaults to the
-  // found number until the recruiter types one in.
+
   foundPhone = p.phone || '';
   if (foundPhone) {
     profilePhoneFound.textContent = foundPhone;
@@ -450,9 +579,12 @@ function loadJds(preserveId, fresh) {
       jdSelect.appendChild(opt);
     });
     jdSelect.disabled = false;
-    if (preserveId) {
-      jdSelect.value = preserveId;
-      if (jdSelect.value !== preserveId) {
+    // Re-apply the selection: explicit preserveId (refresh button) or a JD
+    // restored from the profile cache before the list finished loading.
+    const keep = preserveId || selectedJd;
+    if (keep) {
+      jdSelect.value = keep;
+      if (jdSelect.value !== keep) {
         // JD no longer exists on the backend — clear stale selection
         selectedJd = null;
         selectedJdTitle = null;
@@ -476,6 +608,7 @@ jdSelect.addEventListener('change', () => {
   selectedJdTitle = jdSelect.selectedOptions[0]?.dataset.title || jdId;
   scoreCard.classList.remove('show');
   addBtn.disabled = true;
+  saveLastProfile();
 
   if (candidate) {
     // Profile already loaded — score immediately
@@ -484,8 +617,8 @@ jdSelect.addEventListener('change', () => {
     // Profile still loading — show holding message, score fires in onProfileLoaded
     showStatus('Reading profile… will score when ready.', 'loading');
   } else {
-    // Not on a candidate profile — nothing to score yet.
-    showStatus('Open a candidate profile to score against this JD.', 'loading');
+    // Profile fetch already failed
+    showStatus('Could not read profile. Try refreshing the page.', 'error');
   }
 });
 
@@ -515,6 +648,7 @@ function requestScore(jdId) {
       if (!res?.ok) { showStatus('Score failed — ' + (res?.error || 'unknown error'), 'error'); return; }
       currentScore = res.data;
       renderScore(currentScore, !!effectiveResume);
+      saveLastProfile();
     }
   );
 }
@@ -602,19 +736,30 @@ function renderBreakdown(categories) {
   scoreBreakdown.innerHTML = `<div class="breakdown-title">Category Breakdown</div>${rows}`;
 }
 
-// Doc §3.4 — matched vs missing required skills as chips.
+// Doc §3.4 — matched vs missing required + preferred skills as chips.
 function renderSkillLists(categories) {
   if (!skillLists) return;
-  const req = (categories || []).find(c => c.key === 'required');
+  const cats = categories || [];
+  const req = cats.find(c => c.key === 'required');
   if (!req) { skillLists.innerHTML = ''; return; }
 
   const chip = (s, cls) => `<span class="skill-chip ${cls}">${escapeHtml(s)}</span>`;
-  const matched = (req.matched || []).map(s => chip(s, 'matched')).join('');
-  const missing = (req.missing || []).map(s => chip(s, 'missing')).join('');
+  const group = (label, chips) =>
+    chips ? `<div class="skill-group"><span class="skill-group-label">${label}</span><div class="skill-chips">${chips}</div></div>` : '';
+  const section = (cat) => {
+    const matched = (cat.matched || []).map(s => chip(s, 'matched')).join('');
+    const missing = (cat.missing || []).map(s => chip(s, 'missing')).join('');
+    return group('Matched', matched) + group('Missing', missing);
+  };
 
-  let html = '';
-  if (matched) html += `<div class="skill-group"><span class="skill-group-label">Matched</span><div class="skill-chips">${matched}</div></div>`;
-  if (missing) html += `<div class="skill-group"><span class="skill-group-label">Missing</span><div class="skill-chips">${missing}</div></div>`;
+  let html = `<div class="skill-section"><span class="skill-section-label">Required</span>${section(req)}</div>`;
+
+  // Preferred section — only when the JD actually lists preferred skills.
+  const pref = cats.find(c => c.key === 'preferred' && c.active &&
+    ((c.matched || []).length || (c.missing || []).length));
+  if (pref) {
+    html += `<div class="skill-section"><span class="skill-section-label">Preferred</span>${section(pref)}</div>`;
+  }
   skillLists.innerHTML = html;
 }
 
@@ -665,8 +810,6 @@ function renderBestFit(list) {
 // ── Add to SCOUT → backend API ────────────────────────────────────────────────
 
 addBtn.addEventListener('click', () => {
-  if (mockDuplicate.checked) { renderDuplicateState(); return; }
-
   if (!candidate) {
     showStatus('Profile not loaded yet — wait and try again.', 'error');
     return;
@@ -713,21 +856,18 @@ addBtn.addEventListener('click', () => {
 
   addBtn.disabled = true;
   jazzhrBtn.style.display = 'none';
-  showStatus('Adding to SCOUT…', 'loading');
+  showStatus('Adding to JazzHR…', 'loading');
 
   chrome.runtime.sendMessage({ type: 'ADD_CANDIDATE', payload }, (res) => {
     statusEl.classList.remove('show');
     if (res?.ok) {
-      addBtn.textContent = 'Added to SCOUT ✓';
+      addBtn.textContent = 'Added to JazzHR ✓';
       addBtn.className   = 'btn btn-success';
       resumeUpload.style.display = 'none';
       if (res.jazzhr_url) {
         jazzhrBtn.href          = res.jazzhr_url;
         jazzhrBtn.style.display = 'flex';
       }
-      // Show Vapi call button — enabled only if candidate has a phone number
-      addedApplicantId = res.applicant_id || null;
-      showVapiSection(addedApplicantId);
     } else {
       showStatus(res?.error || 'Failed to add.', 'error');
       addBtn.disabled = false;
@@ -735,255 +875,10 @@ addBtn.addEventListener('click', () => {
   });
 });
 
-// ── Mock ──────────────────────────────────────────────────────────────────────
-
-mockDuplicate.addEventListener('change', () => {
-  if (mockDuplicate.checked && selectedJd) renderDuplicateState();
-  else resetAddButton();
-});
-
-function renderDuplicateState() {
-  addBtn.textContent = 'Already in SCOUT — view record →';
-  addBtn.className   = 'btn btn-duplicate';
-  addBtn.disabled    = false;
-}
-
 function resetAddButton() {
-  addBtn.textContent = 'Add to SCOUT';
+  addBtn.textContent = 'Add to JazzHR';
   addBtn.className   = 'btn btn-primary';
   addBtn.disabled    = !selectedJd;
-}
-
-// ── Vapi AI phone screen ──────────────────────────────────────────────────────
-
-function showVapiSection(applicantId) {
-  if (!vapiSection) return;
-  vapiSection.style.display = 'block';
-
-  vapiBtn.disabled    = false;
-  vapiBtn.textContent = '📞 Call with AI';
-
-  const phone = candidate?.phone || '';
-  vapiPhoneRow.style.display = phone ? 'none' : 'block';
-  if (!phone) vapiPhoneInput.value = '';
-}
-
-vapiBtn.addEventListener('click', async () => {
-  if (!candidate || !selectedJd) return;
-
-  const phone = normalizePhone(candidate.phone || vapiPhoneInput?.value || '');
-  if (!phone) {
-    vapiPhoneRow.style.display = 'block';
-    vapiPhoneInput.focus();
-    vapiStatusEl.textContent   = 'Enter a phone number to call.';
-    vapiStatusEl.style.display = 'block';
-    return;
-  }
-
-  vapiBtn.disabled    = true;
-  vapiBtn.classList.add('calling');
-  vapiBtn.textContent = '📞 Calling…';
-  vapiStatusEl.textContent   = 'Initiating AI phone screen…';
-  vapiStatusEl.style.display = 'block';
-  vapiResultEl.style.display = 'none';
-
-  chrome.runtime.sendMessage({
-    type: 'INITIATE_CALL',
-    payload: {
-      applicant_id:   addedApplicantId,
-      job_id:         selectedJd,
-      phone:          phone,
-      candidate_name: candidate.name || '',
-      job_title:      selectedJdTitle || '',
-    },
-  }, (res) => {
-    if (!res?.ok) {
-      vapiBtn.classList.remove('calling');
-      vapiBtn.disabled    = false;
-      vapiBtn.textContent = '📞 Call with AI';
-      vapiStatusEl.textContent = '✕ ' + (res?.error || 'Call failed to start');
-      return;
-    }
-    vapiStatusEl.textContent = '📱 Call placed — waiting for candidate to answer…';
-    startCallPoll(addedApplicantId);
-  });
-});
-
-// ── Schedule for later ────────────────────────────────────────────────────────
-if (vapiScheduleCheck) {
-  vapiScheduleCheck.addEventListener('change', () => {
-    vapiScheduleRow.style.display = vapiScheduleCheck.checked ? 'flex' : 'none';
-    if (vapiScheduleCheck.checked && !vapiDtInput.value) {
-      // Default to one hour from now, rounded to the next quarter hour
-      const d = new Date(Date.now() + 60 * 60 * 1000);
-      d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
-      const pad = n => String(n).padStart(2, '0');
-      vapiDtInput.value =
-        `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    }
-  });
-}
-
-if (vapiScheduleBtn) {
-  vapiScheduleBtn.addEventListener('click', async () => {
-    if (!candidate || !selectedJd) return;
-
-    const phone = normalizePhone(candidate.phone || vapiPhoneInput?.value || '');
-    if (!phone) {
-      vapiPhoneRow.style.display = 'block';
-      vapiPhoneInput.focus();
-      vapiStatusEl.textContent   = 'Enter a phone number to schedule a call.';
-      vapiStatusEl.style.display = 'block';
-      return;
-    }
-    if (!vapiDtInput.value) {
-      vapiStatusEl.textContent   = 'Pick a date and time first.';
-      vapiStatusEl.style.display = 'block';
-      return;
-    }
-
-    // The datetime-local value is wall-clock time in the chosen timezone.
-    // Convert it to an absolute UTC instant for that timezone.
-    const tz = vapiTzSelect.value;
-    const scheduledUtc = wallClockToUtc(vapiDtInput.value, tz);
-    if (scheduledUtc <= new Date()) {
-      vapiStatusEl.textContent   = 'Pick a time in the future.';
-      vapiStatusEl.style.display = 'block';
-      return;
-    }
-
-    vapiScheduleBtn.disabled  = true;
-    vapiScheduleBtn.textContent = '🗓 Scheduling…';
-    vapiStatusEl.textContent   = 'Scheduling AI phone screen…';
-    vapiStatusEl.style.display = 'block';
-    vapiResultEl.style.display = 'none';
-
-    chrome.runtime.sendMessage({
-      type: 'SCHEDULE_CALL',
-      payload: {
-        applicant_id:   addedApplicantId,
-        job_id:         selectedJd,
-        phone:          phone,
-        candidate_name: candidate.name || '',
-        job_title:      selectedJdTitle || '',
-        scheduled_at:   scheduledUtc.toISOString(),
-        timezone:       tz,
-      },
-    }, (res) => {
-      vapiScheduleBtn.disabled  = false;
-      vapiScheduleBtn.textContent = '🗓 Schedule call';
-      if (!res?.ok) {
-        vapiStatusEl.textContent = '✕ ' + (res?.error || 'Could not schedule call');
-        return;
-      }
-      const when = scheduledUtc.toLocaleString('en-US', {
-        timeZone: tz, month: 'short', day: 'numeric',
-        hour: 'numeric', minute: '2-digit',
-      });
-      vapiStatusEl.textContent = `✓ Scheduled for ${when} (${tzShort(tz)})`;
-      vapiScheduleCheck.checked = false;
-      vapiScheduleRow.style.display = 'none';
-    });
-  });
-}
-
-// Convert a "YYYY-MM-DDTHH:mm" wall-clock string in `tz` to an absolute Date (UTC instant).
-function wallClockToUtc(localStr, tz) {
-  const [datePart, timePart] = localStr.split('T');
-  const [y, mo, d] = datePart.split('-').map(Number);
-  const [h, mi]    = timePart.split(':').map(Number);
-  // Start from the naive UTC guess, then correct by the tz offset at that instant.
-  const guess = new Date(Date.UTC(y, mo - 1, d, h, mi));
-  const asInTz = new Date(guess.toLocaleString('en-US', { timeZone: tz }));
-  const offset = guess.getTime() - asInTz.getTime();
-  return new Date(guess.getTime() + offset);
-}
-
-function tzShort(tz) {
-  const map = {
-    'America/New_York': 'EST', 'Asia/Kolkata': 'IST',
-    'America/Los_Angeles': 'PST', 'America/Chicago': 'CST',
-    'Europe/London': 'GMT',
-  };
-  return map[tz] || tz;
-}
-
-function startCallPoll(applicantId) {
-  if (callPollTimer) clearInterval(callPollTimer);
-  let attempts = 0;
-  const MAX_ATTEMPTS = 60; // 5 min at 5s intervals
-
-  callPollTimer = setInterval(() => {
-    attempts++;
-    chrome.runtime.sendMessage(
-      { type: 'GET_CALL_STATUS', payload: { applicant_id: applicantId } },
-      (res) => {
-        if (!res?.ok || !res.call) return;
-        const call = res.call;
-
-        if (call.status === 'initiated' || call.status === 'in_progress') {
-          vapiStatusEl.textContent = call.status === 'in_progress'
-            ? '🎙 In progress…'
-            : '📱 Ringing…';
-          return;
-        }
-
-        // Terminal state — stop polling
-        clearInterval(callPollTimer);
-        callPollTimer = null;
-        vapiBtn.classList.remove('calling');
-        vapiBtn.disabled    = false;
-        vapiBtn.textContent = '📞 Call again';
-        vapiStatusEl.style.display = 'none';
-        renderCallResult(call);
-      }
-    );
-
-    if (attempts >= MAX_ATTEMPTS) {
-      clearInterval(callPollTimer);
-      callPollTimer = null;
-      vapiBtn.classList.remove('calling');
-      vapiBtn.disabled    = false;
-      vapiBtn.textContent = '📞 Call with AI';
-      vapiStatusEl.textContent = 'Timed out waiting for call result.';
-    }
-  }, 5000);
-}
-
-function renderCallResult(call) {
-  const statusLabels = {
-    completed: 'Call Completed',
-    no_answer: 'No Answer',
-    failed:    'Call Failed',
-  };
-  const label = statusLabels[call.status] || call.status;
-
-  let html = `
-    <div class="vapi-result-label">AI Phone Screen Result</div>
-    <span class="vapi-result-badge ${call.status}">${label}</span>
-  `;
-
-  if (call.summary) {
-    html += `<div class="vapi-summary">${escapeHtml(call.summary)}</div>`;
-  }
-
-  const data = call.structured_data || {};
-  const entries = Object.entries(data).filter(([, v]) => v !== null && v !== '');
-  if (entries.length > 0) {
-    html += '<div class="vapi-captured">';
-    for (const [key, val] of entries) {
-      const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-      html += `
-        <div class="vapi-captured-row">
-          <span class="vapi-captured-key">${escapeHtml(label)}</span>
-          <span class="vapi-captured-val">${escapeHtml(String(val))}</span>
-        </div>`;
-    }
-    html += '</div>';
-  }
-
-  vapiResultEl.innerHTML = html;
-  vapiResultEl.style.display = 'block';
 }
 
 function escapeHtml(s) {

@@ -3,12 +3,11 @@
   "name": "SCOUT — Candidate Fit Scorer",
   "version": "1.0",
   "description": "AI-powered fit scores on LinkedIn. Push candidates to SCOUT with one click.",
-  "permissions": ["activeTab", "storage", "scripting", "sidePanel", "offscreen", "cookies", "alarms"],
+  "permissions": ["activeTab", "storage", "scripting", "sidePanel", "offscreen", "cookies"],
   "host_permissions": [
     "https://www.linkedin.com/*",
     "https://www.dice.com/*",
-    "https://*.jazz.co/*",
-    "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io/*",
+    "https://api.jazz.co/*",
     "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io/*",
     "https://huggingface.co/*",
     "https://cdn-lfs.huggingface.co/*",
@@ -20,12 +19,17 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.linkedin.com/in/*"],
+      "matches": ["https://www.linkedin.com/*", "https://www.dice.com/*"],
+      "js": ["content_scripts/floating_button.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.linkedin.com/*"],
       "js": ["content_scripts/linkedin.js"],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://www.dice.com/employers/talent-search/profile/*"],
+      "matches": ["https://www.dice.com/*"],
       "js": ["lib/pdf.min.js", "content_scripts/dice.js"],
       "run_at": "document_idle"
     }
