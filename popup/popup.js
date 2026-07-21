@@ -35,6 +35,11 @@ const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
 const closeBtn       = document.getElementById('close-btn');
 const refreshBtn     = document.getElementById('refresh-btn');
+const diceTop5Btn    = document.getElementById('dice-top5-btn');
+const autoPager      = document.getElementById('auto-pager');
+const autoPrev       = document.getElementById('auto-prev');
+const autoNext       = document.getElementById('auto-next');
+const autoLabel      = document.getElementById('auto-label');
 
 // Close the side panel. window.close() works in the side panel on recent Chrome;
 // the SW fallback (disable → re-enable) covers versions where it's a no-op.
@@ -47,6 +52,10 @@ closeBtn.addEventListener('click', () => {
 
 // Re-scan: reset state and run the whole pipeline again (profile → JDs → score)
 refreshBtn.addEventListener('click', async () => {
+  // Leave auto-source mode so the single-profile flow resumes.
+  autoResults = [];
+  autoPager.style.display = 'none';
+
   const tab = await getTargetTab();
   const site = siteFor(tab?.url);
   if (!site) return;
@@ -86,6 +95,11 @@ let resumeB64       = '';     // base64-encoded resume file if recruiter attache
 let resumeFileName  = '';     // original filename — JazzHR needs it to attach the resume
 let resumeMime      = '';     // file MIME type, sent alongside the base64
 let resumeText      = '';     // plain text parsed from the attached resume (for skill re-scoring)
+
+// ── Auto-source (top-5 Dice TalentSearch) state ────────────────────────────────
+let autoSourcing = false;     // true while the search/scrape/score loop is running
+let autoResults  = [];        // [{ candidate, score }] for the top results
+let autoIndex    = 0;         // currently shown candidate in the pager
 
 // ── Resume file picker ────────────────────────────────────────────────────────
 // PDF.js needs its worker pointed at the bundled local file (CSP forbids remote).
@@ -237,7 +251,9 @@ chrome.runtime.onMessage.addListener((message) => {
 
   // Dice résumé finished rendering after the first scan → adopt the updated
   // candidate (real email + résumé skills + résumé text) and re-score.
-  if (message?.type === "DICE_PROFILE_UPDATED" && message.profile) {
+  // Skipped while auto-sourcing / showing top-5 — those updates belong to the
+  // batch loop's own candidates, not the single-profile view.
+  if (message?.type === "DICE_PROFILE_UPDATED" && message.profile && !autoSourcing && !autoResults.length) {
     candidate = message.profile;
     foundEmail = candidate.email || foundEmail;
     foundPhone = candidate.phone || foundPhone;
@@ -325,21 +341,40 @@ function startScan(tabId, scriptFile, force = false) {
   requestProfile(tabId, scriptFile, force);
 }
 
+// True for the Dice TalentSearch search/results pages (NOT a candidate profile).
+// On these pages picking a JD drives the auto-source top-5 pipeline.
+function isDiceSearchPage(url) {
+  return /dice\.com\/employers\/talent-search\/(?!profile\/)/i.test(url || '');
+}
+
 // Sync panel to the active tab: empty state off LinkedIn, auto-scan when a
 // (new) profile is showing. Runs at open and on every tab switch/navigation.
+// Suppressed while the auto-source loop is driving the tab through profiles.
 async function handleActiveTab() {
+  if (autoSourcing) return;          // our own navigation — don't react to it
+  if (autoResults.length) return;    // showing top-5 results — keep them on screen
+
   const tab = await getTargetTab();
   if (!tab) return;
   const site = siteFor(tab.url);
   const onProfile = !!site;
+  const onDiceSearch = isDiceSearchPage(tab.url);
 
   // Off-profile pages keep the last extracted candidate on screen (recruiters
   // navigate away mid-review); the empty state only shows before any extraction.
   if (!onProfile && !candidate) await restoreLastProfile();
-  const showMain = onProfile || !!candidate;
+  const showMain = onProfile || !!candidate || onDiceSearch;
   mainView.style.display  = showMain ? '' : 'none';
   emptyView.style.display = showMain ? 'none' : 'block';
-  if (!onProfile) return;
+  if (!onProfile) {
+    // Dice TalentSearch results page — expose the JD picker so selecting a JD
+    // can auto-run the search + top-5 extraction even before any profile scan.
+    if (onDiceSearch) {
+      sourceBadge.textContent = 'Dice';
+      matchSection.style.display = 'block';
+    }
+    return;
+  }
 
   sourceBadge.textContent = site.source;
   matchSection.style.display = 'block';
@@ -593,7 +628,7 @@ function loadJds(preserveId, fresh) {
   });
 }
 
-jdSelect.addEventListener('change', () => {
+jdSelect.addEventListener('change', async () => {
   const jdId = jdSelect.value;
   if (!jdId) {
     scoreCard.classList.remove('show');
@@ -609,6 +644,15 @@ jdSelect.addEventListener('change', () => {
   scoreCard.classList.remove('show');
   addBtn.disabled = true;
   saveLastProfile();
+
+  // On the Dice TalentSearch results page a JD pick means "source top 5":
+  // auto-run the search with JD-derived conditions instead of scoring whatever
+  // candidate happens to be cached.
+  const tab = await getTargetTab();
+  if (isDiceSearchPage(tab?.url)) {
+    runDiceAutoSource();
+    return;
+  }
 
   if (candidate) {
     // Profile already loaded — score immediately
@@ -888,6 +932,229 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+
+// ── Auto-source: search Dice TalentSearch by JD, score the top 5 ────────────────
+// Recruiter picks a JD (on the TalentSearch page the pick itself triggers this;
+// the button works from anywhere). We drive the active tab:
+//   TalentSearch search page → type the JD-derived Boolean + location → submit →
+//   scrape 5 profile URLs → visit each → scrape + score.
+// Results are cached in autoResults and browsed one-by-one with the ‹ › pager.
+
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+const DICE_SEARCH_URL = 'https://www.dice.com/employers/talent-search/search';
+
+// Resolve once the tab finishes loading (or after a timeout — SPA content keeps
+// streaming after `complete`, and the per-profile scrapers do their own waiting).
+function waitForTabLoad(tabId, timeout = 20000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(onUpd);
+      resolve();
+    };
+    const onUpd = (id, info) => { if (id === tabId && info.status === 'complete') finish(); };
+    chrome.tabs.onUpdated.addListener(onUpd);
+    chrome.tabs.get(tabId, (t) => { if (!chrome.runtime.lastError && t?.status === 'complete') finish(); });
+    setTimeout(finish, timeout);
+  });
+}
+
+// Ask the SW to turn the JD into Dice search conditions (Boolean keyword + location).
+function getJdSearchParams(jdId) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'GET_JD_SEARCH_PARAMS', payload: { jd_id: jdId } }, (res) => {
+      void chrome.runtime.lastError;
+      resolve(res?.ok ? res.data : null);
+    });
+  });
+}
+
+// Inject the Dice search driver (idempotent — the script self-guards) and send it a message.
+function diceSearchMessage(tabId, msg) {
+  return new Promise((resolve) => {
+    chrome.scripting.executeScript(
+      { target: { tabId }, files: ['content_scripts/dice_search.js'] },
+      () => {
+        if (chrome.runtime.lastError) { resolve(null); return; }
+        chrome.tabs.sendMessage(tabId, msg, (res) => {
+          void chrome.runtime.lastError;
+          resolve(res || null);
+        });
+      }
+    );
+  });
+}
+
+// Scrape one Dice profile tab (forces a fresh extraction). Mirrors requestProfile's
+// inject-fallback but returns a promise instead of mutating UI state.
+function getProfilePromise(tabId, scriptFile) {
+  return new Promise((resolve) => {
+    const ask = (cb) => chrome.tabs.sendMessage(tabId, { action: 'getProfile', force: true }, cb);
+    ask((resp) => {
+      if (chrome.runtime.lastError || !resp?.profile) {
+        chrome.scripting.executeScript(
+          { target: { tabId }, files: [scriptFile] },
+          () => {
+            if (chrome.runtime.lastError) { resolve(null); return; }
+            setTimeout(() => ask((r2) => { void chrome.runtime.lastError; resolve(r2?.profile || null); }), 400);
+          }
+        );
+        return;
+      }
+      resolve(resp.profile);
+    });
+  });
+}
+
+// Score a scraped candidate against the selected JD (promise wrapper for GET_SCORE).
+function scorePromise(jdId, cand) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: 'GET_SCORE', payload: { jd_id: jdId, candidate: cand, resume_text: cand?.resumeText || undefined } },
+      (res) => {
+        void chrome.runtime.lastError;
+        resolve(res?.ok ? res.data : null);
+      }
+    );
+  });
+}
+
+async function runDiceAutoSource() {
+  if (!selectedJd) { showStatus('Pick a Job Description first.', 'error'); return; }
+  if (autoSourcing) return;
+
+  autoSourcing = true;
+  autoResults  = [];
+  autoPager.style.display = 'none';
+  profileCard.classList.remove('show');
+  scoreCard.classList.remove('show');
+  if (diceTop5Btn) diceTop5Btn.disabled = true;
+  showStatus('Building search from JD…', 'loading');
+
+  try {
+    const params = await getJdSearchParams(selectedJd);
+    if (!params || !params.keyword) {
+      showStatus('Could not derive search conditions from this JD.', 'error');
+      return;
+    }
+
+    // Need a tab on the TalentSearch search page. Reuse the active tab if it's
+    // already there; navigate a Dice tab; otherwise open a fresh tab.
+    const tab = await getTargetTab();
+    let workTabId;
+    if (tab && isDiceSearchPage(tab.url) && /talent-search\/search/.test(tab.url)) {
+      workTabId = tab.id;
+    } else if (tab && /https:\/\/www\.dice\.com\//.test(tab.url || '')) {
+      workTabId = tab.id;
+      await chrome.tabs.update(workTabId, { url: DICE_SEARCH_URL, active: true });
+      await waitForTabLoad(workTabId);
+      await delay(2000);
+    } else {
+      const created = await chrome.tabs.create({ url: DICE_SEARCH_URL, active: true });
+      workTabId = created.id;
+      await waitForTabLoad(workTabId);
+      await delay(2000);
+    }
+
+    // Type the JD-derived Boolean (+ location) into the search bar and submit.
+    showStatus('Searching Dice TalentSearch…', 'loading');
+    const run = await diceSearchMessage(workTabId, {
+      action: 'runDiceSearch',
+      keyword:   params.keyword,
+      location:  params.location || '',
+      clearance: !!params.clearance,   // JD asks for a clearance → filter results to cleared candidates
+    });
+    if (!run?.ok) {
+      showStatus('Search failed: ' + (run?.error || 'could not drive the search page.'), 'error');
+      return;
+    }
+    await delay(2500);   // results stream in via XHR — scraper also polls
+
+    showStatus('Reading top candidates…', 'loading');
+    const scrape = await diceSearchMessage(workTabId, { action: 'getDiceSearchResults', count: 5 });
+    const results = (scrape?.results || []).slice(0, 5);
+    if (!results.length) {
+      showStatus('No candidates found on Dice for this JD.', 'error');
+      return;
+    }
+
+    for (let i = 0; i < results.length; i++) {
+      showStatus(`Reading candidate ${i + 1} of ${results.length}… (résumé parse takes a moment)`, 'loading');
+      await chrome.tabs.update(workTabId, { url: results[i].url, active: true });
+      await waitForTabLoad(workTabId);
+      await delay(1500);
+
+      const profile = await getProfilePromise(workTabId, 'content_scripts/dice.js');
+      if (!profile) continue;
+      showStatus(`Scoring candidate ${i + 1} of ${results.length}…`, 'loading');
+      const score = await scorePromise(selectedJd, profile);
+      autoResults.push({ candidate: profile, score });
+    }
+
+    // Avoid the tab listener re-scanning the last visited profile after we finish.
+    lastProfileSlug = siteFor(results[results.length - 1].url)?.slug || lastProfileSlug;
+
+    if (!autoResults.length) {
+      showStatus('Could not read any candidate profiles.', 'error');
+      return;
+    }
+
+    // Rank best-fit first.
+    autoResults.sort((a, b) => (b.score?.score || 0) - (a.score?.score || 0));
+    autoIndex = 0;
+    statusEl.classList.remove('show');
+    showAutoResult();
+  } catch (e) {
+    console.error('[SCOUT] Dice auto-source error:', e);
+    showStatus('Auto-source failed: ' + e.message, 'error');
+  } finally {
+    autoSourcing = false;
+    if (diceTop5Btn) diceTop5Btn.disabled = false;
+  }
+}
+
+// Render the currently-selected auto-source candidate into the existing profile +
+// score cards, reusing the normal single-candidate UI (Add to JazzHR, etc.).
+function showAutoResult() {
+  const item = autoResults[autoIndex];
+  if (!item) return;
+
+  candidate      = item.candidate;
+  currentScore   = item.score;
+  profilePending = false;
+
+  // Reset per-candidate transient state (résumé attachment, added status).
+  resumeB64 = ''; resumeFileName = ''; resumeMime = ''; resumeText = '';
+  resumeFile.value = ''; resumeName.textContent = 'No file chosen'; resumeClear.style.display = 'none';
+  jazzhrBtn.style.display = 'none';
+  resetAddButton();
+
+  sourceBadge.textContent = 'Dice';
+  matchSection.style.display = 'block';
+  renderProfile(candidate);
+  if (currentScore) {
+    renderScore(currentScore, !!candidate.resumeText);
+  } else {
+    scoreCard.classList.remove('show');
+    showStatus('Could not score this candidate.', 'error');
+  }
+
+  autoLabel.textContent = `${autoIndex + 1} / ${autoResults.length}`;
+  autoPrev.disabled = autoIndex === 0;
+  autoNext.disabled = autoIndex === autoResults.length - 1;
+  autoPager.style.display = 'flex';
+}
+
+if (diceTop5Btn) diceTop5Btn.addEventListener('click', runDiceAutoSource);
+autoPrev.addEventListener('click', () => {
+  if (autoIndex > 0) { autoIndex--; showAutoResult(); }
+});
+autoNext.addEventListener('click', () => {
+  if (autoIndex < autoResults.length - 1) { autoIndex++; showAutoResult(); }
+});
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

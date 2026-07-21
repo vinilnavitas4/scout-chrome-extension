@@ -1134,6 +1134,75 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // ── GET_JD_SEARCH_PARAMS — JD → Dice TalentSearch conditions ─────────────
+  // Turns a JD into the search inputs the Dice auto-source pipeline types into
+  // the TalentSearch bar: the JD's role title as the keyword, and a location
+  // (skipped for remote JDs so the search stays nationwide).
+  if (type === "GET_JD_SEARCH_PARAMS") {
+    (async () => {
+      try {
+        const { jd_id } = payload;
+        const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`, { headers: scoutHeaders() });
+        const job = await r.json();
+        if (job.error) throw new Error(job.error);
+        const reqs = parseRequirements(job.description || "");
+        jobCache.set(jd_id, { title: job.title, requirements: reqs }); // warm the score cache too
+
+        // Keep only the leading role phrase of the title — some JD titles carry
+        // client/location suffixes after a dash/pipe/bullet. Numerals dropped
+        // ("Java Developer 3", req codes, "10+ years") — they narrow the Dice
+        // keyword match without adding signal.
+        const title = String(job.title || "")
+          .split("\n")[0]
+          .split(/\s[-–|·•]\s/)[0]
+          .replace(/\([^)]*\)/g, " ")          // "(10+ years)", "(Req #123)"
+          .replace(/[^A-Za-z+#. ]+/g, " ")     // keep letters + the +/#/. in C++/C#/.NET
+          .replace(/(^|\s)[+#.]+(?=\s|$)/g, " ") // orphan +/#/. left after stripping
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 100);
+
+        // Keyword is the job title only — recruiters found the title AND
+        // (skills…) Boolean over-restrictive on Dice, so skills are left to
+        // the scoring pass instead of the search query.
+        const keyword = title;
+
+        // Location: the JD's state only — a full state name matches Dice's
+        // location autocomplete cleanly and searches the whole state. State
+        // comes from the job's state field, else is detected from the JD text
+        // (state names, "City, ST", or known-city → state mapping).
+        // Remote → nationwide (no location).
+        let location = "";
+        if (!reqs.jd_remote) {
+          const abbr = String(job.state || "").trim().toUpperCase().slice(0, 2);
+          const state = STATE_ABBRS.has(abbr) ? abbr
+            : reqs.jd_state || detectState([job.city, job.state].filter(Boolean).join(", "), true);
+          if (state) {
+            // Abbr → full name ("VA" → "Virginia") for an unambiguous match.
+            for (const name in STATE_NAMES) {
+              if (STATE_NAMES[name] === state) {
+                location = name.replace(/(^|\s)([a-z])/g, (m, p, c) => p + c.toUpperCase());
+                break;
+              }
+            }
+            if (!location) location = state;
+          }
+        }
+
+        // Clearance stated anywhere in the JD → have the search driver switch
+        // on Dice's "security clearance" filter so results are pre-filtered.
+        const clearance = reqs.required_clearance.rank > 0;
+
+        console.log(`[SCOUT] JD search params for ${jd_id}:`, { keyword, location, clearance });
+        sendResponse({ ok: true, data: { keyword, location, clearance, title: job.title } });
+      } catch (e) {
+        console.error("[SCOUT] GET_JD_SEARCH_PARAMS error:", e.message);
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
   // ── GET_SCORE — backend-authoritative embedding score, local fallback ─────
   // Scoring runs on the backend so every device/browser gets an identical score
   // (client WASM embeddings diverge across browsers). If the backend endpoint is
