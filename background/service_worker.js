@@ -43,6 +43,7 @@ function normalizeSkill(s) {
 // Canonicalize before comparing/embedding so these match deterministically.
 const SKILL_ALIASES = new Map([
   ["k8s", "kubernetes"],
+  ["fast api", "fastapi"],
   ["amazon web services", "aws"],
   ["google cloud platform", "gcp"],
   ["google cloud", "gcp"],
@@ -128,6 +129,8 @@ const CASE_SENSITIVE_KEYWORDS = new Set(["Go","Rust","React","Spark","Helm","DAX
 // what caused "Rust"⊂"trusted", "Git"⊂"digital", "REST"⊂"Reston" false positives.
 function findKeywords(text) {
   if (!text) return [];
+  // Spaced variant "Fast API" is the same skill as the "FastAPI" keyword.
+  text = text.replace(/\bFast\s+API\b/gi, "FastAPI");
   const found = [];
   for (const kw of TOOL_KEYWORDS) {
     const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
