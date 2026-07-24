@@ -567,6 +567,8 @@ const TEXT_SKILL_KEYWORDS = [
 const TEXT_CASE_SENSITIVE = new Set(["Go","Rust","React","Spark","Helm","DAX","RAG","Secret clearance"]);
 function skillsFromText(text) {
   if (!text) return [];
+  // Spaced variant "Fast API" is the same skill as the "FastAPI" keyword.
+  text = text.replace(/\bFast\s+API\b/gi, "FastAPI");
   const found = [];
   for (const kw of TEXT_SKILL_KEYWORDS) {
     const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
