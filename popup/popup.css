@@ -29,6 +29,9 @@
   --fair:      #d97706;
   --poor:      #dc2626;
 
+  /* Shared card outline — one place to tune every card's border weight/colour. */
+  --card-border: 2px solid #94a3b8;
+
   --radius:    10px;
   --radius-sm: 7px;
   --shadow:    0 1px 2px rgba(15, 23, 42, 0.05);
@@ -191,15 +194,29 @@ body {
   flex-direction: column;
 }
 
-/* ── Profile card ── */
+/* ── Profile card ──────────────────────────────────────────────────────────────
+   Everything above the JD dropdown lives here. Sits on --surface with a solid
+   border, an accent top rail and a real drop shadow so it reads as its own card
+   against the panel background rather than blending into it.                   */
 .profile-card {
   display: none;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+  background: var(--surface);
+  border: var(--card-border);
   border-radius: var(--radius);
-  padding: 12px;
-  margin-bottom: 12px;
-  box-shadow: var(--shadow);
+  padding: 14px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-lg);
+}
+
+/* Accent rail across the top edge of the card. */
+.profile-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--brand-soft), var(--brand));
 }
 
 .profile-card.show {
@@ -221,12 +238,12 @@ body {
 /* Initials avatar — filled in by renderProfile(). */
 .profile-avatar {
   flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   color: #fff;
   background: linear-gradient(135deg, var(--brand-soft) 0%, var(--brand) 100%);
@@ -236,8 +253,9 @@ body {
 .profile-headtext { min-width: 0; }
 
 .profile-name {
-  font-weight: 700;
-  font-size: 14px;
+  font-weight: 800;
+  font-size: 17px;
+  line-height: 1.25;
   color: var(--text);
 }
 
@@ -291,11 +309,11 @@ body {
 .field { display: flex; flex-direction: column; gap: 3px; }
 
 .field-label {
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 10.5px;
+  font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-3);
+  color: var(--text);
 }
 
 .input-wrap {
@@ -303,7 +321,7 @@ body {
   align-items: center;
   gap: 6px;
   padding: 0 8px;
-  background: var(--surface);
+  background: var(--surface-2);
   border: 1px solid var(--border-2);
   border-radius: var(--radius-sm);
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -370,7 +388,7 @@ body {
 .jd-select {
   width: 100%;
   padding: 10px 34px 10px 12px;
-  border: 1.5px solid var(--border);
+  border: var(--card-border);
   border-radius: var(--radius);
   font: inherit;
   font-size: 13px;
@@ -421,12 +439,12 @@ body {
 /* ── Score card ── */
 .score-card {
   display: none;
-  border: 1px solid var(--border);
+  border: var(--card-border);
   border-radius: var(--radius);
   background: var(--surface);
   padding: 14px;
-  margin-bottom: 12px;
-  box-shadow: var(--shadow);
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-lg);
 }
 
 .score-card.show {
@@ -632,31 +650,42 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
   border: 1px solid color-mix(in srgb, var(--poor) 30%, transparent);
 }
 
-/* ── Resume upload ── */
+/* ── Resume upload — same card treatment as the profile/score cards ── */
 .resume-upload {
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  background: var(--surface-2);
-  border: 1.5px dashed var(--border-2);
+  margin-bottom: 14px;
+  padding: 14px;
+  background: var(--surface);
+  border: var(--card-border);
   border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
 }
 
 .resume-label {
   font-size: 11px;
-  font-weight: 700;
-  color: var(--text-2);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text);
 }
 
 .resume-hint {
   font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
   color: var(--text-3);
 }
 
+/* Dashed inner well keeps the "drop a file here" read now that the outer
+   border is solid like every other card. */
 .resume-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 7px;
+  margin-top: 9px;
+  padding: 9px 10px;
+  background: var(--surface-2);
+  border: 2px dashed var(--border-2);
+  border-radius: var(--radius-sm);
 }
 
 .resume-pick-btn {
@@ -784,11 +813,12 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
 
 /* ── Cross-JD fit results ── */
 .bestfit {
-  margin: 0 0 10px;
-  padding: 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  margin: 0 0 14px;
+  padding: 12px;
+  background: var(--surface);
+  border: var(--card-border);
   border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
 }
 .bestfit-status {
   font-size: 12px;
@@ -901,6 +931,9 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
 
     --shadow:    0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+    /* Same weight, lifted colour so the outline still reads on dark surfaces. */
+    --card-border: 2px solid #4a5f87;
   }
 
   /* Dark surfaces need a light-on-dark primary button instead of the inverse. */
