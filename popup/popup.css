@@ -813,6 +813,7 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
 
 /* ── Cross-JD fit results ── */
 .bestfit {
+  position: relative;
   margin: 0 0 14px;
   padding: 12px;
   background: var(--surface);
@@ -820,10 +821,29 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
 }
+.bestfit-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.bestfit-close:hover { background: var(--surface-3); color: var(--text); }
 .bestfit-status {
   font-size: 12px;
   color: var(--text-2);
   margin-bottom: 8px;
+  padding-right: 26px;
 }
 .bestfit-row {
   display: flex;

@@ -30,6 +30,7 @@ const scanJdsBtn     = document.getElementById('scan-jds-btn');
 const bestfit        = document.getElementById('bestfit');
 const bestfitStatus  = document.getElementById('bestfit-status');
 const bestfitList    = document.getElementById('bestfit-list');
+const bestfitClose   = document.getElementById('bestfit-close');
 const mainView       = document.getElementById('main-view');
 const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
@@ -781,6 +782,13 @@ scanJdsBtn.addEventListener('click', () => {
       renderBestFit(res.data);
     }
   );
+});
+
+// Dismiss the results panel — the button stays available to re-run the check.
+bestfitClose.addEventListener('click', () => {
+  bestfit.style.display = 'none';
+  bestfitList.innerHTML = '';
+  bestfitStatus.textContent = '';
 });
 
 function renderBestFit(list) {
