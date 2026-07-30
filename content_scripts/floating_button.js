@@ -41,34 +41,44 @@
 
     root.innerHTML = `
       <style>
-        .fab {
+        .wrap {
           position: fixed;
           top: 24px;
           right: 24px;
-          height: 40px;
-          padding: 0 18px;
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 8px;
+        }
+        .fab {
+          height: 42px;
+          padding: 0 16px;
           border: none;
-          border-radius: 8px;
+          border-radius: 999px;
           cursor: pointer;
           display: flex;
           align-items: center;
-          justify-content: center;
-          font: 700 15px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          gap: 8px;
+          font: 700 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
           letter-spacing: .5px;
           color: #fff;
-          background: linear-gradient(135deg, #1e3a8a 0%, #0f2557 100%);
-          box-shadow: 0 4px 14px rgba(15,37,87,.45);
-          transition: transform .15s ease, box-shadow .15s ease;
+          background: linear-gradient(135deg, #0284c7 0%, #0f2557 100%);
+          box-shadow: 0 4px 16px rgba(15,37,87,.42);
+          transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
         }
+        .fab svg { flex: 0 0 auto; }
         .fab:hover {
-          transform: translateY(-2px) scale(1.05);
-          box-shadow: 0 6px 20px rgba(15,37,87,.55);
+          transform: translateY(-2px);
+          box-shadow: 0 8px 22px rgba(15,37,87,.55);
+          filter: brightness(1.08);
         }
-        .fab:active { transform: scale(.96); }
+        .fab:active { transform: scale(.97); }
+        .fab:focus-visible {
+          outline: none;
+          box-shadow: 0 0 0 3px rgba(56,189,248,.6), 0 8px 22px rgba(15,37,87,.55);
+        }
+        /* Tooltip sits under the button so it never runs off the right edge. */
         .tip {
-          position: fixed;
-          top: 34px;
-          right: 120px;
           background: #0f172a;
           color: #f1f5f9;
           padding: 6px 10px;
@@ -76,13 +86,28 @@
           font: 600 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
           white-space: nowrap;
           opacity: 0;
+          transform: translateY(-4px);
           pointer-events: none;
-          transition: opacity .15s ease;
+          box-shadow: 0 4px 12px rgba(15,23,42,.28);
+          transition: opacity .15s ease, transform .15s ease;
         }
-        .fab:hover + .tip { opacity: 1; }
+        .fab:hover + .tip,
+        .fab:focus-visible + .tip { opacity: 1; transform: none; }
+        @media (prefers-reduced-motion: reduce) {
+          .fab, .tip { transition: none; }
+        }
       </style>
-      <button class="fab" aria-label="Open SCOUT" title="Open SCOUT">SCOUT</button>
-      <span class="tip">Open SCOUT candidate scorer</span>
+      <div class="wrap">
+        <button class="fab" aria-label="Open SCOUT candidate scorer" title="Open SCOUT">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+            <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.7" />
+            <path d="M10.8 10.8L14 14" fill="none" stroke="currentColor"
+                  stroke-width="1.7" stroke-linecap="round" />
+          </svg>
+          SCOUT
+        </button>
+        <span class="tip">Score this candidate</span>
+      </div>
     `;
 
     root.querySelector(".fab").addEventListener("click", openPanel);

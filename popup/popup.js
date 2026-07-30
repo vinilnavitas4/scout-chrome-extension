@@ -1,4 +1,5 @@
 const profileCard    = document.getElementById('profile-card');
+const profileAvatar  = document.getElementById('profile-avatar');
 const profileName    = document.getElementById('profile-name');
 const profileTitle   = document.getElementById('profile-title');
 const profileLoc     = document.getElementById('profile-location');
@@ -18,7 +19,6 @@ const scoreLabel     = document.getElementById('score-label');
 const scoreRationale = document.getElementById('score-rationale');
 const scoreBreakdown = document.getElementById('score-breakdown');
 const skillLists     = document.getElementById('skill-lists');
-const autoGate       = document.getElementById('auto-gate');
 const addBtn         = document.getElementById('add-btn');
 const jazzhrBtn      = document.getElementById('jazzhr-btn');
 const statusEl       = document.getElementById('status');
@@ -30,6 +30,7 @@ const scanJdsBtn     = document.getElementById('scan-jds-btn');
 const bestfit        = document.getElementById('bestfit');
 const bestfitStatus  = document.getElementById('bestfit-status');
 const bestfitList    = document.getElementById('bestfit-list');
+const bestfitClose   = document.getElementById('bestfit-close');
 const mainView       = document.getElementById('main-view');
 const emptyView      = document.getElementById('empty-view');
 const matchSection   = document.getElementById('match-section');
@@ -124,6 +125,12 @@ resumeFile.addEventListener('change', async () => {
   if (selectedJd && candidate) {
     requestScore(selectedJd);
   }
+});
+
+// The file picker is a <label>; clicking it works, Enter/Space does not — wire it
+// up so the upload is reachable without a mouse.
+document.querySelector('.resume-pick-btn')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); resumeFile.click(); }
 });
 
 resumeClear.addEventListener('click', () => {
@@ -339,6 +346,7 @@ async function handleActiveTab() {
   const showMain = onProfile || !!candidate;
   mainView.style.display  = showMain ? '' : 'none';
   emptyView.style.display = showMain ? 'none' : 'block';
+  if (!showMain) matchSection.style.display = 'none';
   if (!onProfile) return;
 
   sourceBadge.textContent = site.source;
@@ -524,7 +532,18 @@ function onProfileFailed(msg) {
 
 // ── Profile card ──────────────────────────────────────────────────────────────
 
+// First letter of the first two name words — cheap avatar, no network fetch.
+function initialsOf(name) {
+  return (name || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(w => w[0].toUpperCase())
+    .join('') || '?';
+}
+
 function renderProfile(p) {
+  profileAvatar.textContent = initialsOf(p.name);
   profileName.textContent  = p.name     || '—';
   profileTitle.textContent = p.title    || '';
   profileLoc.textContent   = p.location || '';
@@ -633,7 +652,6 @@ function requestScore(jdId) {
   // Wipe the previous JD's breakdown so nothing stale shows during the re-score.
   if (scoreBreakdown) scoreBreakdown.innerHTML = '';
   if (skillLists)     skillLists.innerHTML = '';
-  if (autoGate)       autoGate.style.display = 'none';
   showStatus(modelReady ? 'Matching profile to JD…' : 'Loading AI model (first time only)…', 'loading');
 
   // Prefer a manually-attached résumé; otherwise fall back to the résumé text
@@ -664,8 +682,9 @@ function renderScore(data, updated = false) {
   scoreCircle.className = 'score-circle';
   const tone = score >= 80 ? 'excellent' : score >= 65 ? 'good' : score >= 45 ? 'fair' : 'poor';
   scoreCircle.classList.add(tone);
+  // Drives the conic-gradient progress ring in popup.css.
+  scoreCircle.style.setProperty('--pct', Math.max(0, Math.min(100, Number(score) || 0)));
 
-  renderAutoGate(data);
   renderBreakdown(data.categories);
   renderSkillLists(data.categories);
 
@@ -673,35 +692,6 @@ function renderScore(data, updated = false) {
   resumeUpload.style.display = 'block';
   addBtn.disabled = false;
   resetAddButton();
-}
-
-// Doc §4 — auto-scheduling gate. Shows whether the candidate clears all four
-// critical gates (required skills, certs, clearance, locality) at score ≥ 80.
-function renderAutoGate(data) {
-  if (!autoGate) return;
-  const gates = data.gates;
-  if (!gates) { autoGate.style.display = 'none'; return; }
-
-  const labels = {
-    required_skills: 'Required Skills',
-    certifications:  'Certifications',
-    clearance:       'Clearance',
-    locality:        'Commute / Locality',
-  };
-  const failed = Object.keys(labels).filter(k => !gates[k]);
-
-  autoGate.className = 'auto-gate ' + (data.auto_schedule ? 'pass' : 'hold');
-  if (data.auto_schedule) {
-    autoGate.innerHTML = `<span class="auto-gate-icon">✓</span>` +
-      `<span>Auto-schedule eligible — score ≥ 80 and all critical gates passed.</span>`;
-  } else {
-    const reason = data.score < 80
-      ? `score below 80`
-      : `unmet: ${failed.map(k => labels[k]).join(', ')}`;
-    autoGate.innerHTML = `<span class="auto-gate-icon">•</span>` +
-      `<span>Standard pipeline — no auto-scheduling (${escapeHtml(reason)}).</span>`;
-  }
-  autoGate.style.display = 'flex';
 }
 
 // Doc §3.4 — per-category breakdown: weight, sub-score, and a fill bar. Only the
@@ -733,7 +723,12 @@ function renderBreakdown(categories) {
       </div>`;
   }).join('');
 
-  scoreBreakdown.innerHTML = `<div class="breakdown-title">Category Breakdown</div>${rows}`;
+  // Collapsible so the score + rationale stay above the fold on short panels.
+  scoreBreakdown.innerHTML =
+    `<details class="report-section" open>` +
+      `<summary class="report-summary">Category Breakdown</summary>` +
+      `<div class="report-body">${rows}</div>` +
+    `</details>`;
 }
 
 // Doc §3.4 — matched vs missing required + preferred skills as chips.
@@ -760,7 +755,11 @@ function renderSkillLists(categories) {
   if (pref) {
     html += `<div class="skill-section"><span class="skill-section-label">Preferred</span>${section(pref)}</div>`;
   }
-  skillLists.innerHTML = html;
+  skillLists.innerHTML =
+    `<details class="report-section" open>` +
+      `<summary class="report-summary">Skills</summary>` +
+      `<div class="report-body">${html}</div>` +
+    `</details>`;
 }
 
 // ── Cross-JD fit check ────────────────────────────────────────────────────────
@@ -785,23 +784,40 @@ scanJdsBtn.addEventListener('click', () => {
   );
 });
 
+// Dismiss the results panel — the button stays available to re-run the check.
+bestfitClose.addEventListener('click', () => {
+  bestfit.style.display = 'none';
+  bestfitList.innerHTML = '';
+  bestfitStatus.textContent = '';
+});
+
 function renderBestFit(list) {
   if (!list || !list.length) { bestfitStatus.textContent = 'No JDs scored.'; return; }
   const best = list[0];
-  bestfitStatus.innerHTML = `Best fit: <strong>${best.title}</strong> — ${best.score}/100 (${best.label})`;
+  bestfitStatus.innerHTML =
+    `Best fit: <strong>${escapeHtml(best.title)}</strong> — ${best.score}/100 (${escapeHtml(best.label)})`;
 
   bestfitList.innerHTML = '';
   list.slice(0, 3).forEach((jd, i) => {
     const cls = jd.score >= 80 ? 'excellent' : jd.score >= 65 ? 'good' : jd.score >= 45 ? 'fair' : 'poor';
+    const label = jd.title + (jd.client ? ' · ' + jd.client : '');
     const row = document.createElement('div');
     row.className = 'bestfit-row' + (i === 0 ? ' top' : '');
+    // Rows act as buttons — reachable by keyboard, not just mouse.
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.title = `Score ${label}`;
     row.innerHTML =
       `<span class="bestfit-score ${cls}">${jd.score}</span>` +
-      `<span class="bestfit-title">${jd.title}${jd.client ? ' · ' + jd.client : ''}</span>`;
+      `<span class="bestfit-title">${escapeHtml(label)}</span>`;
     // Click a row → select that JD in the dropdown and score it normally.
-    row.addEventListener('click', () => {
+    const pick = () => {
       jdSelect.value = jd.id;
       jdSelect.dispatchEvent(new Event('change'));
+    };
+    row.addEventListener('click', pick);
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
     });
     bestfitList.appendChild(row);
   });
