@@ -91,6 +91,16 @@
             </select>
             <span class="jd-spinner" id="jd-spinner"></span>
           </div>
+          <!-- Explicit action: searching navigates the tab off the profile, so on a
+               profile page it stays behind a button instead of firing on select. -->
+          <button class="btn btn-secondary jd-search-btn" id="jd-search-btn" disabled>
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6" />
+              <path d="M10.8 10.8L14 14" fill="none" stroke="currentColor" stroke-width="1.6"
+                stroke-linecap="round" />
+            </svg>
+            Search this JD on LinkedIn
+          </button>
         </div>
 
         <!-- Score card -->
@@ -169,6 +179,44 @@
       </div>
       <strong>No candidate profile detected</strong>
       <p>Open a candidate profile on <b>LinkedIn</b> or <b>Dice</b>, then hit the SCOUT button on the page.</p>
+    </div>
+
+    <!-- Sourcing entry point: pick a JD anywhere on LinkedIn (feed, search, company
+         page) and the job title is searched on LinkedIn. No candidate needed. -->
+    <div class="jd-search" id="jd-search-section" style="display:none">
+      <div class="jd-section">
+        <label class="section-label" for="jd-search-select">Search a job description on LinkedIn</label>
+        <div class="jd-wrap">
+          <select class="jd-select" id="jd-search-select" disabled>
+            <option value="">Loading jobs…</option>
+          </select>
+          <span class="jd-spinner" id="jd-search-spinner"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ranked search-page candidates. Sits outside both views because the search
+       can be launched from a profile (main view) or the empty state. -->
+  <div class="people-results" id="people-results" style="display:none">
+    <div class="bestfit">
+      <button class="bestfit-close" id="people-results-close" title="Close results"
+        aria-label="Close ranked candidates">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.7"
+            stroke-linecap="round" />
+        </svg>
+      </button>
+      <!-- Minimize: hides the rows, keeps the header (and the ranking running). -->
+      <button class="bestfit-close bestfit-toggle" id="people-results-toggle"
+        title="Minimize list" aria-label="Minimize ranked candidates" aria-expanded="true">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <div class="bestfit-status" id="people-results-status"></div>
+      <div class="bestfit-list" id="people-results-list"></div>
     </div>
   </div>
 

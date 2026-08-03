@@ -770,7 +770,12 @@ function parseContactFrom(root) {
   return { email, phone };
 }
 
-async function extractContactInfo() {
+// quiet = a background ranking read. Nothing in the score uses email or phone, so
+// the modal fallback is skipped: clicking the contact link navigates to the
+// /overlay/ route on the current layout, which flashes a full-screen overlay and
+// then needs a history.back() to undo — visible churn, and a navigation that can
+// race the next profile the walk is about to load.
+async function extractContactInfo(quiet = false) {
   // Poll for contact link — topcard lazy-unloads during scroll, may not be back yet
   let contactLink = document.querySelector('a[href*="overlay/contact-info"]');
   if (!contactLink) {
@@ -820,12 +825,23 @@ async function extractContactInfo() {
       if (fetchedEmail && fetchedPhone) {
         return { email: fetchedEmail, phone: fetchedPhone, sawOverlay: true };
       }
+      if (quiet) {
+        console.log('[SCOUT] quiet read — keeping fetched contact, skipping modal');
+        return { email: fetchedEmail, phone: fetchedPhone, sawOverlay: true };
+      }
       console.log('[SCOUT] fetch missing phone — opening modal to complete');
     } else {
       console.log('[SCOUT] fetch status', res.status, '— falling back to modal');
     }
   } catch (e) {
     console.log('[SCOUT] fetch failed:', e.message, '— falling back to modal');
+  }
+
+  // Strategy B is click-and-navigate; a ranking read never gets there, including
+  // when the fetch above failed outright.
+  if (quiet) {
+    console.log('[SCOUT] quiet read — no contact modal');
+    return { email: fetchedEmail, phone: fetchedPhone, sawOverlay: true };
   }
 
   // Strategy B (fallback): click the link, scrape the live modal.
@@ -1116,7 +1132,10 @@ function requestPanelOpen() {
   });
 }
 
-function runExtraction(force = false) {
+// quiet = the panel is driving a hidden worker tab (ranking a search page). The
+// session write and requestPanelOpen are skipped so those background reads can't
+// hijack the panel or overwrite the candidate the recruiter is looking at.
+function runExtraction(force = false, quiet = false) {
   const slug = profileSlug(window.location.href);
   if (extractionPromise && extractedSlug === slug) {
     // Same profile: reuse unless forced — and never restart a run in flight,
@@ -1131,7 +1150,7 @@ function runExtraction(force = false) {
     // Contact info FIRST — while still on the main profile. The skills
     // "Show all" click can navigate to /details/skills and lose the
     // contact-info link, leaving email/phone blank.
-    let contact = await extractContactInfo();
+    let contact = await extractContactInfo(quiet);
     if (!contact.email && !contact.phone && !contact.sawOverlay) {
       // Never found the link/modal — topcard likely mid-re-render (lazy reload
       // after scroll, or the side panel opening reflowed the page). One retry
@@ -1139,7 +1158,7 @@ function runExtraction(force = false) {
       // that's a profile with no public contact info, not a timing miss.
       console.log('[SCOUT] contact info overlay never found — retrying once');
       await new Promise(r => setTimeout(r, 1500));
-      contact = await extractContactInfo();
+      contact = await extractContactInfo(quiet);
     }
     profile.email = contact.email;
     profile.phone = contact.phone;
@@ -1205,17 +1224,679 @@ function runExtraction(force = false) {
     if (clr) profile.clearance = clr;
 
     console.log('[SCOUT] LinkedIn parsed:', profile, '| clearance:', profile.clearance || 'None');
-    chrome.storage.session.set({ scout_candidate: profile });
-    // Extraction finished — surface the result in the side panel.
-    requestPanelOpen();
+    if (!quiet) {
+      chrome.storage.session.set({ scout_candidate: profile });
+      // Extraction finished — surface the result in the side panel.
+      requestPanelOpen();
+    }
     return profile;
   })().finally(() => { extractionSettled = true; });
   return extractionPromise;
 }
 
+// ── Global search ─────────────────────────────────────────────────────────────
+// Types a query into LinkedIn's nav search box and submits it, so picking a JD
+// in the panel lands the recruiter on that JD's people-search results.
+// The input is React-controlled: assigning .value directly is ignored, so the
+// native value setter is used and an input event is dispatched to sync React's
+// internal state before Enter is sent.
+
+const SEARCH_INPUT_SELECTORS = [
+  'input[data-testid="typeahead-input"]',
+  '#global-nav-typeahead input',
+  'input[aria-autocomplete="list"][placeholder="Search"]',
+  'div[role="search"] input',
+];
+
+const PEOPLE_SEARCH_URL = 'https://www.linkedin.com/search/results/people/?keywords=';
+
+function findSearchInput() {
+  for (const sel of SEARCH_INPUT_SELECTORS) {
+    const el = document.querySelector(sel);
+    if (el && el.offsetParent !== null) return el;
+  }
+  return null;
+}
+
+// The search box collapses to a button on narrow viewports — expand it first.
+async function revealSearchInput() {
+  let input = findSearchInput();
+  if (input) return input;
+
+  const trigger = [...document.querySelectorAll('button')]
+    .find(b => /^search/i.test((b.getAttribute('aria-label') || '').trim()));
+  if (trigger) {
+    trigger.click();
+    await new Promise(r => setTimeout(r, 300));
+    input = findSearchInput();
+  }
+  return input;
+}
+
+function setNativeValue(el, value) {
+  const setter = Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value')?.set;
+  if (setter) setter.call(el, value);
+  else el.value = value;
+  el.dispatchEvent(new Event('input',  { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function pressEnter(el) {
+  for (const type of ['keydown', 'keypress', 'keyup']) {
+    el.dispatchEvent(new KeyboardEvent(type, {
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+    }));
+  }
+  // Some layouts wrap the input in a real form — submit covers that path.
+  el.form?.requestSubmit?.();
+}
+
+// searchLinkedIn focuses the nav search box to type the JD title into it. That
+// focus survives the results navigation, so when the panel hands the tab back at
+// the end of a ranking run LinkedIn re-opens the typeahead — it reads as the
+// search icon being clicked on its own. Give the focus back to the page.
+function dismissSearchUI() {
+  const active = document.activeElement;
+  if (active && /^(INPUT|TEXTAREA)$/.test(active.tagName)) active.blur();
+  document.body?.focus?.();
+  return { ok: true };
+}
+
+const onPeopleResults = () => /\/search\/results\/people/.test(location.pathname);
+
+// Enter in the nav search lands on the blended /search/results/all/ page (jobs,
+// posts, groups, then people). Recruiters want the People vertical, so the
+// "People" filter pill in the results toolbar is clicked for them.
+function findPeopleFilter() {
+  const links = [...document.querySelectorAll('a[href*="/search/results/people/"]')];
+  return (
+    links.find(a => /^filter by people$/i.test((a.getAttribute('aria-label') || '').trim())) ||
+    // Fallback: the pill's own label text, ignoring the canned-search links
+    // ("89 school alumni work here") that also point at people results.
+    links.find(a => /^people$/i.test((a.innerText || '').trim())) ||
+    null
+  );
+}
+
+async function selectPeopleTab(query) {
+  if (onPeopleResults()) return 'already-people';
+
+  // The toolbar renders after the results payload — poll briefly for the pill.
+  let pill = null;
+  for (let i = 0; i < 20 && !pill; i++) {           // ~3s
+    pill = findPeopleFilter();
+    if (!pill) await new Promise(r => setTimeout(r, 150));
+  }
+
+  if (pill) {
+    pill.click();
+    for (let i = 0; i < 20; i++) {                  // ~3s for the SPA route swap
+      if (onPeopleResults()) return 'pill';
+      await new Promise(r => setTimeout(r, 150));
+    }
+  }
+
+  // Pill missing or click didn't route — go straight to the people URL.
+  location.assign(PEOPLE_SEARCH_URL + encodeURIComponent(query));
+  return 'url';
+}
+
+// ── Locations filter ──────────────────────────────────────────────────────────
+// When the JD states a location, the people results are narrowed to it the same
+// way a recruiter would: open the "Locations" pill, type the place, pick the
+// suggestion, apply. Driven from the panel right after the People tab is showing.
+//
+// Everything here is best-effort — LinkedIn ships layout changes constantly, and a
+// missed filter must degrade to "unfiltered results", never to a thrown error that
+// takes the ranking down with it. Each step reports what it found via [SCOUT] logs.
+
+// offsetParent is null for every position:fixed element, and LinkedIn renders the
+// filter dropdown as a fixed popover — so an offsetParent check throws away the
+// whole menu. getClientRects() is the honest "is this laid out on screen" test.
+const visible = (el) => !!el && el.getClientRects().length > 0;
+
+function findLocationPill() {
+  return (
+    document.querySelector('[componentkey="SearchResults_filter_pill_geoUrn"]') ||
+    [...document.querySelectorAll('[role="button"], [role="radio"], button')]
+      .find(el => /^filter by locations$/i.test((el.getAttribute('aria-label') || '').trim())) ||
+    null
+  );
+}
+
+// The pill's own click target is the <label>; the checkbox behind it is
+// tabindex="-1" and clicking the wrapper div alone doesn't always open the menu.
+function openLocationPill(pill) {
+  realClick(pill.querySelector('label') || pill);
+}
+
+// The menu is rendered into a floating-ui portal at the end of <body>, not inside
+// the pill: <div data-floating-ui-portal><div popover="manual"> … </div></div>.
+// Everything below is scoped to that portal so the page's own search box, filter
+// pills and result cards can never be mistaken for menu parts.
+function findLocationMenu() {
+  const portals = [...document.querySelectorAll('[data-floating-ui-portal]')].filter(visible);
+  return portals.find(p => p.querySelector('input[data-testid="typeahead-input"]')) ||
+         portals[portals.length - 1] || null;
+}
+
+// The menu's own typeahead: placeholder "Add a location". It shares the
+// data-testid with the nav search box, so the nav one is excluded by componentkey.
+function findLocationInput() {
+  const menu = findLocationMenu();
+  const scope = menu || document;
+  const inputs = [...scope.querySelectorAll('input')]
+    .filter(el => visible(el) && el.getAttribute('componentkey') !== 'SearchResults_SearchTyahInputRef');
+  return (
+    inputs.find(el => /location|city|region|place/i.test(
+      `${el.getAttribute('placeholder') || ''} ${el.getAttribute('aria-label') || ''}`)) ||
+    inputs.find(el => el.getAttribute('data-testid') === 'typeahead-input') ||
+    inputs[0] || null
+  );
+}
+
+// LinkedIn's SDUI controls are React components on role="button" divs and labels.
+// A bare .click() only fires a click event; these listen for the pointer/mouse
+// sequence, so the handler never runs and the menu just sits there. Replay the
+// full sequence a real click produces.
+function realClick(el) {
+  if (!el) return false;
+  el.scrollIntoView?.({ block: 'center' });
+  const opts = { bubbles: true, cancelable: true, composed: true, view: window, button: 0 };
+  for (const type of ['pointerover', 'pointerenter', 'pointerdown', 'mousedown',
+                      'pointerup', 'mouseup', 'click']) {
+    const Ctor = type.startsWith('pointer') && window.PointerEvent ? PointerEvent : MouseEvent;
+    el.dispatchEvent(new Ctor(type, opts));
+  }
+  return true;
+}
+
+// The menu's typeahead is a React input that floating-ui renders with
+// tabindex="-1" until it takes focus. A bare .focus() + value assignment leaves it
+// empty and the menu keeps showing its DEFAULT suggestions (recent locations),
+// which is indistinguishable from "typed but no matches". Click it first, then
+// drive it one character at a time with the events a real keyboard produces.
+async function typeIntoTypeahead(input, text) {
+  realClick(input);
+  input.focus();
+
+  // execCommand routes through the browser's real editing pipeline, so the
+  // component gets genuine beforeinput/input events instead of a synthetic
+  // dispatch it is free to ignore. Assigning .value alone updates the pixels but
+  // leaves the typeahead's state empty, which shows up as "the menu still lists
+  // the default suggestions".
+  input.setSelectionRange?.(0, input.value.length);
+  if (input.value) document.execCommand('delete', false);
+  if (input.value) setNativeValue(input, '');
+
+  for (const ch of text) {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true }));
+    if (!document.execCommand('insertText', false, ch) || !input.value.endsWith(ch)) {
+      setNativeValue(input, input.value + ch);
+    }
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true }));
+    await new Promise(r => setTimeout(r, 70));
+  }
+
+  if (input.value !== text) setNativeValue(input, text);
+  return input.value === text;
+}
+
+async function waitFor(fn, tries = 20, gap = 150) {
+  for (let i = 0; i < tries; i++) {
+    const found = fn();
+    if (found) return found;
+    await new Promise(r => setTimeout(r, gap));
+  }
+  return null;
+}
+
+// Pick the suggestion that matches what was typed. Options are checkbox rows in
+// the SDUI layout and role="option" rows in the classic one.
+//
+// Never falls back to "the first row". The typeahead keeps stale results on screen
+// while it fetches, and it also offers unrelated places, so a blind first-row click
+// filters the search to the wrong city — worse than not filtering at all. No match
+// means no click.
+function locationOptionRows() {
+  const menu = findLocationMenu();
+  if (!menu) return [];
+  return [...menu.querySelectorAll('[role="checkbox"][aria-label]')].filter(visible);
+}
+
+function checkedLocationRows() {
+  const menu = findLocationMenu();
+  if (!menu) return [];
+  return [...menu.querySelectorAll('[role="checkbox"][aria-checked="true"]')].filter(visible);
+}
+
+// LinkedIn keeps previously applied geo facets ticked (a stale "United States" is
+// common). Facets ADD to each other, so leaving one on would search the JD's
+// location OR that one. Clear the menu before selecting, via its own Reset button;
+// if Reset isn't there, untick the boxes directly.
+async function resetLocationFilter() {
+  if (!checkedLocationRows().length) return true;
+
+  const menu = findLocationMenu() || document;
+  const reset = [...menu.querySelectorAll('button, [role="button"], a')]
+    .filter(visible)
+    .find(el => /^reset\b/i.test((el.innerText || '').replace(/\s+/g, ' ').trim()));
+
+  if (reset) {
+    console.log('[SCOUT] location filter: clearing existing selection via Reset');
+    realClick(reset);
+  } else {
+    console.log('[SCOUT] location filter: no Reset — unticking',
+      checkedLocationRows().map(el => el.getAttribute('aria-label')));
+    for (const row of checkedLocationRows()) realClick(row);
+  }
+
+  const cleared = await waitFor(() => checkedLocationRows().length === 0, 16, 150);
+  console.log('[SCOUT] location filter: cleared =', !!cleared);
+  return !!cleared;
+}
+
+// What the menu is currently offering — the one diagnostic that distinguishes
+// "typing didn't register" from "LinkedIn has no such place".
+function locationOptionNames() {
+  const menu = findLocationMenu();
+  if (!menu) return '(no menu)';
+  return [...menu.querySelectorAll('[role="checkbox"][aria-label]')]
+    .filter(visible)
+    .map(el => el.getAttribute('aria-label'));
+}
+
+// Suggestions are checkbox rows carrying the place name on aria-label:
+//   <div role="checkbox" aria-label="Hyderabad, Telangana, India" aria-checked="false">
+// Compare on a normalized form: lowercase, accents stripped, punctuation reduced
+// to spaces. "Washington, D.C." and "Washington DC" have to read as the same place.
+function normPlace(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function findLocationOption(text) {
+  const want = normPlace(text);
+  if (!want) return null;
+  const menu = findLocationMenu();
+  if (!menu) return null;
+
+  const rows = [...menu.querySelectorAll('[role="checkbox"][aria-label]')].filter(visible);
+  const nameOf = (el) => normPlace(el.getAttribute('aria-label'));
+  const wantTokens = want.split(' ').filter(Boolean);
+
+  // The JD gives a state, so the state-level row wins: "Virginia" →
+  // "Virginia, United States", never "Virginia Beach, Virginia, United States".
+  // After that it loosens: bare name → metro area → prefix → whole word →
+  // every word of the query present.
+  return (
+    rows.find(el => nameOf(el) === want + ' united states') ||
+    rows.find(el => nameOf(el) === want) ||
+    rows.find(el => nameOf(el) === 'greater ' + want + ' area') ||
+    rows.find(el => nameOf(el).startsWith(want + ' ')) ||
+    rows.find(el => new RegExp(`(^| )${want.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( |$)`).test(nameOf(el))) ||
+    rows.find(el => {
+      const tokens = new Set(nameOf(el).split(' '));
+      return wantTokens.every(t => tokens.has(t));
+    }) ||
+    null
+  );
+}
+
+// "Show results" is an ANCHOR in this layout, not a button:
+//   <a href="/search/results/people/?keywords=…&geoUrn=…&origin=FACETED_SEARCH">Show results</a>
+// A button-only query never finds it. The href is also the finished filtered
+// search, which makes navigating to it far more reliable than clicking and hoping
+// the SPA handler fires.
+function findApplyControl() {
+  const scope = findLocationMenu() || document;
+  const controls = [...scope.querySelectorAll('a, button, [role="button"]')].filter(visible);
+  const nameOf = (el) =>
+    `${(el.innerText || '').replace(/\s+/g, ' ').trim()} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+
+  const usable = controls.filter(el =>
+    !el.disabled && el.getAttribute('aria-disabled') !== 'true' && !/^reset\b/.test(nameOf(el)));
+
+  return (
+    usable.find(el => /\bshow results?\b/.test(nameOf(el))) ||
+    usable.find(el => /apply current filter/.test(nameOf(el))) ||
+    usable.find(el => /^(apply|done)\b/.test(nameOf(el).trim())) ||
+    null
+  );
+}
+
+// "Did the filter take?" — the URL facet is the strongest signal, but the SPA
+// doesn't always put it there, so the pill's own state counts too: once a location
+// is applied the pill reads "Locations (1)" / shows as checked.
+function locationFilterActive() {
+  if (/[?&]geoUrn=/.test(location.href)) return true;
+
+  const pill = findLocationPill();
+  if (!pill) return false;
+  if (pill.getAttribute('aria-checked') === 'true') return true;
+  const box = pill.querySelector('input[type="checkbox"]');
+  if (box && box.checked) return true;
+  // Applied pills carry a count: "Locations (1)".
+  return /\(\s*\d+\s*\)/.test(pill.innerText || '');
+}
+
+async function applyLocationFilter(location) {
+  const want = String(location || '').trim();
+  if (!want) return { ok: false, error: 'no location' };
+  if (!onPeopleResults()) return { ok: false, error: 'not on people results' };
+
+  const pill = await waitFor(findLocationPill, 20);
+  if (!pill) { console.log('[SCOUT] location filter: pill not found'); return { ok: false, error: 'no pill' }; }
+
+  openLocationPill(pill);
+
+  if (!await waitFor(findLocationInput, 20)) {
+    console.log('[SCOUT] location filter: menu input not found');
+    return { ok: false, error: 'no input' };
+  }
+
+  // Clear any facet left over from a previous search before adding this JD's.
+  await resetLocationFilter();
+
+  // Reset can close the menu or re-render its contents, so the pill is reopened
+  // when needed and the input is looked up again rather than reused.
+  if (!findLocationMenu()) openLocationPill(findLocationPill() || pill);
+  const input = await waitFor(findLocationInput, 20);
+  if (!input) {
+    console.log('[SCOUT] location filter: menu input gone after reset');
+    return { ok: false, error: 'no input' };
+  }
+
+  // Queries to try in order. The full name first; then the leading word, which
+  // covers the case where the typeahead has the place under a different tail
+  // ("Texas" vs "Texas Metropolitan Area") and the case where a multi-word query
+  // returns nothing at all.
+  const queries = [want];
+  const head = want.split(/[,\s]+/)[0];
+  if (head && head.toLowerCase() !== want.toLowerCase()) queries.push(head);
+
+  // Rows before typing: LinkedIn's default suggestions. Taking "the top result"
+  // only makes sense once this list has been replaced by query results.
+  const defaults = locationOptionNames().join('|');
+
+  let option = null;
+  let lastOffered = [];
+  for (const q of queries) {
+    await typeIntoTypeahead(input, q);
+    console.log('[SCOUT] location filter: typed', JSON.stringify(input.value), 'for', q);
+
+    // ~6s for the typeahead to answer: a matching row, or any refresh of the list.
+    await waitFor(() => findLocationOption(want) || findLocationOption(q) ||
+                        locationOptionNames().join('|') !== defaults, 30, 200);
+    lastOffered = locationOptionNames();
+
+    // State-level row preferred; otherwise the top result of a refreshed list.
+    option = findLocationOption(want) || findLocationOption(q) ||
+             (lastOffered.join('|') !== defaults ? locationOptionRows()[0] : null);
+    if (option) break;
+    console.log('[SCOUT] location filter: nothing matched', q, '| offered:', lastOffered);
+  }
+
+  // No relevant suggestion → leave the search alone rather than filtering it to
+  // somewhere the JD never asked for.
+  if (!option) {
+    console.log('[SCOUT] location filter: giving up on', want,
+      '| input value:', JSON.stringify(input.value),
+      '| offered:', lastOffered);
+    return {
+      ok: false,
+      // Carried back to the panel so the reason is visible without devtools.
+      error: input.value ? 'no match for typed text' : 'typing did not register',
+      typed: input.value,
+      offered: Array.isArray(lastOffered) ? lastOffered.slice(0, 6) : [],
+    };
+  }
+  const optionName = (option.getAttribute('aria-label') || '').trim();
+  console.log('[SCOUT] location filter: selecting', optionName);
+  realClick(option);
+
+  // Confirm the row actually ticked; the checkbox behind it is the source of truth.
+  const ticked = await waitFor(
+    () => option.getAttribute('aria-checked') === 'true' ||
+          option.querySelector('input[type="checkbox"]')?.checked,
+    12, 150);
+  if (!ticked) {
+    // Fall back to the row's own label/checkbox before giving up on it.
+    const label = option.querySelector('label');
+    if (label) realClick(label);
+    await new Promise(r => setTimeout(r, 300));
+  }
+  console.log('[SCOUT] location filter: selected =',
+    option.getAttribute('aria-checked') === 'true' || !!ticked);
+
+  // "Show results" is an anchor whose href is the finished faceted search. Wait
+  // for the geo facet to appear in it (LinkedIn rewrites the href as boxes are
+  // ticked), then navigate — that applies the filter without depending on the
+  // SPA's click handler firing.
+  const apply = await waitFor(findApplyControl, 16);
+  if (!apply) {
+    console.log('[SCOUT] location filter: no apply control. Visible menu controls:',
+      [...(findLocationMenu() || document).querySelectorAll('a, button, [role="button"]')]
+        .filter(visible)
+        .map(el => `<${el.tagName.toLowerCase()}> "${(el.innerText || '').replace(/\s+/g, ' ').trim()}" href="${el.getAttribute('href') || ''}"`)
+        .slice(0, 20));
+    return { ok: false, error: 'no apply control' };
+  }
+
+  const facetHref = await waitFor(() => {
+    const href = apply.getAttribute('href') || '';
+    return /geoUrn=/.test(href) ? href : null;
+  }, 16, 200);
+
+  // Navigating from here would tear down this page mid-call and the reply would
+  // never reach the panel. Hand the URL back instead and let the panel drive the
+  // tab, which also lets it wait for the new results properly.
+  if (facetHref) {
+    const url = new URL(facetHref, location.origin).href;
+    console.log('[SCOUT] location filter: faceted URL', url);
+    return { ok: true, location: want, selected: optionName, url };
+  }
+
+  console.log('[SCOUT] location filter: no faceted href — clicking',
+    `"${(apply.innerText || '').trim()}"`);
+  realClick(apply);
+
+  // Confirm it took, then let the new list settle before it's scraped.
+  const applied = await waitFor(locationFilterActive, 24, 250);
+  await new Promise(r => setTimeout(r, applied ? 1500 : 600));
+
+  console.log('[SCOUT] location filter', applied ? 'applied:' : 'NOT confirmed for:', want);
+  return {
+    ok: !!applied,
+    error: applied ? undefined : 'clicked apply but filter never took',
+    location: want, confirmed: !!applied, selected: optionName,
+  };
+}
+
+async function searchLinkedIn(query) {
+  const q = String(query || '').trim();
+  if (!q) return { ok: false, error: 'empty query' };
+
+  const input = await revealSearchInput();
+  if (!input) {
+    // No nav search on this page (overlays, some SPA routes) — go straight to
+    // the results URL so the recruiter still ends up on the right search.
+    location.assign(PEOPLE_SEARCH_URL + encodeURIComponent(q));
+    return { ok: true, via: 'url' };
+  }
+
+  input.focus();
+  setNativeValue(input, q);
+  await new Promise(r => setTimeout(r, 250));   // let the typeahead register the value
+  pressEnter(input);
+
+  // If Enter didn't navigate (typeahead swallowed it), fall back to the URL.
+  await new Promise(r => setTimeout(r, 1200));
+  if (!/\/search\/results\//.test(location.pathname)) {
+    location.assign(PEOPLE_SEARCH_URL + encodeURIComponent(q));
+    return { ok: true, via: 'url-fallback' };
+  }
+
+  const people = await selectPeopleTab(q);
+  return { ok: true, via: 'typeahead', people };
+}
+
+// ── People-results scraping ───────────────────────────────────────────────────
+// Reads the candidate cards off /search/results/people/ to get the roster of who
+// is on the page (name + profile URL, with the card's headline/location/snippet
+// as a display fallback). Scoring never uses this — the panel walks these URLs
+// and reads each real profile.
+
+const PROFILE_SNIPPET_RE = /^(summary|current|past)\s*:/i;
+
+function cardText(el) {
+  return (el.innerText || '').replace(/\s+/g, ' ').trim();
+}
+
+function scrapePeopleResults() {
+  if (!onPeopleResults()) return { ok: false, error: 'not on people results' };
+
+  const seen = new Set();
+  const people = [];
+
+  for (const item of document.querySelectorAll('[role="listitem"]')) {
+    const link = item.querySelector('a[href*="/in/"]');
+    if (!link) continue;                                  // upsell / filler card
+
+    const url  = link.href.split('?')[0];
+    const slug = (url.match(/\/in\/([^/?#]+)/) || [])[1];
+    if (!slug || seen.has(slug)) continue;                // same person twice
+    seen.add(slug);
+
+    // Card paragraphs in DOM order: name(+degree), headline, location, then the
+    // keyword snippet and social proof ("X is a mutual connection", follower
+    // counts) which are not part of the candidate's own text.
+    const texts = [...item.querySelectorAll('p')].map(cardText).filter(Boolean);
+    if (!texts.length) continue;
+
+    const degree = (texts[0].match(/•\s*(1st|2nd|3rd\+?)/i) || [])[1] || '';
+    const name   = texts[0].replace(/\s*•.*$/, '').trim();
+
+    const rest = texts.slice(1).filter(t => !/mutual connection|followers?\b/i.test(t));
+    const snipAt = rest.findIndex(t => PROFILE_SNIPPET_RE.test(t));
+    const meta   = snipAt === -1 ? rest : rest.slice(0, snipAt);
+
+    people.push({
+      name,
+      url,
+      slug,
+      degree,
+      title:    meta[0] || '',
+      location: meta[1] || '',
+      // Snippet is LinkedIn's own keyword-matched excerpt of the profile — the
+      // richest skill signal a search card carries.
+      snippet:  snipAt === -1 ? '' : rest.slice(snipAt).join(' '),
+    });
+  }
+
+  return { ok: true, people, query: new URLSearchParams(location.search).get('keywords') || '' };
+}
+
+// ── Tab-free profile read ─────────────────────────────────────────────────────
+// Fetches a profile's HTML from the search-results page itself — same origin, so
+// the session cookies ride along and no tab is ever opened. What the server
+// renders is the JSON-LD Person block plus the About text; the Skills section is
+// client-rendered and therefore absent, so skills are keyword-scanned out of the
+// headline, About, and role list (same scan the live extraction uses).
+
+function jsonLdPerson(doc) {
+  for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
+    try {
+      const data  = JSON.parse(script.textContent || '');
+      const nodes = data['@graph'] || (Array.isArray(data) ? data : [data]);
+      const person = nodes.find(n => n && n['@type'] === 'Person');
+      if (person) return person;
+    } catch (_) { /* malformed block — try the next one */ }
+  }
+  return null;
+}
+
+// worksFor entries carry the role and, when the server includes them, start/end
+// dates. Rendered into the "2021 - Present" shape calcExperienceYears parses.
+function experienceFromJsonLd(person) {
+  const out = [];
+  for (const job of [].concat(person?.worksFor || [])) {
+    if (!job) continue;
+    const m     = job.member || {};
+    const start = (m.startDate || '').toString().slice(0, 4);
+    const end   = (m.endDate   || '').toString().slice(0, 4);
+    out.push({
+      company:     job.name || '',
+      title:       m.jobTitle || job.description || '',
+      dates:       start ? `${start} - ${end || 'Present'}` : '',
+      description: [job.description, m.description].filter(Boolean).join(' '),
+    });
+  }
+  return out;
+}
+
+async function fetchProfileLite(url) {
+  try {
+    const res = await fetch(url.split('?')[0], {
+      credentials: 'include', headers: { accept: 'text/html' },
+    });
+    if (!res.ok) return null;
+
+    const doc    = new DOMParser().parseFromString(await res.text(), 'text/html');
+    const person = jsonLdPerson(doc);
+    const about  = extractAboutFromDoc(doc) || person?.description || '';
+
+    const jobTitle   = [].concat(person?.jobTitle || [])[0] || '';
+    const experience = experienceFromJsonLd(person);
+    const addr       = person?.address || {};
+    const location   = [addr.addressLocality, addr.addressRegion, addr.addressCountry]
+      .filter(Boolean).join(', ');
+
+    const text = [
+      jobTitle, about,
+      experience.map(e => `${e.title} ${e.company} ${e.description}`).join('\n'),
+    ].filter(Boolean).join('\n');
+
+    const profile = {
+      name:     person?.name || '',
+      title:    jobTitle,
+      location,
+      about,
+      experience,
+      skills:   skillsFromText(text),
+      experience_years: calcExperienceYears(experience) || 0,
+      url,
+    };
+    const clr = detectClearance(text);
+    if (clr) profile.clearance = clr;
+    return profile;
+  } catch (e) {
+    console.log('[SCOUT] fetchProfileLite error:', e.message);
+    return null;
+  }
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getProfile') {
-    runExtraction(!!request.force).then(profile => sendResponse({ profile }));
+    runExtraction(!!request.force, !!request.quiet).then(profile => sendResponse({ profile }));
+  }
+  if (request.action === 'fetchProfileLite') {
+    fetchProfileLite(request.url).then(profile => sendResponse({ profile }));
+  }
+  if (request.action === 'searchJd') {
+    searchLinkedIn(request.query).then(sendResponse);
+  }
+  if (request.action === 'scrapePeopleResults') {
+    sendResponse(scrapePeopleResults());
+  }
+  if (request.action === 'dismissSearchUI') {
+    sendResponse(dismissSearchUI());
+  }
+  if (request.action === 'applyLocationFilter') {
+    applyLocationFilter(request.location).then(sendResponse);
   }
   return true;
 });

@@ -1,5 +1,5 @@
-// SCOUT floating action button — injected on LinkedIn /in/* and Dice profile
-// pages only (scoping comes from the content_scripts matches in manifest.json).
+// SCOUT floating action button — injected on all of LinkedIn and on Dice profile
+// pages (scoping comes from the content_scripts matches in manifest.json).
 // Clicking it opens the side panel. The click is a user gesture, so
 // sidePanel.open() inside the SW's OPEN_PANEL handler succeeds immediately.
 
@@ -8,9 +8,21 @@
   if (document.getElementById(HOST_ID)) return; // guard against double-injection
 
   // Content scripts inject once per full page load, but LinkedIn/Dice are SPAs:
-  // navigating from a profile to the feed keeps the same document, so the button
-  // must show/hide itself on client-side URL changes. A profile page is one whose
-  // path still matches the content_scripts pattern for this host.
+  // route changes keep the same document, so visibility and the label are
+  // re-evaluated on client-side URL changes.
+
+  // The button rides along everywhere on LinkedIn — recruiters open the panel from
+  // search results, the feed, and company pages, not just profiles. On Dice it
+  // stays profile-scoped (no equivalent sourcing flow off the profile page).
+  function shouldShow() {
+    const { hostname, pathname } = window.location;
+    if (hostname.endsWith("linkedin.com")) return true;
+    if (hostname.endsWith("dice.com")) return pathname.startsWith("/employers/talent-search/profile/");
+    return false;
+  }
+
+  // Off a profile there is no candidate to score yet, so the tooltip says what
+  // the click actually does instead of promising a score.
   function onProfilePage() {
     const { hostname, pathname } = window.location;
     if (hostname.endsWith("linkedin.com")) return pathname.startsWith("/in/");
@@ -115,13 +127,16 @@
   }
 
   function sync() {
-    const host = document.getElementById(HOST_ID);
-    if (onProfilePage()) {
-      if (!host) mount();
-      else host.style.display = "";
-    } else if (host) {
-      host.style.display = "none";
+    let host = document.getElementById(HOST_ID);
+    if (!shouldShow()) {
+      if (host) host.style.display = "none";
+      return;
     }
+    if (!host) { mount(); host = document.getElementById(HOST_ID); }
+    else host.style.display = "";
+
+    const tip = host?.shadowRoot?.querySelector(".tip");
+    if (tip) tip.textContent = onProfilePage() ? "Score this candidate" : "Open SCOUT";
   }
 
   // Watch client-side navigation. LinkedIn/Dice are SPAs whose route changes run

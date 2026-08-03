@@ -839,6 +839,14 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
   transition: background 0.12s, color 0.12s;
 }
 .bestfit-close:hover { background: var(--surface-3); color: var(--text); }
+
+/* Sits left of the close button; its caret flips when the list is minimized. */
+.bestfit-toggle { right: 34px; }
+.bestfit-toggle svg { transition: transform 0.15s; }
+.people-results.collapsed .bestfit-toggle svg { transform: rotate(-90deg); }
+.people-results.collapsed .bestfit-list { display: none; }
+/* Header alone — drop the gap the list used to sit under. */
+.people-results.collapsed .bestfit-status { margin-bottom: 0; }
 .bestfit-status {
   font-size: 12px;
   color: var(--text-2);
@@ -856,6 +864,15 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
 }
 .bestfit-row:hover { background: var(--surface-3); }
 .bestfit-row.top { background: color-mix(in srgb, var(--excellent) 10%, transparent); }
+/* Expand/collapse row under the top-5 shortlist. */
+.people-row-more {
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin-top: 2px;
+}
+.people-row-more:hover { color: var(--text); }
 .bestfit-score {
   flex: 0 0 34px;
   text-align: center;
@@ -917,6 +934,86 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
   font-size: 12px;
   line-height: 1.55;
 }
+
+/* Ranked people-search candidates. Shared by both views, so it carries its own
+   padding instead of relying on .body / .empty-state. */
+.people-results {
+  flex: 0 0 auto;
+  padding: 0 14px;
+  text-align: left;
+}
+
+/* Two header buttons here (minimize + close), not one. */
+.people-results .bestfit-status { padding-right: 52px; }
+
+/* Two lines per row (name + headline), so the shared .bestfit-title needs to
+   stack instead of clipping to one line. */
+.people-results .bestfit-title {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.people-row-sub {
+  font-size: 11px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-row-name {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The whole page is listed, not a top-5, so the list scrolls inside the panel
+   instead of pushing the rest of the popup off-screen. */
+.people-results .bestfit-list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.people-row-rank {
+  flex: 0 0 16px;
+  text-align: right;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+/* The row whose card is currently open in the panel. */
+.bestfit-row.active {
+  background: var(--surface-3);
+  box-shadow: inset 2px 0 0 var(--good);
+}
+
+/* Read failed — row still shows who was on the page, just without a score. */
+.bestfit-row.unread { opacity: 0.6; }
+.bestfit-score.unread { color: var(--text-3); background: var(--surface-3); }
+
+/* Sits directly under the JD dropdown, so it reads as that control's action
+   rather than a section of its own. */
+.jd-search-btn {
+  margin: 8px 0 0;
+  padding: 8px;
+  font-size: 12px;
+}
+
+/* JD picker shown on the empty state — lets recruiters run a JD search from any
+   LinkedIn page, before any candidate has been scanned. */
+.jd-search {
+  padding: 0 22px 26px;
+  text-align: left;
+}
+
+.jd-search .jd-section { margin-bottom: 0; }
 
 /* ── Footer ── */
 .footer {

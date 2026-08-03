@@ -886,6 +886,31 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
   return { ...result, source: "local" };
 }
 
+// ── JD location, for the LinkedIn Locations filter ────────────────────────────
+// parseRequirements already extracts the JD's state as an abbreviation. LinkedIn's
+// location typeahead matches on names, not codes ("TX" offers Texas only after a
+// guess), so the abbreviation is expanded back to the full state name before the
+// panel types it in.
+
+const STATE_ABBR_TO_NAME = Object.entries(STATE_NAMES).reduce((map, [name, abbr]) => {
+  // STATE_NAMES holds aliases ("washington dc" → DC) as well as the canonical
+  // name; first entry per abbreviation wins, which is the canonical one.
+  if (!map[abbr]) map[abbr] = name.replace(/\b\w/g, c => c.toUpperCase());
+  return map;
+}, {});
+
+async function jobRequirements(jd_id) {
+  let cached = jobCache.get(jd_id);
+  if (!cached) {
+    const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`, { headers: scoutHeaders() });
+    const job = await r.json();
+    if (job.error) throw new Error(job.error);
+    cached = { title: job.title, requirements: parseRequirements(job.description || "") };
+    jobCache.set(jd_id, cached);
+  }
+  return cached;
+}
+
 // ── Job list fetch + cache ────────────────────────────────────────────────────
 // The /api/scout/jobs call is the slow part of opening the panel (Azure cold
 // start). Cache the mapped list in storage.local so repeat opens populate the
@@ -1132,6 +1157,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const cached = await getCachedJobs().catch(() => null);
         if (cached) { sendResponse({ ok: true, data: cached.jobs }); return; }
         sendResponse({ ok: false, error: `Failed to load jobs: ${e.message}` });
+      }
+    })();
+    return true;
+  }
+
+  // ── GET_JD_LOCATION — the JD's location, for the LinkedIn Locations filter ──
+  if (type === "GET_JD_LOCATION") {
+    (async () => {
+      try {
+        const { requirements } = await jobRequirements(message.payload.jd_id);
+        sendResponse({ ok: true, data: {
+          state:  requirements.jd_state || "",
+          label:  STATE_ABBR_TO_NAME[requirements.jd_state] || requirements.jd_state || "",
+          remote: !!requirements.jd_remote,
+        } });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
       }
     })();
     return true;
