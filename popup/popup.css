@@ -352,6 +352,24 @@ body {
 
 .text-input::placeholder { color: var(--text-3); }
 
+/* Inline validation message under a field — hidden until it has text. */
+.field-error {
+  display: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--poor);
+}
+
+.field-error.show { display: block; }
+
+.input-wrap.invalid {
+  border-color: var(--poor);
+}
+
+.input-wrap.invalid:focus-within {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--poor) 20%, transparent);
+}
+
 /* ── Skeleton loaders ── */
 .skel {
   display: inline-block;
