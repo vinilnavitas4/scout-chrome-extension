@@ -1203,12 +1203,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === "ADD_CANDIDATE") {
     (async () => {
       try {
-        const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime } = payload;
+        const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime, candidate_source } = payload;
         const jazzhr_token = await getJazzhrToken();
+        // Sourcing channel ("LinkedIn" / "Dice.com") — sent top-level as well as on
+        // the candidate; the backend normalizes it into scout_candidates.candidate_source
+        // for the dashboard chip.
         const r = await fetch(`${BASE_URL}/api/scout/candidates`, {
           method:  "POST",
           headers: scoutHeaders(),
-          body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token }),
+          body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token,
+                                    candidate_source: candidate_source || candidate?.source || "" }),
         });
         const text = await r.text();
         let data;

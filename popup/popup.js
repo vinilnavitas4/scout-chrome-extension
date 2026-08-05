@@ -890,6 +890,17 @@ function renderBestFit(list) {
 
 // ── Add to SCOUT → backend API ────────────────────────────────────────────────
 
+// Where the profile was sourced from, in the canonical form the backend stamps
+// onto the JazzHR applicant and the SCOUT dashboard row. Content scripts tag the
+// candidate ('linkedin' / 'dice'); the badge is the fallback for cached profiles
+// scraped before that tag existed.
+function candidateSource() {
+  const raw = (candidate?.source || sourceBadge.textContent || '').trim().toLowerCase();
+  if (raw.startsWith('linkedin')) return 'LinkedIn';
+  if (raw.startsWith('dice'))     return 'Dice.com';
+  return sourceBadge.textContent || '';
+}
+
 addBtn.addEventListener('click', () => {
   if (!candidate) {
     showStatus('Profile not loaded yet — wait and try again.', 'error');
@@ -919,6 +930,7 @@ addBtn.addEventListener('click', () => {
   const payload = {
     job_id: selectedJd,
     job_title: selectedJdTitle || '',
+    candidate_source: candidateSource(),
     resume_b64: rB64 || undefined,
     resume_name: rB64 ? rName : undefined,
     resume_mime: rB64 ? rMime : undefined,
@@ -937,7 +949,7 @@ addBtn.addEventListener('click', () => {
       certifications: candidate.certifications || [],
       endorsements: candidate.endorsements || {},
       openToWork: candidate.openToWork || false,
-      source: candidate.source,
+      source: candidateSource(),
       score: currentScore?.score,
       score_label: currentScore?.label,
       rationale: currentScore?.rationale,
