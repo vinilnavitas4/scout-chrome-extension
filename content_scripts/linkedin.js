@@ -57,9 +57,14 @@ function findSkillsSection() {
   // also matches "/details/skills" and lives in unrelated cards (browsemap etc.).
   const showAll = Array.from(document.querySelectorAll('a[href*="/details/skills"]'))
     .find(a => !/\/endorsers\//.test(a.href) && !/fsd_skill:/.test(a.href));
+  // Last resort: a profile with only a few skills has no "Show all skills" link,
+  // and the heading lookup misses when the section titles with something other
+  // than a plain <h2>Skills</h2>. Locate the section from a skill row itself.
+  const skillRow = document.querySelector('div[componentkey*="profile.skill" i]');
   return findSectionByHeading('Skills')
     || document.querySelector('#skills')?.closest('section')
     || showAll?.closest('section')
+    || skillRow?.closest('section')
     || null;
 }
 
@@ -250,8 +255,49 @@ function findEducationSection() {
   return findSectionByHeading('Education')
     || document.querySelector('#education')?.closest('section')
     || document.querySelector('a[href*="/details/education"]')?.closest('section')
+    // SDUI layout: the card carries its name in the componentkey
+    // ("com.linkedin.sdui.profile.card.ref<urn>Education").
+    || document.querySelector('section[componentkey*="Education" i]')
     || null;
 }
+
+// Return the page to the top of the profile. The profile scrolls inside
+// main#workspace, NOT the window — window.scrollTo(0, 0) alone leaves the page
+// wherever extraction left it, so both have to be reset.
+function scrollToProfileTop() {
+  const mainEl = document.querySelector('main#workspace') || document.querySelector('main');
+  window.scrollTo(0, 0);
+  document.documentElement.scrollTop = 0;
+  if (mainEl) mainEl.scrollTop = 0;
+}
+
+// Scroll the page in steps, PAUSING at each one, until extractFn() returns rows.
+// The cards below Activity are skeletons until their own data request resolves,
+// and they only render while in the viewport — so a retry that never moves the
+// page (findX()?.scrollIntoView() when findX() is null) can never recover them.
+async function sweepForSection(label, extractFn, maxMs = 20000) {
+  const mainEl = document.querySelector('main#workspace') || document.querySelector('main') || document.documentElement;
+  const start = Date.now();
+  let rows = extractFn();
+  let y = 0;
+  while (!rows.length && Date.now() - start < maxMs) {
+    window.scrollTo(0, y);
+    mainEl.scrollTop = y;
+    for (let i = 0; i < 5 && !rows.length; i++) {
+      await new Promise(r => setTimeout(r, 400));
+      rows = extractFn();
+    }
+    y += 800;
+    if (y > Math.max(mainEl.scrollHeight, document.body.scrollHeight)) y = 0;
+  }
+  console.log(`[SCOUT] sweepForSection(${label}): ${rows.length} items after ${Date.now() - start}ms`);
+  return rows;
+}
+
+// Degree wording as it appears in an Education row. Kept in sync with the
+// service worker's EDUCATION_LEVELS so a row this picks as the degree line is
+// one detectEducation() can actually rank.
+const DEGREE_HINT_RE = /\b(?:bachelor|master|doctor(?:ate|al)?|ph\.?\s?d|associate|b\.?\s?tech|m\.?\s?tech|b\.?e\.?|m\.?e\.?|b\.?sc|m\.?sc|b\.?a\b|m\.?a\b|mba|bs\b|ms\b|degree|diploma|engineering|science|arts|commerce|technology)\b/i;
 
 function extractEducation() {
   const education = [];
@@ -259,10 +305,32 @@ function extractEducation() {
   if (!section) return education;
   getSectionItems(section).forEach(item => {
     const editLink = item.querySelector('a[href*="edit/forms/"]');
-    const ps = editLink ? editLink.querySelectorAll('p') : item.querySelectorAll('p');
-    const school = ps[0]?.innerText.trim() || '';
-    const degree = ps[1]?.innerText.trim() || '';
-    const dates = ps[2]?.innerText.trim() || '';
+    const ps = Array.from(editLink ? editLink.querySelectorAll('p') : item.querySelectorAll('p'))
+      .map(p => (p.innerText || '').trim())
+      .filter(Boolean);
+    if (!ps.length) return;
+
+    const school = ps[0];
+    if (/^show all/i.test(school)) return;
+
+    // Positional reads (degree = ps[1], dates = ps[2]) break whenever a row omits
+    // the degree line or leads with grade/activities text — the degree then came
+    // back as a date range and scored as "no degree". Pick each line by content.
+    const rest = ps.slice(1);
+    const dates = rest.find(t => DATE_RE.test(t)) || '';
+    const nonDate = rest.filter(t => t !== dates && !DATE_RE.test(t));
+    // Prefer a line that actually names a degree; else the first descriptive line.
+    let degree = nonDate.find(t => DEGREE_HINT_RE.test(t)) || nonDate[0] || '';
+
+    // Some layouts render the degree in a span/div rather than a <p>. Fall back
+    // to the row's own text so the degree still reaches the scorer.
+    if (!DEGREE_HINT_RE.test(degree)) {
+      const line = (item.innerText || '').split('\n')
+        .map(t => t.trim())
+        .find(t => t && t !== school && !DATE_RE.test(t) && DEGREE_HINT_RE.test(t));
+      if (line) degree = line;
+    }
+
     if (school) education.push({ school, degree, dates });
   });
   return education;
@@ -276,7 +344,8 @@ function extractCertifications() {
   const section = findSectionByHeading('Licenses & certifications')
     || findSectionByHeading('Licenses and certifications')
     || findSectionByHeading('Certifications')
-    || document.querySelector('#licenses_and_certifications')?.closest('section');
+    || document.querySelector('#licenses_and_certifications')?.closest('section')
+    || document.querySelector('section[componentkey*="Certification" i], section[componentkey*="Licenses" i]');
   if (!section) return certs;
   getSectionItems(section).forEach(item => {
     const editLink = item.querySelector('a[href*="edit/forms/"]');
@@ -325,6 +394,45 @@ function calcExperienceYears(experience) {
   return Math.max(end - earliest, 0);
 }
 
+// Read an element's full text, minus the control buttons LinkedIn nests inside
+// role descriptions ("…see more" / "see less"). innerText returns only what is
+// visible, so a collapsed description silently drops everything past the fold —
+// and with it every skill keyword written in the rest of the bullet points.
+function fullText(el) {
+  if (!el) return '';
+  const clone = el.cloneNode(true);
+  clone.querySelectorAll('button, [role="button"], [data-testid="expandable-text-button"]').forEach(b => b.remove());
+  return (clone.textContent || '')
+    .replace(/…\s*see more/gi, ' ')
+    .replace(/\bsee less\b/gi, ' ')
+    .replace(/[ \t ]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Click every "…see more" toggle so collapsed role descriptions and About text
+// are in the DOM before extraction. Safe to call repeatedly — expanded rows no
+// longer carry the button.
+async function expandSeeMore(root = document) {
+  const isMoreBtn = (b) => {
+    const label = ((b.getAttribute('aria-label') || '') + ' ' + (b.innerText || '')).toLowerCase();
+    return label.includes('see more') || label.includes('show more');
+  };
+  let clicked = 0;
+  for (let pass = 0; pass < 3; pass++) {
+    const buttons = Array.from(root.querySelectorAll(
+      '[data-testid="expandable-text-button"], button.inline-show-more-text__button, button, [role="button"]'
+    )).filter(isMoreBtn);
+    if (!buttons.length) break;
+    for (const b of buttons) {
+      try { b.click(); clicked++; } catch (_) { /* detached node */ }
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  if (clicked) console.log(`[SCOUT] expandSeeMore: clicked ${clicked} toggles`);
+  return clicked;
+}
+
 function extractExperience() {
   const experience = [];
   const expSection = findExperienceSection();
@@ -336,7 +444,15 @@ function extractExperience() {
     const headerPs = Array.from(item.querySelectorAll('p')).filter(p => !p.closest('ul'));
     const companyName = headerPs[0]?.innerText.trim() || '';
 
-    const roleItems = item.querySelectorAll('ul > li');
+    // Only li's that look like a POSITION count as roles. A bulleted list inside
+    // a role description is also `ul > li` — treating those as roles splits the
+    // write-up into fragments, and any bullet without a <p> is dropped outright,
+    // losing that description text (and every skill named in it).
+    const roleItems = Array.from(item.querySelectorAll('ul > li')).filter(li => {
+      if (li.querySelector('a:not([componentkey]) p')) return true;   // linked position header
+      const ps = Array.from(li.querySelectorAll('p'));
+      return ps.length > 0 && ps.some(p => dateRe.test((p.innerText || '').trim()));
+    });
     if (roleItems.length > 0) {
       // Multi-role entry: each li = one position
       for (const li of roleItems) {
@@ -353,7 +469,7 @@ function extractExperience() {
           if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
         }
         // Full role text → scorer mines skill keywords from the description.
-        const description = (li.innerText || '').trim();
+        const description = fullText(li);
         if (title) experience.push({ title, company: companyName, dates, description });
       }
     } else {
@@ -365,7 +481,7 @@ function extractExperience() {
       for (const p of ps) {
         if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
       }
-      const description = (item.innerText || '').trim();
+      const description = fullText(item);
       if (title) experience.push({ title, company: companyName, dates, description });
     }
   }
@@ -379,7 +495,7 @@ function extractExperience() {
       // Don't assume ps[2] is the date line — scan for the first date-like <p>.
       const dateP = ps.find(p => DATE_RE.test(p.innerText.trim()));
       const dates = dateP ? dateP.innerText.trim() : (ps[2]?.innerText.trim() || '');
-      const description = (item.innerText || '').trim();
+      const description = fullText(item);
       if (title) experience.push({ title, company, dates, description });
     });
   }
@@ -485,7 +601,10 @@ function extractProfile() {
   if (harvestSkillSection(addSkill)) {
     console.log(`[SCOUT] Skills section found, extracted ${skills.length} from main page`);
   } else {
-    console.warn('[SCOUT] Skills section NOT found on page');
+    // Expected at the bottom of a scroll pass: LinkedIn virtualizes the section
+    // out once it is far off-screen. scrollAndExtract merges the skills it
+    // captured mid-scroll and warns only if the merged list is still empty.
+    console.log('[SCOUT] Skills section not in DOM at read time (may be virtualized out)');
   }
 
   // Skills — Source 2: Experience skill-association links
@@ -581,11 +700,70 @@ function skillsFromText(text) {
   return found;
 }
 
+// Off-list skills stated as an explicit list in a role write-up ("Tech stack:
+// Kotlin, gRPC, Redis"). TEXT_SKILL_KEYWORDS can't enumerate every tool, so
+// without this anything off the allow-list written in a description is lost.
+// Mirrors the service worker's SKILL_CUE_RE / extractListedSkills.
+const LI_SKILL_CUE_RE = /(?:experience (?:with|in|using)|proficien\w* (?:with|in)|knowledge of|familiar\w* with|expertise in|skilled in|hands[\s-]?on (?:experience )?with|working knowledge of|worked (?:with|on)|built (?:with|using)|using|skills?\s*:|technologies?\s*:|tech\s*stack\s*:|stack\s*:)/ig;
+const LI_SKILL_STOPWORDS = new Set([
+  "ability","strong","excellent","good","years","year","experience","knowledge","skills","skill",
+  "written","verbal","communication","team","teams","etc","including","environment","environments",
+  "related","equivalent","degree","plus","preferred","required","work","working","other","various",
+  "such","as","is","are","be","you","your","our","we","will","must","should","have","proven","a","an",
+  "the","and","or","with","in","of","to","using","for","on","at","but","not","this","that","it","by",
+]);
+function listedSkillsFromText(text) {
+  if (!text) return [];
+  const out = [];
+  let m;
+  LI_SKILL_CUE_RE.lastIndex = 0;
+  while ((m = LI_SKILL_CUE_RE.exec(text)) && out.length < 25) {
+    const from = m.index + m[0].length;
+    let clause = text.slice(from, from + 140);
+    const stop = clause.search(/[.;\n]/);        // end the list at the first sentence/line break
+    if (stop !== -1) clause = clause.slice(0, stop);
+    for (let phrase of clause.split(/[,/|]|\band\b/i)) {
+      phrase = phrase.replace(/^[\s\-*•]+/, "").replace(/\s+/g, " ").trim();
+      if (phrase.length < 2 || phrase.length > 40) continue;
+      const toks = phrase.toLowerCase().split(/\s+/);
+      if (toks.length > 3) continue;                             // skills are short phrases
+      if (toks.some(t => LI_SKILL_STOPWORDS.has(t))) continue;   // any boilerplate word → prose, not a list
+      if (!/[a-z0-9]/i.test(phrase)) continue;
+      if (!out.some(o => o.toLowerCase() === phrase.toLowerCase())) out.push(phrase);
+    }
+  }
+  return out;
+}
+
 // Clicks "Show all skills" → extracts from the modal that renders in-place in the live DOM.
 // The detail page is client-rendered (no componentkeys in fetched HTML), so fetch won't work.
 async function expandAndExtractAllSkills(profile) {
-  const skillSection = findSkillsSection();
-  if (!skillSection) return;
+  // The section may be absent because it hasn't rendered yet (lazy card request)
+  // or because it was virtualized out after the scroll pass returned to the top.
+  // Poll while scrolling down to bring it back / let it render.
+  const skillSection = await (async () => {
+    const mainEl = document.querySelector('main#workspace') || document.querySelector('main') || document.documentElement;
+    const start = Date.now();
+    let y = 0;
+    while (Date.now() - start < 8000) {
+      const sec = findSkillsSection();
+      if (sec) {
+        sec.scrollIntoView({ block: 'center' });
+        await new Promise(r => setTimeout(r, 300));
+        return findSkillsSection() || sec;
+      }
+      y += 800;
+      if (y > Math.max(mainEl.scrollHeight, document.body.scrollHeight)) y = 0;
+      window.scrollTo(0, y);
+      mainEl.scrollTop = y;
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return null;
+  })();
+  if (!skillSection) {
+    console.warn('[SCOUT] Skills section never rendered — skipping "Show all skills"');
+    return;
+  }
 
   // Each skill row also links to its endorsers at
   // ".../details/skills/urn:li:fsd_skill:(...,N)/endorsers/", which ALSO matches
@@ -1006,6 +1184,34 @@ function scrollAndExtract() {
       if (certs.length > capturedCerts.length) capturedCerts = certs;
     }
 
+    // The scroll pass covers a ~4000px profile in ~2s, but LinkedIn renders the
+    // Skills/Education/Certifications cards from a separate lazy request that can
+    // land several seconds later — the pass then finishes before those sections
+    // exist and captures nothing. When the pass ends with no skills, sweep the
+    // page again (slower) until they show up or maxMs elapses.
+    // The cards below Activity are placeholder skeletons until their data request
+    // resolves, which on this profile layout can take tens of seconds. Racing past
+    // them at 400ms/step captures nothing. Park at successive viewport positions
+    // (the card must stay in view to render) and poll until skills appear.
+    async function retrySweepForSkills(maxMs = 20000) {
+      const start = Date.now();
+      let y = 0;
+      while (Date.now() - start < maxMs && !capturedSkills.length) {
+        window.scrollTo(0, y);
+        mainEl.scrollTop = y;
+        // Hold this position and poll — the card renders in place once its data lands.
+        for (let i = 0; i < 5 && !capturedSkills.length; i++) {
+          await new Promise(r => setTimeout(r, 400));
+          captureSkills();
+          captureSections();
+          if (!capturedAbout) capturedAbout = extractAbout();
+        }
+        y += scrollStep;
+        if (y > Math.max(mainEl.scrollHeight, document.body.scrollHeight)) y = 0;
+      }
+      console.log(`[SCOUT] retrySweepForSkills: ${capturedSkills.length} skills after ${Date.now() - start}ms`);
+    }
+
     function step() {
       pos += scrollStep;
       window.scrollTo(0, pos);
@@ -1013,7 +1219,7 @@ function scrollAndExtract() {
 
       const maxScroll = Math.max(document.body.scrollHeight, mainEl.scrollHeight, document.documentElement.scrollHeight);
 
-      setTimeout(() => {
+      setTimeout(async () => {
         if (!capturedAbout) {
           capturedAbout = extractAbout();
           if (capturedAbout) console.log('[SCOUT] About captured at scroll pos', pos);
@@ -1023,6 +1229,7 @@ function scrollAndExtract() {
         if (pos < maxScroll) {
           step();
         } else {
+          if (!capturedSkills.length) await retrySweepForSkills();
           const profile = extractProfile();
           if (capturedAbout) profile.about = capturedAbout;
           // Merge skills captured mid-scroll (section may be virtualized out now).
@@ -1030,6 +1237,9 @@ function scrollAndExtract() {
             const have = new Set(profile.skills.map(s => s.toLowerCase()));
             capturedSkills.forEach(s => { if (!have.has(s.toLowerCase())) profile.skills.push(s); });
             console.log(`[SCOUT] merged ${capturedSkills.length} scroll-captured skills; total ${profile.skills.length}`);
+          }
+          if (!profile.skills.length) {
+            console.warn('[SCOUT] No skills extracted from page (section never seen during scroll)');
           }
           // Restore topcard fields lost to the topcard unloading mid-scroll.
           if (!profile.name && capturedTopcard.name) profile.name = capturedTopcard.name;
@@ -1160,16 +1370,16 @@ function runExtraction(force = false) {
     // empty, scroll its section into view and poll until items stream in.
     if (!profile.education || profile.education.length === 0) {
       console.log('[SCOUT] education empty after scroll — waiting for lazy render');
-      let edu = extractEducation();
-      const start = Date.now();
-      while (edu.length === 0 && Date.now() - start < 5000) {
-        findEducationSection()?.scrollIntoView({ block: 'center' });
-        await new Promise(r => setTimeout(r, 300));
-        edu = extractEducation();
-      }
+      const edu = await sweepForSection('education', extractEducation);
       if (edu.length > 0) profile.education = edu;
-      console.log(`[SCOUT] education retry: ${edu.length} items after ${Date.now() - start}ms`);
-      window.scrollTo(0, 0);
+      scrollToProfileTop();
+    }
+
+    // Certifications feed the §4 required-cert gate and lose the same race.
+    if (!profile.certifications || profile.certifications.length === 0) {
+      const certs = await sweepForSection('certifications', extractCertifications, 8000);
+      if (certs.length > 0) profile.certifications = certs;
+      scrollToProfileTop();
     }
 
     if (!profile.about) {
@@ -1178,16 +1388,61 @@ function runExtraction(force = false) {
 
     await expandAndExtractAllSkills(profile);
 
+    // Expand every collapsed "…see more" description, then re-read Experience:
+    // a collapsed role only exposes its first ~2 lines, so mining ran over
+    // truncated text and missed the skills named further down each write-up.
+    // Scoped to these two sections: a page-wide sweep would also hit the
+    // "Show more" under "More profiles for you" and similar unrelated controls.
+    const expSection = findExperienceSection();
+    const aboutSection = findSectionByHeading('About');
+    let expanded = 0;
+    for (const root of [expSection, aboutSection].filter(Boolean)) {
+      root.scrollIntoView({ block: 'center' });
+      await new Promise(r => setTimeout(r, 300));
+      expanded += await expandSeeMore(root);
+    }
+    if (expanded) {
+      const reExp = extractExperience();
+      const oldLen = (profile.experience || []).reduce((n, e) => n + (e.description || '').length, 0);
+      const newLen = reExp.reduce((n, e) => n + (e.description || '').length, 0);
+      if (reExp.length >= (profile.experience || []).length && newLen > oldLen) {
+        profile.experience = reExp;
+        profile.experience_years = calcExperienceYears(reExp);
+        console.log(`[SCOUT] re-read experience after expanding: ${oldLen} → ${newLen} chars of description`);
+      }
+      const fullerAbout = extractAbout();
+      if (fullerAbout && fullerAbout.length > (profile.about || '').length) profile.about = fullerAbout;
+    }
+
     // Mine skills from every experience description + About — the Skills section
     // is often thin, but the real stack is written up in the role bullets. Merge
     // the keyword hits into the DOM skills, de-duped case-insensitively.
-    const expText = (profile.experience || []).map(e => e && e.description).filter(Boolean).join("\n");
-    const textSkills = skillsFromText([expText, profile.about].filter(Boolean).join("\n"));
+    const expText = (profile.experience || [])
+      .map(e => e && [e.title, e.company, e.description].filter(Boolean).join(" "))
+      .filter(Boolean).join("\n");
+
+    // Safety net: mine the Experience SECTION's own text too, not only the parsed
+    // per-role descriptions. Any layout quirk that makes a role parse thin (or
+    // drop out entirely) would otherwise silently hide every skill written in
+    // that write-up; the raw section text is immune to how rows are split.
+    const sectionText = fullText(findExperienceSection());
+    const minedFrom = [expText, sectionText, profile.about].filter(Boolean).join("\n");
+    const textSkills = skillsFromText(minedFrom);
     if (textSkills.length) {
       profile.skills = Array.isArray(profile.skills) ? profile.skills : [];
       const seen = new Set(profile.skills.map(s => String(s).toLowerCase()));
       for (const s of textSkills) if (!seen.has(s.toLowerCase())) { profile.skills.push(s); seen.add(s.toLowerCase()); }
-      console.log(`[SCOUT] +${textSkills.length} skills mined from experience/about`);
+      console.log(`[SCOUT] +${textSkills.length} skills mined from experience/about ` +
+        `(${expText.length} chars parsed roles, ${sectionText.length} chars raw section)`);
+    }
+
+    // Off-list skills named in explicit lists inside the role write-ups.
+    const listed = listedSkillsFromText(minedFrom);
+    if (listed.length) {
+      const seen2 = new Set((profile.skills || []).map(s => String(s).toLowerCase()));
+      let added = 0;
+      for (const s of listed) if (!seen2.has(s.toLowerCase())) { profile.skills.push(s); seen2.add(s.toLowerCase()); added++; }
+      console.log(`[SCOUT] +${added} off-list skills mined from description lists`);
     }
 
     // Recompute clearance now that About + the full skills list are populated.
@@ -1203,6 +1458,10 @@ function runExtraction(force = false) {
       (profile.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
     ].filter(Boolean).join("\n"));
     if (clr) profile.clearance = clr;
+
+    // Extraction scrolled the page all over; leave the user at the top of the
+    // profile where they started, not parked mid-page.
+    scrollToProfileTop();
 
     console.log('[SCOUT] LinkedIn parsed:', profile, '| clearance:', profile.clearance || 'None');
     chrome.storage.session.set({ scout_candidate: profile });
