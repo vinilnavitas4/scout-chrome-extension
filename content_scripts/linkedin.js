@@ -121,7 +121,15 @@ function harvestSkillSection(addSkill) {
 // finder so the section is located even when the heading text/structure differs
 // across LinkedIn layouts (the cause of experience missing on some devices).
 function findExperienceSection() {
+  // componentkey anchors from the current layout: the section itself carries
+  // "…ExperienceTopLevelSection" and the card opens with a
+  // "profile_experience_top_anchor_<slug>" div. Both survive a heading that is
+  // not a plain <h2>Experience</h2>, which the heading lookup depends on.
+  const ckSection = document.querySelector('section[componentkey*="ExperienceTopLevelSection" i]');
+  const ckAnchor = document.querySelector('[componentkey*="profile_experience_top_anchor" i]');
   return findSectionByHeading('Experience')
+    || ckSection
+    || ckAnchor?.closest('section')
     || document.querySelector('#experience')?.closest('section')
     || document.querySelector('a[href*="/details/experience"]')?.closest('section')
     || null;
@@ -364,7 +372,80 @@ function extractCertifications() {
   return certs;
 }
 
+// Employment types LinkedIn renders in the role subtitle ("Company · Full-time").
+// Only whole-segment matches count as a type — a title like "Contract Manager"
+// or "Contracts Specialist" must not be read as a contract role.
+const EMPLOYMENT_TYPES = [
+  'Full-time', 'Part-time', 'Self-employed', 'Freelance', 'Contract',
+  'Internship', 'Apprenticeship', 'Seasonal', 'Temporary', 'Trainee', 'Volunteer'
+];
+const EMPLOYMENT_TYPE_EXACT_RE =
+  /^(?:full[\s-]?time|part[\s-]?time|self[\s-]?employed|freelance|contract|internship|apprenticeship|seasonal|temporary|trainee|volunteer)$/i;
+// Everything except Full-time is excluded from the years total.
+const NON_FULLTIME_RE =
+  /^(?:part[\s-]?time|self[\s-]?employed|freelance|contract|internship|apprenticeship|seasonal|temporary|trainee|volunteer)$/i;
+
+// Read the employment type off a role's <p> lines. LinkedIn puts it in the
+// "·"-separated subtitle, so each segment is tested on its own and must BE the
+// type, not merely contain it. Returns '' when the profile omits the field —
+// most do, and those roles still count toward the years total.
+function roleEmploymentType(ps) {
+  for (const p of ps) {
+    const text = (p.innerText || '').trim();
+    if (!text) continue;
+    // The type is the LAST segment of the subtitle — "Freelance · Self-employed"
+    // names the company first, so taking the first match would report "Freelance".
+    let found = '';
+    for (const seg of text.split('·')) {
+      const s = seg.trim();
+      if (EMPLOYMENT_TYPE_EXACT_RE.test(s)) found = s;
+    }
+    if (found) {
+      // Normalize casing/spacing to the canonical LinkedIn label.
+      const key = found.toLowerCase().replace(/\s/g, '-');
+      return EMPLOYMENT_TYPES.find(t => t.toLowerCase() === key) || found;
+    }
+  }
+  return '';
+}
+
+// A role counts as full-time when it is tagged Full-time OR carries no tag at
+// all. Internships, part-time, contract, freelance and self-employed roles are
+// excluded from the years total.
+function isFullTimeRole(exp) {
+  const t = (exp && exp.employmentType || '').trim();
+  return !t || !NON_FULLTIME_RE.test(t.replace(/\s/g, '-'));
+}
+
+// Pick the date/duration line for a role. The <p> lines come first; when a
+// layout renders the dates in a span/div instead, fall back to scanning the
+// role's own text lines — otherwise every role parses with dates: '' and the
+// years total silently comes back null (blank "yrs exp" in the panel).
+function findDatesText(el, ps) {
+  for (const p of ps) {
+    const t = (p.innerText || '').trim();
+    if (DATE_RE.test(t)) return t;
+  }
+  for (const line of fullText(el).split('\n')) {
+    const t = line.trim();
+    if (t && t.length < 120 && DATE_RE.test(t)) return t;
+  }
+  return '';
+}
+
 function calcExperienceYears(experience) {
+  // Full-time only — internships/part-time/contract/freelance/self-employed do
+  // not add to the total. Roles LinkedIn shows without a type still count.
+  const all = experience || [];
+  const fullTime = all.filter(isFullTimeRole);
+  const skipped = all.filter(e => !isFullTimeRole(e));
+  if (skipped.length) {
+    console.log(`[SCOUT] experience_years: skipped ${skipped.length} non-full-time role(s): ` +
+      skipped.map(e => `${e.title} (${e.employmentType})`).join(', '));
+  }
+  if (all.length && !fullTime.length) return 0;   // e.g. internships only
+  experience = fullTime;
+
   // Strategy 1: sum "X yrs Y mos" duration strings from LinkedIn
   let totalMonths = 0;
   for (const exp of experience) {
@@ -464,25 +545,22 @@ function extractExperience() {
           ? Array.from(roleLink.querySelectorAll('p'))
           : Array.from(li.querySelectorAll('p'));
         const title = ps[0]?.innerText.trim() || '';
-        let dates = '';
-        for (const p of ps) {
-          if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
-        }
+        // The type lives on the li's own subtitle, not inside the role link.
+        const employmentType = roleEmploymentType(Array.from(li.querySelectorAll('p')));
+        const dates = findDatesText(li, ps);
         // Full role text → scorer mines skill keywords from the description.
         const description = fullText(li);
-        if (title) experience.push({ title, company: companyName, dates, description });
+        if (title) experience.push({ title, company: companyName, dates, description, employmentType });
       }
     } else {
       // Single-role entry: company header IS the role
       const singleLink = item.querySelector('a:not([componentkey])');
       const ps = singleLink ? Array.from(singleLink.querySelectorAll('p')) : headerPs;
       const title = ps[0]?.innerText.trim() || '';
-      let dates = '';
-      for (const p of ps) {
-        if (dateRe.test(p.innerText.trim())) { dates = p.innerText.trim(); break; }
-      }
+      const employmentType = roleEmploymentType(headerPs.length ? headerPs : ps);
+      const dates = findDatesText(item, ps);
       const description = fullText(item);
-      if (title) experience.push({ title, company: companyName, dates, description });
+      if (title) experience.push({ title, company: companyName, dates, description, employmentType });
     }
   }
 
@@ -491,12 +569,15 @@ function extractExperience() {
     getSectionItems(expSection).forEach(item => {
       const ps = Array.from(item.querySelectorAll('p'));
       const title = ps[0]?.innerText.trim() || '';
-      const company = ps[1]?.innerText.trim() || '';
+      const employmentType = roleEmploymentType(ps);
+      // The subtitle is "Company · Full-time" — keep the company name only.
+      const company = (ps[1]?.innerText.trim() || '')
+        .split('·').map(s => s.trim()).filter(s => s && !EMPLOYMENT_TYPE_EXACT_RE.test(s)).join(' · ');
       // Don't assume ps[2] is the date line — scan for the first date-like <p>.
       const dateP = ps.find(p => DATE_RE.test(p.innerText.trim()));
       const dates = dateP ? dateP.innerText.trim() : (ps[2]?.innerText.trim() || '');
       const description = fullText(item);
-      if (title) experience.push({ title, company, dates, description });
+      if (title) experience.push({ title, company, dates, description, employmentType });
     });
   }
   return experience;
@@ -508,23 +589,18 @@ function extractExperience() {
 // the section into view to trigger its lazy load, and returns as soon as items
 // appear. Same-account/same-browser profiles only differ by this timing — this
 // is why experience was missing on some machines but not others.
-async function extractExperienceWithWait(maxMs = 6000) {
-  let experience = extractExperience();
+// maxMs is 10s, not 6s: on a live profile the Experience card was still absent
+// ~2s after a full scroll pass and only streamed in afterwards.
+async function extractExperienceWithWait(maxMs = 20000) {
+  const experience = extractExperience();
   if (experience.length > 0) return experience;
 
-  const section = findExperienceSection();
-  if (section) section.scrollIntoView({ block: 'center' });
-
-  const start = Date.now();
-  while (Date.now() - start < maxMs) {
-    await new Promise(r => setTimeout(r, 300));
-    experience = extractExperience();
-    if (experience.length > 0) break;
-    const sec = findExperienceSection();
-    if (sec) sec.scrollIntoView({ block: 'center' });
-  }
-  console.log(`[SCOUT] extractExperienceWithWait: ${experience.length} items after ${Date.now() - start}ms`);
-  return experience;
+  // Nothing found: the section is virtualized OUT at the bottom of the scroll
+  // pass — no heading, no componentkey, no anchor anywhere in the DOM. Polling
+  // in place cannot recover it (there is no element to scroll back into view),
+  // so sweep the page from the top like education/certifications do: the card
+  // re-renders only once its position is on screen again.
+  return await sweepForSection('experience', extractExperience, maxMs);
 }
 
 // Topcard fields (name / headline / location). Separate from extractProfile so
@@ -1364,7 +1440,16 @@ function runExtraction(force = false) {
         profile.experience = exp;
         profile.experience_years = calcExperienceYears(exp);
       }
+      scrollToProfileTop();   // the sweep leaves the page mid-scroll
     }
+
+    // A blank "yrs exp" chip in the panel means experience_years came back null.
+    // Dump what each role parsed to so the cause is visible: no roles at all
+    // (section never found / never rendered) vs roles with an empty dates line.
+    console.log(`[SCOUT] experience_years = ${profile.experience_years} from ` +
+      `${(profile.experience || []).length} role(s):`,
+      (profile.experience || []).map(e =>
+        `${e.title} | dates="${e.dates}" | type="${e.employmentType || '-'}"`));
 
     // Education loses the same lazy-render race on slower machines. If still
     // empty, scroll its section into view and poll until items stream in.

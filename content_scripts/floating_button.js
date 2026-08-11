@@ -18,15 +18,41 @@
     return false;
   }
 
+  // Reloading/updating the extension orphans every content script already on the
+  // page: their chrome.* handles are dead and any call throws "Extension context
+  // invalidated". chrome.runtime.id goes undefined first, so test that and stop.
+  function extensionAlive() {
+    try { return !!(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+  }
+
+  // Orphaned script: pull the button (it can't talk to the SW anymore) and stop
+  // the timers so the console isn't flooded. A page reload injects a fresh copy.
+  let pollId = null;
+  let observer = null;
+  function teardown() {
+    if (pollId) { clearInterval(pollId); pollId = null; }
+    if (observer) { observer.disconnect(); observer = null; }
+    document.getElementById(HOST_ID)?.remove();
+  }
+
+  function send(msg) {
+    if (!extensionAlive()) { teardown(); return false; }
+    try {
+      chrome.runtime.sendMessage(msg, () => void chrome.runtime.lastError);
+      return true;
+    } catch (_) {
+      teardown();   // context died between the check and the call
+      return false;
+    }
+  }
+
   function openPanel() {
     // Open the panel (needs this click gesture), then nudge it to rescan. If the
     // panel was already open on an SPA-navigated profile, no tabs.onUpdated fired,
     // so it would otherwise keep showing the previous/empty state. The rescan msg
     // is a no-op when the panel is closed (it scans itself on open).
-    chrome.runtime.sendMessage({ type: "OPEN_PANEL" }, () => void chrome.runtime.lastError);
-    setTimeout(() => {
-      chrome.runtime.sendMessage({ type: "SCOUT_RESCAN" }, () => void chrome.runtime.lastError);
-    }, 400);
+    if (!send({ type: "OPEN_PANEL" })) return;
+    setTimeout(() => send({ type: "SCOUT_RESCAN" }), 400);
   }
 
   function mount() {
@@ -134,11 +160,13 @@
   function watchUrl() {
     let last = window.location.href;
     const fire = () => {
+      if (!extensionAlive()) { teardown(); return; }
       if (window.location.href !== last) { last = window.location.href; sync(); }
     };
     window.addEventListener("popstate", fire);
-    setInterval(fire, 300);
-    new MutationObserver(fire).observe(document.documentElement, { childList: true, subtree: true });
+    pollId = setInterval(fire, 300);
+    observer = new MutationObserver(fire);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   function start() { sync(); watchUrl(); }
