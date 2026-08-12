@@ -373,6 +373,74 @@ function expDates(h) {
   return start ? `${start} - ${end}` : '';
 }
 
+// ── Years of experience — full-time only ──────────────────────────────────────
+// Dice reports its own yearsOfExperienceExtracted, which counts internships and
+// part-time work. Recompute from the work history instead, dropping roles whose
+// title marks them as non-full-time — Dice carries no employment-type field, so
+// the title is the only signal there is.
+const NON_FULLTIME_TITLE_RE =
+  /\b(?:intern|interns|internship|co[\s-]?op|trainee|apprentice|apprenticeship|volunteer|part[\s-]?time|student\s+(?:assistant|worker)|summer\s+(?:analyst|associate))\b/i;
+
+const MONTHS = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+
+// "7/2020", "Jul 2020", "July 2020", "2020" → absolute month number (year*12+m).
+// Returns null when no year is present.
+function monthIndex(s) {
+  const t = (s || '').trim();
+  if (!t) return null;
+  let m = t.match(/^(\d{1,2})\s*[\/\-.]\s*((?:19|20)\d{2})$/);        // 7/2020
+  if (m) return parseInt(m[2], 10) * 12 + Math.min(Math.max(parseInt(m[1], 10), 1), 12) - 1;
+  m = t.match(/^((?:19|20)\d{2})\s*[\/\-.]\s*(\d{1,2})$/);            // 2020-07
+  if (m) return parseInt(m[1], 10) * 12 + Math.min(Math.max(parseInt(m[2], 10), 1), 12) - 1;
+  m = t.match(/([A-Za-z]{3,9})\s+((?:19|20)\d{2})/);                  // Jul 2020
+  if (m) {
+    const mi = MONTHS.indexOf(m[1].slice(0, 3).toLowerCase());
+    if (mi >= 0) return parseInt(m[2], 10) * 12 + mi;
+  }
+  m = t.match(/(?:19|20)\d{2}/);                                      // bare year
+  if (m) return parseInt(m[0], 10) * 12;
+  return null;
+}
+
+// "7/2020 - No end date" / "Jul 2020 - Present" → [startMonth, endMonth].
+const OPEN_END_RE = /present|no end date|current|now|ongoing/i;
+function parseRange(dates) {
+  const t = (dates || '').trim();
+  if (!t) return null;
+  const parts = t.split(/\s*(?:-|–|—|to)\s*/i).filter(Boolean);
+  const start = monthIndex(parts[0]);
+  if (start == null) return null;
+  const now = new Date();
+  const nowIdx = now.getFullYear() * 12 + now.getMonth();
+  const endRaw = parts.slice(1).join(' ');
+  const end = !endRaw || OPEN_END_RE.test(endRaw) ? nowIdx : (monthIndex(endRaw) ?? nowIdx);
+  return end < start ? null : [start, end];
+}
+
+// Sum full-time months as a UNION of date ranges — overlapping/concurrent roles
+// must not double-count. Returns null when nothing parses, so the caller can
+// keep Dice's own number rather than reporting a bogus 0.
+function calcExperienceYears(experience) {
+  const all = experience || [];
+  const fullTime = all.filter(e => !NON_FULLTIME_TITLE_RE.test(e && e.title || ''));
+  const skipped = all.filter(e => NON_FULLTIME_TITLE_RE.test(e && e.title || ''));
+  if (skipped.length) {
+    console.log(`[SCOUT] experience_years: skipped ${skipped.length} non-full-time role(s): ` +
+      skipped.map(e => e.title).join(', '));
+  }
+  const ranges = fullTime.map(e => parseRange(e.dates)).filter(Boolean).sort((a, b) => a[0] - b[0]);
+  if (!ranges.length) return all.length && !fullTime.length ? 0 : null;
+
+  let months = 0, [curStart, curEnd] = ranges[0];
+  for (const [s, e] of ranges.slice(1)) {
+    if (s <= curEnd) { curEnd = Math.max(curEnd, e); continue; }   // overlap → merge
+    months += curEnd - curStart;
+    [curStart, curEnd] = [s, e];
+  }
+  months += curEnd - curStart;
+  return Math.round(months / 12 * 10) / 10;
+}
+
 // ── Merge DOM + JSON into the LinkedIn-compatible profile shape ────────────────
 
 function extractProfile(resumeOverride) {
@@ -418,6 +486,15 @@ function extractProfile(resumeOverride) {
     if (!phone) phone = (json.phoneSources || []).map(p => p && p.v).find(Boolean) || '';
     // Email comes from the résumé only — Dice's emailSources is a masked
     // @mail.dice.com relay, not the candidate's real address.
+  }
+
+  // Full-time-only years, computed from the work history (JSON history when it
+  // was present, DOM otherwise). Dice's own number counts internships and
+  // part-time roles, so it is only kept when no history date parses.
+  const computedYears = calcExperienceYears(experience);
+  if (computedYears != null) {
+    console.log(`[SCOUT] experience_years: ${computedYears} full-time (Dice reported ${experience_years})`);
+    experience_years = computedYears;
   }
 
   // Résumé skills win when a résumé is present — they're the real signal vs

@@ -1,4 +1,4 @@
-const BASE_URL = "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
+const BASE_URL = "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
 // Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
 // Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
@@ -7,6 +7,22 @@ const SCOUT_KEY = "scout_a5ThvEKUjRbZmlpDyKQOF9WcKb2fiEl8Vat-8f_3Bzg";
 // Standard JSON headers + Scout key for all backend calls.
 function scoutHeaders(extra) {
   return { "Content-Type": "application/json", "X-Scout-Key": SCOUT_KEY, ...(extra || {}) };
+}
+
+// GET a Scout JSON endpoint. When the host answers with an HTML page instead —
+// an Azure error page, an auth redirect, or a deploy where the Scout routes are
+// missing — r.json() throws the useless "Unexpected token '<'". Report the
+// status and path so the panel says what actually broke.
+async function scoutGetJson(path) {
+  const r    = await fetch(`${BASE_URL}${path}`, { headers: scoutHeaders() });
+  const text = await r.text();
+  if (!r.ok) {
+    throw new Error(r.status === 404
+      ? `Scout API not found at ${path} (HTTP 404) — backend not deployed`
+      : `Backend HTTP ${r.status} at ${path}`);
+  }
+  try { return JSON.parse(text); }
+  catch (_) { throw new Error(`Backend returned non-JSON at ${path}: ${text.slice(0, 80)}`); }
 }
 
 // Open the side panel when the toolbar icon is clicked.
@@ -276,6 +292,58 @@ function resumeEducationSection(text) {
   const rest = text.slice(pick.index + pick[0].length);
   const next = rest.search(RESUME_NEXT_SECTION_RE);
   return (next >= 0 ? rest.slice(0, next) : rest).trim();
+}
+
+// ── Résumé Skills-section reader ──────────────────────────────────────────────
+// findKeywords only ever returns the fixed TOOL_KEYWORDS whitelist, so when a
+// résumé replaces the profile's skills every technology outside that list
+// (Blazor, RabbitMQ, Entity Framework, SSIS…) was silently dropped. Read the
+// résumé's own Skills section verbatim as well and union the two.
+const RESUME_SKILLS_HEADING_RE =
+  /\b(?:technical\s+skills|technical\s+expertise|technical\s+proficienc(?:y|ies)|core\s+competenc(?:y|ies)|skills\s*(?:&|and)\s*(?:tools|technologies|abilities)|key\s+skills|skills|technologies|tech\s+stack)\b\s*:?/gi;
+const RESUME_SKILLS_NEXT_RE =
+  /\b(?:(?:work|professional|employment)\s+(?:experience|history)|experience|education|academic|projects?|certifications?|licen[cs]es?|awards?|achievements?|publications?|interests|hobbies|references?|declaration|summary|objective)\b\s*:?/i;
+
+// Separators inside a skills block: commas, pipes, slashes-with-space, bullets,
+// semicolons, newlines. A bare "/" is NOT a separator — "CI/CD" is one skill.
+const SKILL_SPLIT_RE = /[,;|•·▪●•\n\r\t]+|\s+[-–—]\s+/;
+
+function resumeListedSkills(text) {
+  if (!text) return [];
+  const matches = [...text.matchAll(RESUME_SKILLS_HEADING_RE)];
+  if (matches.length === 0) return [];
+  // Same heading-confidence rule as resumeEducationSection: prefer an ALL-CAPS
+  // or line-start heading over a prose mention ("strong communication skills").
+  const pick =
+    matches.find(m => m[0] === m[0].toUpperCase()) ||
+    matches.find(m => m.index === 0 || text[m.index - 1] === "\n") ||
+    matches[0];
+  const rest    = text.slice(pick.index + pick[0].length);
+  const nextIdx = rest.search(RESUME_SKILLS_NEXT_RE);
+  const section = (nextIdx >= 0 ? rest.slice(0, nextIdx) : rest).trim();
+  if (!section) return [];
+
+  const out = [];
+  for (let raw of section.split(SKILL_SPLIT_RE)) {
+    // Drop a leading category label ("Languages: Java Python" → "Java Python").
+    raw = raw.replace(/^[^:]{0,40}:\s*/, "").trim();
+    // Strip list punctuation and trailing "(5 yrs)" style annotations.
+    raw = raw.replace(/\(.*?\)/g, " ").replace(/^[^A-Za-z0-9+#.]+|[^A-Za-z0-9+#)]+$/g, "").trim();
+    if (!isPlausibleSkill(raw)) continue;
+    if (!out.some(s => s.toLowerCase() === raw.toLowerCase())) out.push(raw);
+    if (out.length >= 80) break;          // runaway section guard
+  }
+  return out;
+}
+
+// A skills list holds short noun phrases, not sentences. Reject anything that
+// reads like prose so résumé narrative can't leak into the skill set.
+function isPlausibleSkill(s) {
+  if (!s || s.length < 2 || s.length > 40) return false;
+  if (!/[A-Za-z]/.test(s)) return false;                     // "5+" etc.
+  if (s.split(/\s+/).length > 4) return false;               // sentence fragment
+  if (/\b(?:and|with|the|for|of|in|to|using|experience|years?)\b/i.test(s)) return false;
+  return true;
 }
 
 // ── Certification signals ─────────────────────────────────────────────────────
@@ -580,8 +648,13 @@ function makeTextMatcher(rawText) {
   const text = " " + normalizeSkill(rawText) + " ";
   if (!text.trim()) return () => false;
   const escWord = w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const phraseRe = (s) =>
-    new RegExp(`(?:^|[^A-Za-z0-9])${s.split(/\s+/).map(escWord).join("\\s+")}(?:$|[^A-Za-z0-9+#])`);
+  const phraseRe = (s) => {
+    // A skill that starts with punctuation (".NET") carries its own left
+    // boundary — demanding a non-alphanumeric char before it missed every
+    // "ASP.NET" / "VB.NET" mention in a résumé.
+    const lead = /^[A-Za-z0-9]/.test(s) ? "(?:^|[^A-Za-z0-9])" : "";
+    return new RegExp(`${lead}${s.split(/\s+/).map(escWord).join("\\s+")}(?:$|[^A-Za-z0-9+#])`);
+  };
   return (target) => {
     // Match the target's canonical + raw forms AND every alias variant that
     // canonicalizes to it — the text may use the alias ("k8s") while the JD
@@ -860,7 +933,14 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
   // profile-scraped skills). Guard: empty keyword scan keeps original skills.
   let scored = candidate;
   if (resume_text) {
-    const resumeSkills = findKeywords(resume_text);
+    // Whitelist hits (any section of the résumé) ∪ the résumé's own Skills
+    // section read verbatim — the whitelist alone drops every technology it
+    // doesn't already know about.
+    const listed = resumeListedSkills(resume_text);
+    const seen = new Set();
+    const resumeSkills = [...findKeywords(resume_text), ...listed]
+      .filter(s => { const k = s.toLowerCase(); return seen.has(k) ? false : seen.add(k); });
+    console.log(`[SCOUT] résumé skills: ${resumeSkills.length} (${listed.length} from Skills section)`);
     if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
     // Résumé also replaces education — but ONLY its Education section text, so
     // degree words in résumé prose can't inflate the level. Guard: no Education
@@ -876,8 +956,7 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
   // 2) Local fallback (per-device embeddings — may differ across browsers).
   let cached = jobCache.get(jd_id);
   if (!cached) {
-    const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`, { headers: scoutHeaders() });
-    const job = await r.json();
+    const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
     if (job.error) throw new Error(job.error);
     cached = { title: job.title, requirements: parseRequirements(job.description || "") };
     jobCache.set(jd_id, cached);
@@ -894,8 +973,7 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
 const JOBS_CACHE_KEY = "scout_jobs_cache";
 
 async function fetchJobs() {
-  const r    = await fetch(`${BASE_URL}/api/scout/jobs`, { headers: scoutHeaders() });
-  const data = await r.json();
+  const data = await scoutGetJson(`/api/scout/jobs`);
   return (data.jobs || []).map(j => ({
     id:     j.id,
     title:  j.title,
@@ -930,8 +1008,7 @@ chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); });
 async function prefetchJobDescriptions(jobs) {
   await Promise.allSettled(jobs.map(async (job) => {
     try {
-      const r   = await fetch(`${BASE_URL}/api/scout/jobs/${job.id}`, { headers: scoutHeaders() });
-      const data = await r.json();
+      const data = await scoutGetJson(`/api/scout/jobs/${job.id}`);
       if (!data.error) {
         jobCache.set(job.id, {
           title:        data.title,

@@ -244,9 +244,43 @@ async function extractPdfText(file) {
   let out = '';
   for (let i = 1; i <= pdf.numPages; i++) {
     const content = await (await pdf.getPage(i)).getTextContent();
-    out += content.items.map(it => it.str).join(' ') + '\n';
+    out += pageItemsToText(content.items) + '\n';
   }
   return out;
+}
+
+// PDF text comes back as positioned runs, not lines. A single word is routinely
+// split across runs by kerning ("Kub" + "ernetes"), and line breaks are implicit
+// in the coordinates. Joining every run with a space split those words into junk
+// tokens — which is why skills stopped matching once a résumé was attached — and
+// flattened each page into one line, so the Skills/Education section slicers had
+// no boundaries to work with. Rebuild real lines instead: a new line when the
+// baseline moves, a space only when there is a real horizontal gap, and nothing
+// at all when two runs are the two halves of one word.
+function pageItemsToText(items) {
+  let text = '', lastY = null, lastEndX = 0;
+  for (const it of items) {
+    const s = it.str;
+    if (!s) {
+      if (it.hasEOL) { text += '\n'; lastY = null; }
+      continue;
+    }
+    const x = it.transform[4];
+    const y = it.transform[5];
+    const h = Math.abs(it.transform[3]) || 10;   // font size ≈ row height
+    // width is missing on some producers — estimate from the glyph count.
+    const w = it.width || s.length * h * 0.5;
+
+    if (lastY !== null) {
+      if (Math.abs(y - lastY) > h * 0.5) text += '\n';        // baseline moved
+      else if (x - lastEndX > h * 0.25)  text += ' ';         // gap → word break
+      // else: adjacent runs of the same word — concatenate with nothing.
+    }
+    text += s;
+    lastY = y;
+    lastEndX = x + w;
+  }
+  return text;
 }
 
 async function extractDocxText(file) {
@@ -599,12 +633,21 @@ function initialsOf(name) {
     .join('') || '?';
 }
 
+// Years chip. Under a year reads in months ("7 mos exp") — "0.6 yrs exp" looks
+// like a parsing failure next to LinkedIn's own "· 7 mos" line.
+function formatExperience(years) {
+  if (years == null) return '';
+  if (years <= 0) return '0 yrs exp';
+  if (years < 1) return `${Math.round(years * 12)} mos exp`;
+  return `${years} ${years === 1 ? 'yr' : 'yrs'} exp`;
+}
+
 function renderProfile(p) {
   profileAvatar.textContent = initialsOf(p.name);
   profileName.textContent = p.name || '—';
   profileTitle.textContent = p.title || '';
   profileLoc.textContent = p.location || '';
-  profileExp.textContent = p.experience_years != null ? `${p.experience_years} yrs exp` : '';
+  profileExp.textContent = formatExperience(p.experience_years);
 
   // Email/phone found on LinkedIn/résumé show read-only above; the editable
   // fields stay empty for a manual add/override. candidate.email/.phone default

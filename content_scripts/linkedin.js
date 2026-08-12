@@ -381,9 +381,6 @@ const EMPLOYMENT_TYPES = [
 ];
 const EMPLOYMENT_TYPE_EXACT_RE =
   /^(?:full[\s-]?time|part[\s-]?time|self[\s-]?employed|freelance|contract|internship|apprenticeship|seasonal|temporary|trainee|volunteer)$/i;
-// Everything except Full-time is excluded from the years total.
-const NON_FULLTIME_RE =
-  /^(?:part[\s-]?time|self[\s-]?employed|freelance|contract|internship|apprenticeship|seasonal|temporary|trainee|volunteer)$/i;
 
 // Read the employment type off a role's <p> lines. LinkedIn puts it in the
 // "·"-separated subtitle, so each segment is tested on its own and must BE the
@@ -409,12 +406,24 @@ function roleEmploymentType(ps) {
   return '';
 }
 
-// A role counts as full-time when it is tagged Full-time OR carries no tag at
-// all. Internships, part-time, contract, freelance and self-employed roles are
-// excluded from the years total.
+// Titles that mark a role as non-full-time on their own. Needed because most
+// LinkedIn profiles never set the employment-type field — an untagged
+// "Software Engineer Intern" has to be caught by its title or it counts as
+// full-time work.
+const NON_FULLTIME_TITLE_RE =
+  /\b(?:intern|interns|internship|co[\s-]?op|trainee|apprentice|apprenticeship|volunteer|part[\s-]?time|student\s+(?:assistant|worker)|summer\s+(?:analyst|associate))\b/i;
+
+// A role counts toward the years total when:
+//   • LinkedIn tags it Full-time, or
+//   • it carries no employment tag AND its title isn't an internship/part-time
+//     role — LinkedIn omits the tag on most profiles, so excluding untagged
+//     roles outright reported 0 yrs for candidates with real full-time history.
+// Tagged Internship / Part-time / Contract / Freelance / Self-employed /
+// Seasonal / Temporary / Trainee / Volunteer roles are excluded.
 function isFullTimeRole(exp) {
-  const t = (exp && exp.employmentType || '').trim();
-  return !t || !NON_FULLTIME_RE.test(t.replace(/\s/g, '-'));
+  const t = (exp && exp.employmentType || '').trim().replace(/\s/g, '-');
+  if (t) return /^full-?time$/i.test(t);
+  return !NON_FULLTIME_TITLE_RE.test(exp && exp.title || '');
 }
 
 // Pick the date/duration line for a role. The <p> lines come first; when a
@@ -434,45 +443,70 @@ function findDatesText(el, ps) {
 }
 
 function calcExperienceYears(experience) {
-  // Full-time only — internships/part-time/contract/freelance/self-employed do
-  // not add to the total. Roles LinkedIn shows without a type still count.
+  // Full-time only — internships, part-time, contract, freelance, self-employed
+  // and untagged roles do not add to the total (see isFullTimeRole).
   const all = experience || [];
   const fullTime = all.filter(isFullTimeRole);
   const skipped = all.filter(e => !isFullTimeRole(e));
   if (skipped.length) {
     console.log(`[SCOUT] experience_years: skipped ${skipped.length} non-full-time role(s): ` +
-      skipped.map(e => `${e.title} (${e.employmentType})`).join(', '));
+      skipped.map(e => `${e.title} (${e.employmentType || 'no employment tag'})`).join(', '));
   }
   if (all.length && !fullTime.length) return 0;   // e.g. internships only
   experience = fullTime;
 
-  // Strategy 1: sum "X yrs Y mos" duration strings from LinkedIn
+  // Strategy 1: sum the duration LinkedIn already prints on each role
+  // ("Feb 2026 - Present · 7 mos"). Years and months are BOTH optional — a role
+  // under a year prints months only ("7 mos"), which the old years-required
+  // pattern skipped entirely, dropping the whole profile to the year-span
+  // fallback and reporting 0 yrs.
   let totalMonths = 0;
   for (const exp of experience) {
-    const m = (exp.dates || '').match(/(\d+)\s*yr[s]?\s*(?:(\d+)\s*mo[s]?)?/);
-    if (m) {
-      totalMonths += (parseInt(m[1]) || 0) * 12 + (parseInt(m[2]) || 0);
-    }
+    const d = exp.dates || '';
+    const y = d.match(/(\d+)\s*yr/i);
+    const m = d.match(/(\d+)\s*mo/i);
+    if (y || m) totalMonths += (parseInt(y?.[1]) || 0) * 12 + (parseInt(m?.[1]) || 0);
   }
   if (totalMonths > 0) return Math.round(totalMonths / 12 * 10) / 10;
 
-  // Fallback: earliest start year → latest end year (or now if a role is ongoing).
-  // Using latest end (not always "now") avoids over-counting profiles whose roles
-  // all ended in the past — a layout difference seen on some devices.
+  // Fallback: month-precision span across the roles. Year-only math reported 0
+  // for anyone whose history sits inside a single calendar year.
   let earliest = null, latest = null, ongoing = false;
-  const now = new Date().getFullYear();
+  const now = new Date();
+  const nowIdx = now.getFullYear() * 12 + now.getMonth();
   for (const exp of experience) {
     const d = exp.dates || '';
-    if (/present/i.test(d)) ongoing = true;
-    for (const ym of d.match(/\b(?:19|20)\d{2}\b/g) || []) {
-      const y = parseInt(ym, 10);
-      if (!earliest || y < earliest) earliest = y;
-      if (!latest   || y > latest)   latest = y;
+    if (/present|current/i.test(d)) ongoing = true;
+    for (const idx of monthIndexesIn(d)) {
+      if (earliest === null || idx < earliest) earliest = idx;
+      if (latest   === null || idx > latest)   latest   = idx;
     }
   }
-  if (!earliest) return null;
-  const end = ongoing ? now : (latest || now);
-  return Math.max(end - earliest, 0);
+  if (earliest === null) return null;
+  const end = ongoing ? nowIdx : (latest ?? nowIdx);
+  return Math.round(Math.max(end - earliest, 0) / 12 * 10) / 10;
+}
+
+// Every "Mon YYYY" / "YYYY" in a dates line, as absolute month numbers
+// (year*12 + month). "Feb 2026 - Present" → [24314].
+const MONTH_ABBR = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+function monthIndexesIn(text) {
+  const out = [];
+  const seen = new Set();
+  const re = /([A-Za-z]{3,9})\s+((?:19|20)\d{2})|\b((?:19|20)\d{2})\b/g;
+  let m;
+  while ((m = re.exec(text || ''))) {
+    if (m[1]) {
+      const mi = MONTH_ABBR.indexOf(m[1].slice(0, 3).toLowerCase());
+      if (mi < 0) continue;                       // not a month word ("Present 2026")
+      const idx = parseInt(m[2], 10) * 12 + mi;
+      if (!seen.has(idx)) { seen.add(idx); out.push(idx); }
+    } else {
+      const idx = parseInt(m[3], 10) * 12;        // bare year → January
+      if (!seen.has(idx)) { seen.add(idx); out.push(idx); }
+    }
+  }
+  return out;
 }
 
 // Read an element's full text, minus the control buttons LinkedIn nests inside
@@ -535,7 +569,13 @@ function extractExperience() {
       return ps.length > 0 && ps.some(p => dateRe.test((p.innerText || '').trim()));
     });
     if (roleItems.length > 0) {
-      // Multi-role entry: each li = one position
+      // Multi-role entry: each li = one position.
+      // On a grouped company card LinkedIn prints the employment type ONCE, on
+      // the company header ("Next Tech Lab, AP" / "Internship · 1 yr 2 mos") —
+      // the individual positions under it carry no type at all. Read the header
+      // type and inherit it, or every sub-role of an internship counts as
+      // full-time work.
+      const groupType = roleEmploymentType(headerPs);
       for (const li of roleItems) {
         // Narrow/zoomed layouts drop the <a> wrapper around each role — fall
         // back to the li's own <p>s so the position isn't skipped (the cause
@@ -545,8 +585,9 @@ function extractExperience() {
           ? Array.from(roleLink.querySelectorAll('p'))
           : Array.from(li.querySelectorAll('p'));
         const title = ps[0]?.innerText.trim() || '';
-        // The type lives on the li's own subtitle, not inside the role link.
-        const employmentType = roleEmploymentType(Array.from(li.querySelectorAll('p')));
+        // The type lives on the li's own subtitle, not inside the role link;
+        // falls back to the company-header type for grouped entries.
+        const employmentType = roleEmploymentType(Array.from(li.querySelectorAll('p'))) || groupType;
         const dates = findDatesText(li, ps);
         // Full role text → scorer mines skill keywords from the description.
         const description = fullText(li);
