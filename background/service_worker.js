@@ -209,21 +209,64 @@ const STATE_NAMES = {
 // LinkedIn often reports a metro/city only ("Greater Boston Area", "San Francisco
 // Bay Area"), with no state token. Map the major US metros to a state so those
 // locations still score instead of reading as "unknown". Mirrored in score_endpoint.py.
+// Ambiguous names (one city name, several states) are mapped to the metro the
+// JDs we see actually mean — e.g. "Arlington" → VA (DC metro), not TX. An
+// explicit "City, ST" always wins because the comma form is checked first.
 const CITY_NAMES = {
   "san francisco":"CA","bay area":"CA","silicon valley":"CA","san jose":"CA",oakland:"CA",
   "los angeles":"CA","san diego":"CA",sacramento:"CA","orange county":"CA",
-  "new york":"NY",nyc:"NY",manhattan:"NY",brooklyn:"NY",
-  boston:"MA",chicago:"IL",seattle:"WA",portland:"OR","las vegas":"NV",
+  "long beach":"CA",anaheim:"CA",irvine:"CA",fresno:"CA",riverside:"CA","santa clara":"CA",
+  "palo alto":"CA","mountain view":"CA",sunnyvale:"CA",cupertino:"CA","redwood city":"CA",
+  berkeley:"CA","santa monica":"CA","san mateo":"CA","el segundo":"CA","culver city":"CA",
+  "new york":"NY",nyc:"NY",manhattan:"NY",brooklyn:"NY",queens:"NY",bronx:"NY",
+  "long island":"NY",westchester:"NY",albany:"NY",buffalo:"NY",rochester:"NY",syracuse:"NY",
+  boston:"MA",cambridge:"MA",somerville:"MA",quincy:"MA",worcester:"MA",springfield:"MA",
+  chicago:"IL",naperville:"IL",schaumburg:"IL",evanston:"IL",
+  seattle:"WA",bellevue:"WA",redmond:"WA",tacoma:"WA",spokane:"WA",
+  portland:"OR",beaverton:"OR","las vegas":"NV",reno:"NV",henderson:"NV",
   houston:"TX",dallas:"TX",austin:"TX","san antonio":"TX","fort worth":"TX",
-  philadelphia:"PA",pittsburgh:"PA",atlanta:"GA",
-  miami:"FL",orlando:"FL",tampa:"FL",jacksonville:"FL",
-  denver:"CO",phoenix:"AZ",tucson:"AZ",detroit:"MI",
-  minneapolis:"MN","st. paul":"MN","saint paul":"MN","st paul":"MN",
-  charlotte:"NC",raleigh:"NC",durham:"NC",nashville:"TN",memphis:"TN",
-  baltimore:"MD","salt lake city":"UT",columbus:"OH",cleveland:"OH",cincinnati:"OH",
+  plano:"TX",irving:"TX",frisco:"TX",richardson:"TX","el paso":"TX",
+  philadelphia:"PA",pittsburgh:"PA",allentown:"PA","king of prussia":"PA",
+  newark:"NJ","jersey city":"NJ",princeton:"NJ",hoboken:"NJ",edison:"NJ",trenton:"NJ",
+  atlanta:"GA",alpharetta:"GA",savannah:"GA",augusta:"GA",
+  miami:"FL",orlando:"FL",tampa:"FL",jacksonville:"FL","fort lauderdale":"FL",
+  "st. petersburg":"FL","saint petersburg":"FL",tallahassee:"FL",
+  denver:"CO",boulder:"CO","colorado springs":"CO",aurora:"CO",
+  phoenix:"AZ",tucson:"AZ",scottsdale:"AZ",chandler:"AZ",tempe:"AZ",mesa:"AZ",
+  detroit:"MI","ann arbor":"MI",troy:"MI",dearborn:"MI",
+  minneapolis:"MN","st. paul":"MN","saint paul":"MN","st paul":"MN",bloomington:"MN",
+  charlotte:"NC",raleigh:"NC",durham:"NC","chapel hill":"NC",cary:"NC",greensboro:"NC",
+  "research triangle":"NC","rtp":"NC",
+  nashville:"TN",memphis:"TN",knoxville:"TN",chattanooga:"TN",
+  "salt lake city":"UT",provo:"UT",
+  columbus:"OH",cleveland:"OH",cincinnati:"OH",dayton:"OH",
   "kansas city":"MO","st. louis":"MO","saint louis":"MO","st louis":"MO",
-  indianapolis:"IN",milwaukee:"WI","new orleans":"LA",richmond:"VA",
+  indianapolis:"IN",milwaukee:"WI","new orleans":"LA","baton rouge":"LA",
+  "oklahoma city":"OK",tulsa:"OK","little rock":"AR",boise:"ID",omaha:"NE",
+  wichita:"KS","overland park":"KS",louisville:"KY",lexington:"KY",birmingham:"AL",huntsville:"AL",
+  charleston:"SC",columbia:"SC",greenville:"SC",jackson:"MS",
+  hartford:"CT",stamford:"CT","new haven":"CT",providence:"RI",manchester:"NH",
+  wilmington:"DE",albuquerque:"NM",
+  // DC metro — the largest source of "city only" cleared-work JDs.
+  arlington:"VA",alexandria:"VA",reston:"VA",herndon:"VA",tysons:"VA","mclean":"VA",
+  vienna:"VA",fairfax:"VA",chantilly:"VA",ashburn:"VA",sterling:"VA",dulles:"VA",
+  quantico:"VA",richmond:"VA","virginia beach":"VA",norfolk:"VA",
+  chesapeake:"VA",charlottesville:"VA",roanoke:"VA",
+  baltimore:"MD",bethesda:"MD",rockville:"MD","silver spring":"MD",annapolis:"MD",
+  "college park":"MD",gaithersburg:"MD",frederick:"MD",
+  "fort meade":"MD","ft. meade":"MD",
+  "dmv area":"DC","national capital region":"DC",
 };
+// Matched with word boundaries so a short key can't hit inside a longer word
+// (e.g. "cary" inside "Carytown"). Insertion order decides ties.
+const CITY_MATCHERS = Object.keys(CITY_NAMES).map(key => ({
+  state: CITY_NAMES[key],
+  re: new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
+}));
+// Two-letter abbreviations that are also common English words or mean something
+// else in a JD ("onsite OR remote", "experience IN Java", "LA" = Los Angeles).
+// The preposition cue below refuses these; an explicit "Location: OR" still counts.
+const WORDLIKE_ABBRS = new Set(["IN", "OR", "OK", "ME", "HI", "DE", "LA"]);
 // Extract a US state abbreviation. `bareAbbr` allows a lone two-letter token —
 // safe for a short controlled string (candidate "City, ST") but NOT for JD prose,
 // where words like "IN"/"OR"/"OK" would false-match, so JD parsing passes false.
@@ -235,11 +278,20 @@ function detectState(text, bareAbbr) {
   // "Washington DC" must beat the plain "washington" → WA state name.
   if (/washington\s*,?\s*d\.?\s*c\.?/.test(low)) return "DC";
   for (const name in STATE_NAMES) if (low.includes(name)) return STATE_NAMES[name];
-  for (const city in CITY_NAMES) if (low.includes(city)) return CITY_NAMES[city];
+  for (const c of CITY_MATCHERS) if (c.re.test(text)) return c.state;
   if (bareAbbr) {
     const bare = text.match(/\b([A-Z]{2})\b/);
     if (bare && STATE_ABBRS.has(bare[1])) return bare[1];
+    return "";
   }
+  // JD prose: a lone abbreviation is only trusted when a location cue precedes
+  // it, and the token must be uppercase in the source (so the sentence word
+  // "in" can't pull a state out of lowercase text).
+  const label = text.match(/\b(?:work\s+|job\s+)?location\s*[:\-–—]?\s*([A-Za-z]{2})\b/i);
+  if (label && label[1] === label[1].toUpperCase() && STATE_ABBRS.has(label[1])) return label[1];
+  const cue = text.match(/\b(?:in|near|onsite\s+in|located\s+in|based\s+in|relocate\s+to)\s+([A-Za-z]{2})\b/i);
+  if (cue && cue[1] === cue[1].toUpperCase()
+      && STATE_ABBRS.has(cue[1]) && !WORDLIKE_ABBRS.has(cue[1])) return cue[1];
   return "";
 }
 
@@ -1002,17 +1054,35 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
 
   // 1) Backend scoring (consistent across devices).
   const backend = await backendScore(jd_id, scored, resume_text);
-  if (backend) return { ...backend, source: "backend" };
+  if (backend) {
+    // Which buckets the BACKEND marked active — the breakdown card renders only
+    // these, so a missing row (e.g. location) is a backend decision, not a UI bug.
+    console.log("[SCOUT] score source: backend | buckets:",
+      (backend.categories || []).map(c => `${c.key}=${c.active ? "on" : "off"}`).join(" ") || "none",
+      "| candidate location:", scored.location || "(none)");
+    return { ...backend, source: "backend" };
+  }
 
   // 2) Local fallback (per-device embeddings — may differ across browsers).
   let cached = jobCache.get(jd_id);
   if (!cached) {
     const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
     if (job.error) throw new Error(job.error);
-    cached = { title: job.title, requirements: parseRequirements(job.description || "") };
+    const requirements = parseRequirements(job.description || "");
+    // The posting's structured city/state outrank whatever the description prose
+    // implies — prose is a guess, the intake fields are what was entered. Only
+    // override when set, so a blank intake keeps a location the JD text stated.
+    const structState = detectState([job.city, job.state].filter(Boolean).join(", "), true);
+    if (structState) requirements.jd_state = structState;
+    cached = { title: job.title, requirements };
     jobCache.set(jd_id, cached);
   }
   const result = await computeScore(cached.requirements, cached.title, scored, resume_text);
+  console.log("[SCOUT] score source: local | buckets:",
+    (result.categories || []).map(c => `${c.key}=${c.active ? "on" : "off"}`).join(" "),
+    "| jd_state:", cached.requirements.jd_state || "(none)",
+    "| jd_remote:", !!cached.requirements.jd_remote,
+    "| candidate location:", scored.location || "(none)");
   return { ...result, source: "local" };
 }
 
