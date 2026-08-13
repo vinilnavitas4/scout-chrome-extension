@@ -21,6 +21,12 @@ const scoreRationale = document.getElementById('score-rationale');
 const scoreBreakdown = document.getElementById('score-breakdown');
 const skillLists = document.getElementById('skill-lists');
 const addBtn = document.getElementById('add-btn');
+const overrideBtn = document.getElementById('override-btn');
+const noteModal = document.getElementById('note-modal');
+const noteText = document.getElementById('note-text');
+const noteError = document.getElementById('note-error');
+const noteCancel = document.getElementById('note-cancel');
+const noteConfirm = document.getElementById('note-confirm');
 const jazzhrBtn = document.getElementById('jazzhr-btn');
 const statusEl = document.getElementById('status');
 const resumeUpload = document.getElementById('resume-upload');
@@ -122,13 +128,51 @@ function validateEmail(showError = true) {
   return !problem;
 }
 
-// Single gate for the Add button: needs a JD, a finished score, and an email.
-// Skipped once the candidate has been added (button is in its success state).
+// Candidates below this fit score don't go to JazzHR. The bar itself passes —
+// a 60 is addable, a 59 is not.
+const MIN_ADD_SCORE = 60;
+
+// Empty when the current score clears the bar (or there is no score yet — the
+// scoreReady check handles that case).
+function scoreProblem() {
+  if (!scoreReady) return '';
+  const s = Number(currentScore?.score);
+  if (!Number.isFinite(s)) return '';
+  return s >= MIN_ADD_SCORE
+    ? ''
+    : `Score ${s} is below the ${MIN_ADD_SCORE} minimum — this candidate can't be added.`;
+}
+
+// Both submit buttons go down together whenever the profile is being replaced
+// or the score is being recomputed — the override button is only ever brought
+// back by updateAddButton, once a fresh score has actually rendered.
+function disableAddButtons() {
+  addBtn.disabled = true;
+  overrideBtn.disabled = true;
+  overrideBtn.style.display = 'none';
+}
+
+// Single gate for the Add button: needs a JD, a finished score above
+// MIN_ADD_SCORE, and an email. Skipped once the candidate has been added
+// (button is in its success state).
 function updateAddButton() {
   if (addBtn.classList.contains('btn-success')) return;
-  const problem = emailProblem();
+  const emailBad = emailProblem();
+  const lowScore = scoreProblem();
+  const problem = emailBad || lowScore;
   addBtn.disabled = !(selectedJd && scoreReady && !problem);
   addBtn.title = problem && selectedJd && scoreReady ? problem : '';
+  // A too-low score is a hard stop rather than something the recruiter can fix
+  // in the form, so say it on the button — a disabled button never gets a click
+  // to surface a status line, and its tooltip needs a hover to find.
+  addBtn.textContent = lowScore ? `Score below ${MIN_ADD_SCORE} — can't add` : 'Add to JazzHR';
+
+  // The override button appears only when the score is the sole thing in the
+  // way — a missing/invalid email still has to be fixed in the form first.
+  const canOverride = !!(selectedJd && scoreReady && lowScore);
+  overrideBtn.style.display = canOverride ? 'flex' : 'none';
+  overrideBtn.disabled = !!emailBad;
+  overrideBtn.title = emailBad || '';
 }
 
 let candidate = null;   // set when profile fetch completes
@@ -273,12 +317,21 @@ function pageItemsToText(items) {
 
     if (lastY !== null) {
       if (Math.abs(y - lastY) > h * 0.5) text += '\n';        // baseline moved
+      // Same baseline but the run starts left of where the last one ended: the
+      // producer jumped to another column / table cell. Without this the two
+      // runs were glued into one junk token ("JavaDocker").
+      else if (x < lastEndX - h * 0.25)  text += '\n';
+      // A wide gap on one baseline is a column break, not a word space — emit a
+      // tab so the skills splitter treats the cells as separate entries.
+      else if (x - lastEndX > h * 1.5)   text += '\t';
       else if (x - lastEndX > h * 0.25)  text += ' ';         // gap → word break
       // else: adjacent runs of the same word — concatenate with nothing.
     }
     text += s;
     lastY = y;
     lastEndX = x + w;
+    // Explicit end-of-line from the producer wins over the geometry heuristics.
+    if (it.hasEOL) { text += '\n'; lastY = null; }
   }
   return text;
 }
@@ -289,7 +342,20 @@ async function extractDocxText(file) {
   const files = fflate.unzipSync(buf);
   const xml = files['word/document.xml'];
   if (!xml) return '';
-  return fflate.strFromU8(xml).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  // Stripping every tag to a space flattened the document into a single line and
+  // split words apart: Word breaks one word across several <w:t> runs, and a
+  // bulleted skills list carries its bullets in numbering properties, not in the
+  // text — so the skills block arrived with no separators at all and the reader
+  // saw one 40-word "skill". Map the tags that really are boundaries first.
+  return fflate.strFromU8(xml)
+    .replace(/<\/w:p>|<w:br\s*\/?>|<\/w:tr>/g, '\n')      // paragraph / break / table row
+    .replace(/<\/w:tc>|<w:tab\s*\/?>/g, '\t')             // table cell / tab stop
+    .replace(/<[^>]+>/g, '')                              // runs of one word rejoin
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')                               // last: don't re-create entities
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n');
 }
 
 // Pull the first plausible email + phone out of résumé text.
@@ -414,7 +480,7 @@ function startScan(tabId, scriptFile, force = false) {
   scoreCard.classList.remove('show');
   jazzhrBtn.style.display = 'none';
   resetAddButton();
-  addBtn.disabled = true;
+  disableAddButtons();
 
   refreshBtn.classList.add('spinning');
   showStatus('Reading profile…', 'loading');
@@ -617,7 +683,7 @@ function onProfileFailed(msg) {
   // Only show error if user has already selected a JD (otherwise silent)
   if (selectedJd) {
     showStatus(msg, 'error');
-    addBtn.disabled = true;
+    disableAddButtons();
   }
 }
 
@@ -721,7 +787,7 @@ jdSelect.addEventListener('change', () => {
   if (!jdId) {
     scoreCard.classList.remove('show');
     scoreReady = false;
-    addBtn.disabled = true;
+    disableAddButtons();
     currentScore = null;
     scoreVersion++;
     statusEl.classList.remove('show');
@@ -732,7 +798,7 @@ jdSelect.addEventListener('change', () => {
   selectedJdTitle = jdSelect.selectedOptions[0]?.dataset.title || jdId;
   scoreCard.classList.remove('show');
   scoreReady = false;
-  addBtn.disabled = true;
+  disableAddButtons();
   saveLastProfile();
 
   if (candidate) {
@@ -754,7 +820,7 @@ function requestScore(jdId) {
   const version = scoreVersion;
 
   scoreReady = false;
-  addBtn.disabled = true;
+  disableAddButtons();
   scoreCard.classList.remove('show');
   // Wipe the previous JD's breakdown so nothing stale shows during the re-score.
   if (scoreBreakdown) scoreBreakdown.innerHTML = '';
@@ -945,13 +1011,27 @@ function candidateSource() {
 }
 
 addBtn.addEventListener('click', () => {
+  if (!readyToSubmit()) return;
+  // Fit-score floor — last line of defence behind the disabled button. The
+  // override path below is the only way past it.
+  const lowScore = scoreProblem();
+  if (lowScore) {
+    showStatus(lowScore, 'error');
+    return;
+  }
+  submitCandidate();
+});
+
+// Shared guards for both submit paths. Returns false (and explains why) when the
+// candidate can't be sent regardless of score.
+function readyToSubmit() {
   if (!candidate) {
     showStatus('Profile not loaded yet — wait and try again.', 'error');
-    return;
+    return false;
   }
   if (!selectedJd) {
     showStatus('Please select a Job Description first.', 'error');
-    return;
+    return false;
   }
   // JazzHR needs an email — last line of defence behind the disabled button.
   const problem = emailProblem();
@@ -960,9 +1040,62 @@ addBtn.addEventListener('click', () => {
     validateEmail(true);
     showStatus(problem, 'error');
     profileEmail.focus();
+    return false;
+  }
+  return true;
+}
+
+// ── Below-threshold override ──────────────────────────────────────────────────
+// The score gate is a floor, not a wall: a recruiter can still add, but only
+// with a written reason, which rides along to the SCOUT candidate timeline.
+const MIN_NOTE_LEN = 10;
+
+overrideBtn.addEventListener('click', () => {
+  if (!readyToSubmit()) return;
+  noteError.textContent = '';
+  noteText.classList.remove('invalid');
+  noteText.value = '';
+  noteModal.style.display = 'flex';
+  noteText.focus();
+});
+
+function closeNoteModal() {
+  noteModal.style.display = 'none';
+  overrideBtn.focus();
+}
+
+noteCancel.addEventListener('click', closeNoteModal);
+
+// Click the backdrop (not the card) to dismiss.
+noteModal.addEventListener('click', (e) => { if (e.target === noteModal) closeNoteModal(); });
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && noteModal.style.display === 'flex') closeNoteModal();
+});
+
+noteText.addEventListener('input', () => {
+  if (noteText.value.trim().length >= MIN_NOTE_LEN) {
+    noteError.textContent = '';
+    noteText.classList.remove('invalid');
+  }
+});
+
+noteConfirm.addEventListener('click', () => {
+  const note = noteText.value.trim();
+  if (note.length < MIN_NOTE_LEN) {
+    noteError.textContent = `Please give a reason (at least ${MIN_NOTE_LEN} characters).`;
+    noteText.classList.add('invalid');
+    noteText.focus();
     return;
   }
+  if (!readyToSubmit()) return;      // e.g. the email was cleared while the modal was open
+  closeNoteModal();
+  submitCandidate(note);
+});
 
+// Builds the payload and posts it. `overrideNote` is set only on the
+// below-threshold path; the backend records it on the candidate timeline.
+function submitCandidate(overrideNote = '') {
   // Manual upload wins; otherwise attach the résumé scraped from the profile
   // (Dice candidates carry the résumé PDF bytes on the candidate) so JazzHR gets
   // the résumé without a separate upload.
@@ -977,6 +1110,10 @@ addBtn.addEventListener('click', () => {
     resume_b64: rB64 || undefined,
     resume_name: rB64 ? rName : undefined,
     resume_mime: rB64 ? rMime : undefined,
+    // Only present on the override path — the reason, plus the score it was
+    // overridden at (kept so the timeline entry survives a later re-score).
+    override_note: overrideNote || undefined,
+    override_score: overrideNote ? currentScore?.score : undefined,
     candidate: {
       name: candidate.name,
       title: candidate.title,
@@ -1000,6 +1137,7 @@ addBtn.addEventListener('click', () => {
   };
 
   addBtn.disabled = true;
+  overrideBtn.disabled = true;
   jazzhrBtn.style.display = 'none';
   showStatus('Adding to JazzHR…', 'loading');
 
@@ -1008,6 +1146,8 @@ addBtn.addEventListener('click', () => {
     if (res?.ok) {
       addBtn.textContent = 'Added to JazzHR ✓';
       addBtn.className = 'btn btn-success';
+      addBtn.title = '';
+      overrideBtn.style.display = 'none';   // the add already happened
       resumeUpload.style.display = 'none';
       if (res.jazzhr_url) {
         jazzhrBtn.href = res.jazzhr_url;
@@ -1018,7 +1158,7 @@ addBtn.addEventListener('click', () => {
       updateAddButton();
     }
   });
-});
+}
 
 function resetAddButton() {
   addBtn.textContent = 'Add to JazzHR';

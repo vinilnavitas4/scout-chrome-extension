@@ -306,21 +306,54 @@ const RESUME_SKILLS_NEXT_RE =
 
 // Separators inside a skills block: commas, pipes, slashes-with-space, bullets,
 // semicolons, newlines. A bare "/" is NOT a separator — "CI/CD" is one skill.
-const SKILL_SPLIT_RE = /[,;|•·▪●•\n\r\t]+|\s+[-–—]\s+/;
+// Two-or-more spaces is a column gap left by the PDF/DOCX extractors, not a
+// space inside a phrase — "Machine Learning" keeps its single space.
+const SKILL_SPLIT_RE = /[,;|•·▪●•\n\r\t]+|\s+[-–—]\s+|\s{2,}/;
 
 function resumeListedSkills(text) {
   if (!text) return [];
   const matches = [...text.matchAll(RESUME_SKILLS_HEADING_RE)];
   if (matches.length === 0) return [];
-  // Same heading-confidence rule as resumeEducationSection: prefer an ALL-CAPS
-  // or line-start heading over a prose mention ("strong communication skills").
-  const pick =
-    matches.find(m => m[0] === m[0].toUpperCase()) ||
-    matches.find(m => m.index === 0 || text[m.index - 1] === "\n") ||
-    matches[0];
-  const rest    = text.slice(pick.index + pick[0].length);
-  const nextIdx = rest.search(RESUME_SKILLS_NEXT_RE);
-  const section = (nextIdx >= 0 ? rest.slice(0, nextIdx) : rest).trim();
+  // Résumés routinely split their skills over several headings ("TECHNICAL
+  // SKILLS" then "Tools & Technologies"); reading only the first one dropped
+  // every later block. Take every match that reads like a real heading (ALL-CAPS
+  // or line-start) and union their sections, falling back to the first prose
+  // mention only when none of them qualify.
+  let heads = matches.filter(
+    m => m[0] === m[0].toUpperCase() || m.index === 0 || text[m.index - 1] === "\n"
+  );
+  if (heads.length === 0) heads = [matches[0]];
+
+  const out = [];
+  for (let i = 0; i < heads.length; i++) {
+    const head = heads[i];
+    // Stop before the following skills heading too, else that heading's own
+    // words ("Tools & Technologies") get read as a skill.
+    const limit = heads[i + 1] ? heads[i + 1].index : text.length;
+    for (const skill of skillsFromSection(text.slice(0, limit), head)) {
+      if (!out.some(s => s.toLowerCase() === skill.toLowerCase())) out.push(skill);
+      if (out.length >= 120) return out;   // runaway section guard
+    }
+  }
+  return out;
+}
+
+// Slice one skills block starting after `head` and split it into entries.
+function skillsFromSection(text, head) {
+  const rest = text.slice(head.index + head[0].length);
+  // End the block at the next section — but only where that word reads like a
+  // heading. A plain `search` ended the block on inline prose ("Java — 5 years
+  // experience"), truncating everything listed after it.
+  let end = rest.length;
+  const nextRe = new RegExp(RESUME_SKILLS_NEXT_RE.source, "gi");
+  let m;
+  while ((m = nextRe.exec(rest)) !== null) {
+    if (m.index === 0 || rest[m.index - 1] === "\n" || m[0] === m[0].toUpperCase()) {
+      end = m.index;
+      break;
+    }
+  }
+  const section = rest.slice(0, end).trim();
   if (!section) return [];
 
   const out = [];
@@ -329,17 +362,35 @@ function resumeListedSkills(text) {
     raw = raw.replace(/^[^:]{0,40}:\s*/, "").trim();
     // Strip list punctuation and trailing "(5 yrs)" style annotations.
     raw = raw.replace(/\(.*?\)/g, " ").replace(/^[^A-Za-z0-9+#.]+|[^A-Za-z0-9+#)]+$/g, "").trim();
+    raw = raw.replace(/\s+/g, " ");
     if (!isPlausibleSkill(raw)) continue;
+    if (isSkillsHeading(raw)) continue;   // a sub-heading inside the block, not a skill
     if (!out.some(s => s.toLowerCase() === raw.toLowerCase())) out.push(raw);
-    if (out.length >= 80) break;          // runaway section guard
   }
   return out;
 }
 
+// True when the whole entry is nothing but heading words ("Tools & Technologies",
+// "Tech Stack") — a sub-heading the split picked up, not a skill.
+function isSkillsHeading(s) {
+  const bare = s.replace(/^[\s&|:-]+|[\s&|:-]+$/g, "");
+  const re = new RegExp(`^(?:${RESUME_SKILLS_HEADING_RE.source})$`, "i");
+  if (re.test(bare)) return true;
+  // "Tools & Technologies" / "Skills and Tools": every word is heading filler.
+  const filler = /^(?:tools?|technolog(?:y|ies)|skills?|stack|tech|core|key|technical|expertise|competenc(?:y|ies)|proficienc(?:y|ies)|abilities|&|and)$/i;
+  const words = bare.split(/[\s&]+/).filter(Boolean);
+  return words.length > 0 && words.every(w => filler.test(w));
+}
+
+// Single-letter language names the length floor would otherwise throw away.
+const ONE_CHAR_SKILLS = new Set(["c", "r"]);
+
 // A skills list holds short noun phrases, not sentences. Reject anything that
 // reads like prose so résumé narrative can't leak into the skill set.
 function isPlausibleSkill(s) {
-  if (!s || s.length < 2 || s.length > 40) return false;
+  if (!s) return false;
+  if (s.length === 1) return ONE_CHAR_SKILLS.has(s.toLowerCase());
+  if (s.length > 40) return false;
   if (!/[A-Za-z]/.test(s)) return false;                     // "5+" etc.
   if (s.split(/\s+/).length > 4) return false;               // sentence fragment
   if (/\b(?:and|with|the|for|of|in|to|using|experience|years?)\b/i.test(s)) return false;
@@ -1280,7 +1331,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === "ADD_CANDIDATE") {
     (async () => {
       try {
-        const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime, candidate_source } = payload;
+        const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime, candidate_source,
+                override_note, override_score } = payload;
         const jazzhr_token = await getJazzhrToken();
         // Sourcing channel ("LinkedIn" / "Dice.com") — sent top-level as well as on
         // the candidate; the backend normalizes it into scout_candidates.candidate_source
@@ -1289,7 +1341,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           method:  "POST",
           headers: scoutHeaders(),
           body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token,
-                                    candidate_source: candidate_source || candidate?.source || "" }),
+                                    candidate_source: candidate_source || candidate?.source || "",
+                                    // Set only when the recruiter added below the fit-score
+                                    // floor; the backend files it on the candidate timeline.
+                                    override_note, override_score }),
         });
         const text = await r.text();
         let data;

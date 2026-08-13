@@ -802,6 +802,95 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
   cursor: default;
 }
 
+/* Below-threshold escape hatch — warning-toned so it never reads as the happy
+   path, and outlined so it stays secondary to the primary CTA above it. */
+.btn-override {
+  background: color-mix(in srgb, var(--fair) 10%, transparent);
+  color: var(--fair);
+  border: 1.5px solid color-mix(in srgb, var(--fair) 35%, transparent);
+}
+
+.btn-override:hover:not(:disabled) { background: color-mix(in srgb, var(--fair) 18%, transparent); }
+
+.btn-override:disabled {
+  background: var(--surface-2);
+  color: var(--text-3);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
+/* ── Modal (override reason) ── */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 340px;
+  padding: 16px;
+  background: var(--surface);
+  border: var(--card-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+}
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.modal-sub {
+  margin: 6px 0 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.modal-textarea {
+  width: 100%;
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+
+.modal-textarea:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: var(--focus);
+}
+
+.modal-textarea.invalid { border-color: var(--poor); }
+
+.modal-error {
+  min-height: 15px;
+  margin-top: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--poor);
+}
+
+/* Side-by-side, unlike .action-bar's stacked buttons. */
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.modal-actions .btn { margin-bottom: 0; }
+
 /* Primary CTA sits in normal flow at the end of the report. */
 .action-bar {
   display: flex;
