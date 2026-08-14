@@ -639,7 +639,25 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
 .cat-bar-fill.fair      { background: var(--fair); }
 .cat-bar-fill.poor      { background: var(--poor); }
 
-.cat-foot { display: flex; justify-content: flex-end; }
+/* Points earned sit on the left of the foot row, the detail text on the right. */
+.cat-foot { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.cat-points {
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.cat-points.excellent { color: var(--excellent); }
+.cat-points.good      { color: var(--good); }
+.cat-points.fair      { color: var(--fair); }
+.cat-points.poor      { color: var(--poor); }
+.cat-points-max { font-weight: 500; color: var(--text-3); }
+
+/* Renormalized-out bucket: shown for transparency, dimmed so it never reads as a
+   scored row. No bar, since there is no fill to draw. */
+.cat-row.skipped { opacity: 0.62; }
+.cat-row.skipped .cat-foot { margin-top: 2px; }
+.cat-score.muted,
+.cat-points.muted { color: var(--text-3); font-weight: 600; }
 .cat-detail { font-size: 10px; color: var(--text-3); }
 
 /* ── Matched vs missing skills (doc §3.4) ── */

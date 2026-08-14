@@ -274,35 +274,291 @@ const CITY_MATCHERS = Object.keys(CITY_NAMES).map(key => ({
   state: CITY_NAMES[key],
   re: new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
 }));
+
+// ── Non-US geography ──────────────────────────────────────────────────────────
+// Postings and profiles outside the US carried no US state token, so the location
+// bucket silently dropped out of every such score ("job location not specified").
+//
+// Region codes are ALWAYS country-namespaced: "US-TX", "IN-TN", "CA-ON", or a
+// bare ISO country code ("DE", "SG") when only the country is known. The prefix
+// is what keeps two-letter collisions apart — Tennessee is "US-TN", Tunisia "TN";
+// Delaware "US-DE", Germany "DE"; California "US-CA", Canada "CA".
+//
+// Sub-region granularity exists where these postings need it (US states, Indian
+// states, Canadian provinces). Everywhere else the country is the unit: two cities
+// in Germany count as the same location. regionsMatch() handles the mixed case
+// (country-only vs country+sub-region).
+const INDIA_STATE_NAMES = {
+  "andhra pradesh":"IN-AP","arunachal pradesh":"IN-AR",assam:"IN-AS",bihar:"IN-BR",
+  chhattisgarh:"IN-CG",chattisgarh:"IN-CG",goa:"IN-GA",gujarat:"IN-GJ",haryana:"IN-HR",
+  "himachal pradesh":"IN-HP",jharkhand:"IN-JH",karnataka:"IN-KA",kerala:"IN-KL",
+  "madhya pradesh":"IN-MP",maharashtra:"IN-MH",manipur:"IN-MN",meghalaya:"IN-ML",
+  mizoram:"IN-MZ",nagaland:"IN-NL",odisha:"IN-OD",orissa:"IN-OD",punjab:"IN-PB",
+  rajasthan:"IN-RJ",sikkim:"IN-SK","tamil nadu":"IN-TN",tamilnadu:"IN-TN",
+  telangana:"IN-TG",tripura:"IN-TR","uttar pradesh":"IN-UP",uttarakhand:"IN-UK",
+  "west bengal":"IN-WB","new delhi":"IN-DL",delhi:"IN-DL","jammu and kashmir":"IN-JK",
+  ladakh:"IN-LA",puducherry:"IN-PY",pondicherry:"IN-PY",chandigarh:"IN-CH",
+};
+// City → state for the metros that actually appear on these postings. Names that
+// also name a US city (Salem, Aurora, Columbia) are deliberately left out — the
+// country cue can't be relied on to disambiguate them.
+const INDIA_CITY_NAMES = {
+  chennai:"IN-TN",madras:"IN-TN",coimbatore:"IN-TN",madurai:"IN-TN",
+  tiruchirappalli:"IN-TN",trichy:"IN-TN",tirunelveli:"IN-TN",vellore:"IN-TN",
+  bengaluru:"IN-KA",bangalore:"IN-KA",mysuru:"IN-KA",mysore:"IN-KA",
+  mangaluru:"IN-KA",mangalore:"IN-KA",hubli:"IN-KA",belgaum:"IN-KA",
+  hyderabad:"IN-TG",secunderabad:"IN-TG",warangal:"IN-TG","hitec city":"IN-TG",
+  vijayawada:"IN-AP",visakhapatnam:"IN-AP",vizag:"IN-AP",tirupati:"IN-AP",guntur:"IN-AP",
+  mumbai:"IN-MH",bombay:"IN-MH",pune:"IN-MH","navi mumbai":"IN-MH",thane:"IN-MH",
+  nagpur:"IN-MH",nashik:"IN-MH",aurangabad:"IN-MH",
+  ahmedabad:"IN-GJ",surat:"IN-GJ",vadodara:"IN-GJ",baroda:"IN-GJ",rajkot:"IN-GJ",
+  gandhinagar:"IN-GJ",
+  kochi:"IN-KL",cochin:"IN-KL",thiruvananthapuram:"IN-KL",trivandrum:"IN-KL",
+  kozhikode:"IN-KL",calicut:"IN-KL",thrissur:"IN-KL",
+  kolkata:"IN-WB",calcutta:"IN-WB","salt lake sector v":"IN-WB",siliguri:"IN-WB",
+  noida:"IN-UP","greater noida":"IN-UP",ghaziabad:"IN-UP",lucknow:"IN-UP",
+  kanpur:"IN-UP",varanasi:"IN-UP",agra:"IN-UP",prayagraj:"IN-UP",allahabad:"IN-UP",
+  gurgaon:"IN-HR",gurugram:"IN-HR",faridabad:"IN-HR",panchkula:"IN-HR",
+  jaipur:"IN-RJ",udaipur:"IN-RJ",jodhpur:"IN-RJ",
+  indore:"IN-MP",bhopal:"IN-MP",jabalpur:"IN-MP",gwalior:"IN-MP",
+  patna:"IN-BR",ranchi:"IN-JH",jamshedpur:"IN-JH",bhubaneswar:"IN-OD",
+  raipur:"IN-CG",dehradun:"IN-UK",guwahati:"IN-AS",panaji:"IN-GA",
+  ludhiana:"IN-PB",amritsar:"IN-PB",mohali:"IN-PB",
+};
+// Canadian provinces. The two-letter forms are checked against a "City, XX" comma
+// the same way US states are, since none of them collide with a US abbreviation.
+const CANADA_PROVINCE_ABBRS = new Set(["ON","QC","BC","AB","MB","SK","NS","NB","NL","PE","YT","NT","NU"]);
+const CANADA_PROVINCE_NAMES = {
+  ontario:"CA-ON",quebec:"CA-QC","québec":"CA-QC","british columbia":"CA-BC",alberta:"CA-AB",
+  manitoba:"CA-MB",saskatchewan:"CA-SK","nova scotia":"CA-NS","new brunswick":"CA-NB",
+  newfoundland:"CA-NL","prince edward island":"CA-PE",yukon:"CA-YT",
+  "northwest territories":"CA-NT",nunavut:"CA-NU",
+};
+const CANADA_CITY_NAMES = {
+  toronto:"CA-ON",ottawa:"CA-ON",mississauga:"CA-ON",brampton:"CA-ON",markham:"CA-ON",
+  waterloo:"CA-ON",kitchener:"CA-ON","north york":"CA-ON",oshawa:"CA-ON",windsor:"CA-ON",
+  montreal:"CA-QC","montréal":"CA-QC","quebec city":"CA-QC",laval:"CA-QC",gatineau:"CA-QC",
+  vancouver:"CA-BC",burnaby:"CA-BC",surrey:"CA-BC",richmond:"CA-BC",kelowna:"CA-BC",
+  calgary:"CA-AB",edmonton:"CA-AB",winnipeg:"CA-MB",saskatoon:"CA-SK",regina:"CA-SK",
+  halifax:"CA-NS",moncton:"CA-NB","st. john's":"CA-NL",
+};
+// Country names/aliases → ISO-3166 alpha-2. Canonical name listed first per code:
+// the display label is derived from it. Names that are also US places (Georgia)
+// or common English words (Chad, Turkey as a noun, Jordan as a surname) are
+// omitted rather than risk a false match in JD prose.
+const COUNTRY_NAMES = {
+  "united states of america":"US","united states":"US",usa:"US","u.s.a.":"US",
+  canada:"CA",mexico:"MX",brazil:"BR",brasil:"BR",argentina:"AR",chile:"CL",colombia:"CO",
+  peru:"PE",uruguay:"UY","costa rica":"CR",panama:"PA",ecuador:"EC",guatemala:"GT",
+  "dominican republic":"DO",paraguay:"PY",bolivia:"BO","puerto rico":"PR",
+  "united kingdom":"GB",uk:"GB",england:"GB",scotland:"GB",wales:"GB","northern ireland":"GB",
+  "great britain":"GB",ireland:"IE",france:"FR",germany:"DE",deutschland:"DE",spain:"ES",
+  portugal:"PT",italy:"IT",netherlands:"NL",holland:"NL",belgium:"BE",luxembourg:"LU",
+  switzerland:"CH",austria:"AT",denmark:"DK",norway:"NO",sweden:"SE",finland:"FI",
+  iceland:"IS",poland:"PL",czechia:"CZ","czech republic":"CZ",slovakia:"SK",hungary:"HU",
+  romania:"RO",bulgaria:"BG",greece:"GR",croatia:"HR",serbia:"RS",slovenia:"SI",
+  ukraine:"UA",lithuania:"LT",latvia:"LV",estonia:"EE",russia:"RU",belarus:"BY",
+  cyprus:"CY",malta:"MT",albania:"AL","bosnia and herzegovina":"BA","north macedonia":"MK",
+  "türkiye":"TR",turkiye:"TR",israel:"IL","united arab emirates":"AE",uae:"AE",
+  "saudi arabia":"SA",qatar:"QA",kuwait:"KW",bahrain:"BH",oman:"OM",lebanon:"LB",
+  egypt:"EG",morocco:"MA",tunisia:"TN",algeria:"DZ",
+  "south africa":"ZA",nigeria:"NG",kenya:"KE",ghana:"GH",ethiopia:"ET",rwanda:"RW",
+  uganda:"UG",tanzania:"TZ",
+  india:"IN",pakistan:"PK",bangladesh:"BD","sri lanka":"LK",nepal:"NP",bhutan:"BT",
+  maldives:"MV",afghanistan:"AF",
+  china:"CN","hong kong":"HK",taiwan:"TW",japan:"JP","south korea":"KR",korea:"KR",
+  singapore:"SG",malaysia:"MY",indonesia:"ID",thailand:"TH",vietnam:"VN","viet nam":"VN",
+  philippines:"PH",cambodia:"KH",myanmar:"MM",laos:"LA",brunei:"BN",mongolia:"MN",
+  australia:"AU","new zealand":"NZ",fiji:"FJ",
+  kazakhstan:"KZ",uzbekistan:"UZ",armenia:"AM",azerbaijan:"AZ",
+};
+// Major cities → country, for postings that name only the city ("Hiring in Berlin").
+// Deliberately excludes any name that also appears in CITY_NAMES above or names a
+// well-known US city (Manchester, Birmingham, Vienna, Athens, Alexandria, Naples,
+// Florence, Valencia, Columbia, Salem, Cordoba) — those stay US.
+const WORLD_CITY_NAMES = {
+  london:"GB",edinburgh:"GB",glasgow:"GB",leeds:"GB",bristol:"GB",cardiff:"GB",
+  belfast:"GB",liverpool:"GB",sheffield:"GB",nottingham:"GB","milton keynes":"GB",
+  dublin:"IE",galway:"IE",limerick:"IE",
+  paris:"FR",lyon:"FR",toulouse:"FR",marseille:"FR",bordeaux:"FR",lille:"FR",nantes:"FR",
+  "sophia antipolis":"FR",
+  berlin:"DE",munich:"DE","münchen":"DE",hamburg:"DE",frankfurt:"DE",cologne:"DE","köln":"DE",
+  stuttgart:"DE","düsseldorf":"DE",dusseldorf:"DE",leipzig:"DE",dresden:"DE",nuremberg:"DE",
+  madrid:"ES",barcelona:"ES",seville:"ES",sevilla:"ES",malaga:"ES","málaga":"ES",bilbao:"ES",
+  zaragoza:"ES",
+  lisbon:"PT",lisboa:"PT",porto:"PT",braga:"PT",
+  rome:"IT",milan:"IT",milano:"IT",turin:"IT",torino:"IT",bologna:"IT",palermo:"IT",
+  amsterdam:"NL",rotterdam:"NL","the hague":"NL",utrecht:"NL",eindhoven:"NL",
+  brussels:"BE",antwerp:"BE",ghent:"BE",leuven:"BE",
+  zurich:"CH","zürich":"CH",geneva:"CH",basel:"CH",lausanne:"CH",bern:"CH",zug:"CH",
+  salzburg:"AT",graz:"AT",linz:"AT",
+  copenhagen:"DK",aarhus:"DK",oslo:"NO",bergen:"NO",trondheim:"NO",
+  stockholm:"SE",gothenburg:"SE",gothenberg:"SE","malmö":"SE",
+  helsinki:"FI",espoo:"FI",tampere:"FI",oulu:"FI",reykjavik:"IS",
+  warsaw:"PL",warszawa:"PL",krakow:"PL","kraków":"PL",wroclaw:"PL","wrocław":"PL",
+  gdansk:"PL","gdańsk":"PL",poznan:"PL","poznań":"PL",lodz:"PL",katowice:"PL",
+  prague:"CZ",praha:"CZ",brno:"CZ",ostrava:"CZ",bratislava:"SK",kosice:"SK",
+  budapest:"HU",debrecen:"HU",
+  bucharest:"RO","cluj-napoca":"RO",cluj:"RO",timisoara:"RO","timișoara":"RO",iasi:"RO","iași":"RO",
+  sofia:"BG",plovdiv:"BG",varna:"BG",
+  thessaloniki:"GR",zagreb:"HR",belgrade:"RS","novi sad":"RS",ljubljana:"SI",
+  kyiv:"UA",kiev:"UA",lviv:"UA",kharkiv:"UA",odesa:"UA",odessa:"UA",dnipro:"UA",
+  vilnius:"LT",kaunas:"LT",riga:"LV",tallinn:"EE",minsk:"BY",
+  moscow:"RU","novosibirsk":"RU",yekaterinburg:"RU",kazan:"RU",
+  istanbul:"TR",ankara:"TR",izmir:"TR",
+  "tel aviv":"IL",jerusalem:"IL",haifa:"IL",herzliya:"IL","ramat gan":"IL","be'er sheva":"IL",
+  dubai:"AE","abu dhabi":"AE",sharjah:"AE",ajman:"AE",doha:"QA",
+  riyadh:"SA",jeddah:"SA",dammam:"SA",khobar:"SA","kuwait city":"KW",manama:"BH",muscat:"OM",
+  amman:"JO",beirut:"LB",cairo:"EG",giza:"EG",casablanca:"MA",rabat:"MA",marrakech:"MA",
+  tunis:"TN",algiers:"DZ",
+  lagos:"NG",abuja:"NG","port harcourt":"NG",nairobi:"KE",mombasa:"KE",accra:"GH",
+  "cape town":"ZA",johannesburg:"ZA",pretoria:"ZA",durban:"ZA",centurion:"ZA",
+  kigali:"RW",kampala:"UG",
+  karachi:"PK",lahore:"PK",islamabad:"PK",rawalpindi:"PK",dhaka:"BD",chittagong:"BD",
+  colombo:"LK",kandy:"LK",kathmandu:"NP",
+  beijing:"CN",shanghai:"CN",shenzhen:"CN",guangzhou:"CN",hangzhou:"CN",chengdu:"CN",
+  "xi'an":"CN",wuhan:"CN",suzhou:"CN",nanjing:"CN",tianjin:"CN",dalian:"CN",xiamen:"CN",
+  "hong kong":"HK",kowloon:"HK",taipei:"TW",hsinchu:"TW",kaohsiung:"TW",
+  tokyo:"JP",osaka:"JP",kyoto:"JP",yokohama:"JP",nagoya:"JP",fukuoka:"JP",sapporo:"JP",kobe:"JP",
+  seoul:"KR",busan:"KR",incheon:"KR",pangyo:"KR",daejeon:"KR",
+  "kuala lumpur":"MY",penang:"MY","johor bahru":"MY",cyberjaya:"MY",putrajaya:"MY",
+  jakarta:"ID",bandung:"ID",surabaya:"ID",denpasar:"ID",yogyakarta:"ID",
+  bangkok:"TH","chiang mai":"TH",phuket:"TH",
+  hanoi:"VN","ho chi minh":"VN",saigon:"VN","da nang":"VN",danang:"VN","can tho":"VN",
+  manila:"PH",makati:"PH",cebu:"PH","quezon city":"PH",taguig:"PH",davao:"PH",pasig:"PH",
+  "phnom penh":"KH",yangon:"MM",vientiane:"LA",
+  sydney:"AU",melbourne:"AU",brisbane:"AU",perth:"AU",adelaide:"AU",canberra:"AU",
+  "gold coast":"AU",hobart:"AU",
+  auckland:"NZ",wellington:"NZ",christchurch:"NZ",
+  "mexico city":"MX",guadalajara:"MX",monterrey:"MX",tijuana:"MX",queretaro:"MX",
+  "querétaro":"MX",merida:"MX",puebla:"MX",
+  "sao paulo":"BR","são paulo":"BR","rio de janeiro":"BR",brasilia:"BR","brasília":"BR",
+  curitiba:"BR","belo horizonte":"BR",campinas:"BR",recife:"BR","porto alegre":"BR",
+  florianopolis:"BR","florianópolis":"BR",fortaleza:"BR",
+  "buenos aires":"AR",rosario:"AR",mendoza:"AR",
+  santiago:"CL","viña del mar":"CL",bogota:"CO","bogotá":"CO",medellin:"CO","medellín":"CO",
+  barranquilla:"CO",lima:"PE",quito:"EC",guayaquil:"EC",montevideo:"UY",asuncion:"PY",
+  "san jose costa rica":"CR",heredia:"CR",escazu:"CR","santo domingo":"DO",
+  almaty:"KZ",astana:"KZ",tashkent:"UZ",yerevan:"AM",baku:"AZ",
+};
+// One matcher list, ordered most-specific first: sub-region names and cities
+// resolve to "CC-XX" before a bare country name collapses the text to "CC".
+const WORLD_MATCHERS = [
+  ...Object.entries(INDIA_STATE_NAMES),
+  ...Object.entries(INDIA_CITY_NAMES),
+  ...Object.entries(CANADA_PROVINCE_NAMES),
+  ...Object.entries(CANADA_CITY_NAMES),
+].map(([key, code]) => ({
+  code,
+  re: new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
+}));
+const WORLD_CITY_MATCHERS = Object.entries(WORLD_CITY_NAMES).map(([key, code]) => ({
+  code,
+  re: new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
+}));
+const titleCase = s => s.replace(/\b[a-z]/g, ch => ch.toUpperCase());
+// Country code → display name, taken from the first (canonical) alias listed.
+const COUNTRY_LABELS = {};
+for (const name in COUNTRY_NAMES) {
+  const code = COUNTRY_NAMES[name];
+  if (!COUNTRY_LABELS[code]) COUNTRY_LABELS[code] = titleCase(name);
+}
+// Sub-region code → display name ("IN-TN" → "Tamil Nadu, India").
+const REGION_LABELS = {};
+for (const [table, country] of [[INDIA_STATE_NAMES, "India"], [CANADA_PROVINCE_NAMES, "Canada"]]) {
+  for (const name in table) {
+    const code = table[name];
+    if (!REGION_LABELS[code]) REGION_LABELS[code] = `${titleCase(name)}, ${country}`;
+  }
+}
+// "US-TX" → "TX" (the US display the card has always shown), "IN-TN" → "Tamil
+// Nadu, India", "DE" → "Germany".
+function formatRegion(code) {
+  if (!code) return "";
+  if (code.startsWith("US-")) return code.slice(3);
+  return REGION_LABELS[code] || COUNTRY_LABELS[code] || code;
+}
+function regionCountry(code) {
+  const i = code.indexOf("-");
+  return i === -1 ? code : code.slice(0, i);
+}
+// Same region → match. Different countries → no match. Same country where one
+// side is country-only ("DE" vs a hypothetical "DE-BY") → match: a mismatch can't
+// be proven, and crossing a border is the constraint that actually matters.
+function regionsMatch(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (regionCountry(a) !== regionCountry(b)) return false;
+  return !a.includes("-") || !b.includes("-");
+}
+// Non-US lookup: sub-regions and cities first, bare country name last.
+function detectWorldRegion(text) {
+  for (const m of WORLD_MATCHERS)      if (m.re.test(text)) return m.code;
+  return "";
+}
+// `strict` (JD prose) makes a bare country NAME count only next to a location
+// cue or a "City, Country" comma — a description that merely mentions "our India
+// team" must not relocate the job. City names stay unconditional: they're
+// specific enough, same as the US CITY_MATCHERS above.
+function detectWorldFallback(text, strict) {
+  for (const m of WORLD_CITY_MATCHERS) if (m.re.test(text)) return m.code;
+  for (const name in COUNTRY_NAMES) {
+    const key = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = strict
+      ? new RegExp(`(?:,\\s*|\\b(?:in|near|located\\s+in|based\\s+in|onsite\\s+in|relocate\\s+to|location\\s*[:\\-–—]?)\\s+)${key}\\b`, "i")
+      : new RegExp(`\\b${key}\\b`, "i");
+    if (re.test(text)) return COUNTRY_NAMES[name];
+  }
+  return "";
+}
 // Two-letter abbreviations that are also common English words or mean something
 // else in a JD ("onsite OR remote", "experience IN Java", "LA" = Los Angeles).
 // The preposition cue below refuses these; an explicit "Location: OR" still counts.
 const WORDLIKE_ABBRS = new Set(["IN", "OR", "OK", "ME", "HI", "DE", "LA"]);
-// Extract a US state abbreviation. `bareAbbr` allows a lone two-letter token —
-// safe for a short controlled string (candidate "City, ST") but NOT for JD prose,
-// where words like "IN"/"OR"/"OK" would false-match, so JD parsing passes false.
+// Extract a country-namespaced region code: "US-TX", "IN-TN", "CA-ON", or a bare
+// country code ("DE") when only the country is known. `bareAbbr` allows a lone
+// two-letter token — safe for a short controlled string (candidate "City, ST")
+// but NOT for JD prose, where words like "IN"/"OR"/"OK" would false-match, so JD
+// parsing passes false. Returns "" when nothing is recognized (the location
+// bucket then stays out of the score rather than guessing).
+//
+// Order is most-specific-first: an explicit "City, XX" beats every name table, US
+// and known-sub-region names beat bare city names, and a bare country name is the
+// last resort so "Chennai, India" resolves to IN-TN rather than a flat IN.
 function detectState(text, bareAbbr) {
   if (!text) return "";
   const comma = text.match(/,\s*([A-Za-z]{2})\b/);
-  if (comma && STATE_ABBRS.has(comma[1].toUpperCase())) return comma[1].toUpperCase();
+  if (comma) {
+    const ab = comma[1].toUpperCase();
+    if (STATE_ABBRS.has(ab)) return "US-" + ab;
+    if (CANADA_PROVINCE_ABBRS.has(ab)) return "CA-" + ab;
+  }
   const low = text.toLowerCase();
   // "Washington DC" must beat the plain "washington" → WA state name.
-  if (/washington\s*,?\s*d\.?\s*c\.?/.test(low)) return "DC";
-  for (const name in STATE_NAMES) if (low.includes(name)) return STATE_NAMES[name];
-  for (const c of CITY_MATCHERS) if (c.re.test(text)) return c.state;
+  if (/washington\s*,?\s*d\.?\s*c\.?/.test(low)) return "US-DC";
+  // Non-US sub-regions are checked before the US tables: the key sets are disjoint,
+  // and an explicit "City, ST" (the only real overlap risk) already returned above.
+  const sub = detectWorldRegion(text);
+  if (sub) return sub;
+  for (const name in STATE_NAMES) if (low.includes(name)) return "US-" + STATE_NAMES[name];
+  for (const c of CITY_MATCHERS) if (c.re.test(text)) return "US-" + c.state;
+  // Foreign city / country names come after the US tables so a shared name
+  // (London KY, Paris TX) keeps resolving to the US place it does today.
+  const world = detectWorldFallback(text, !bareAbbr);
+  if (world) return world;
   if (bareAbbr) {
     const bare = text.match(/\b([A-Z]{2})\b/);
-    if (bare && STATE_ABBRS.has(bare[1])) return bare[1];
+    if (bare && STATE_ABBRS.has(bare[1])) return "US-" + bare[1];
     return "";
   }
   // JD prose: a lone abbreviation is only trusted when a location cue precedes
   // it, and the token must be uppercase in the source (so the sentence word
   // "in" can't pull a state out of lowercase text).
   const label = text.match(/\b(?:work\s+|job\s+)?location\s*[:\-–—]?\s*([A-Za-z]{2})\b/i);
-  if (label && label[1] === label[1].toUpperCase() && STATE_ABBRS.has(label[1])) return label[1];
+  if (label && label[1] === label[1].toUpperCase() && STATE_ABBRS.has(label[1])) return "US-" + label[1];
   const cue = text.match(/\b(?:in|near|onsite\s+in|located\s+in|based\s+in|relocate\s+to)\s+([A-Za-z]{2})\b/i);
   if (cue && cue[1] === cue[1].toUpperCase()
-      && STATE_ABBRS.has(cue[1]) && !WORDLIKE_ABBRS.has(cue[1])) return cue[1];
+      && STATE_ABBRS.has(cue[1]) && !WORDLIKE_ABBRS.has(cue[1])) return "US-" + cue[1];
   return "";
 }
 
@@ -910,14 +1166,15 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
     :                              0;
 
   // Location bucket — active when the JD is remote, or both JD and candidate
-  // states are known. Remote → location is not a constraint (full credit); same
-  // state → full; different state → zero (penalized). Unknown either side and
-  // not remote → bucket stays out (no penalty for missing data).
+  // regions are known. Remote → location is not a constraint (full credit); same
+  // region → full; different region → zero (penalized). Unknown either side and
+  // not remote → bucket stays out (no penalty for missing data). Regions are
+  // country-namespaced, so this works the same for "US-TX" and "IN-TN".
   const jdRemote  = !!requirements.jd_remote;
   const jdState   = requirements.jd_state || "";
   const candState = detectState(candidate.location || "", true);
   const locationActive = jdRemote || (!!jdState && !!candState);
-  const locationFill = jdRemote ? 1 : (jdState && candState && jdState === candState ? 1 : 0);
+  const locationFill = jdRemote ? 1 : (regionsMatch(jdState, candState) ? 1 : 0);
 
   // ── Composite (doc §3.3 weights) ────────────────────────────────────────────
   // Required 35 / Preferred 15 / Clearance 20 / Education 15 / Location 15.
@@ -944,7 +1201,7 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   else                  label = "Poor Fit";
 
   // ── Per-category breakdown for the score card (doc §3.4) ────────────────────
-  const jdLoc = jdRemote ? "Remote" : (jdState || "");
+  const jdLoc = jdRemote ? "Remote" : formatRegion(jdState);
   const categories = [
     { key: "required",  name: "Required Skills",    weight: W_REQ, active: true,
       fill: reqFill,  matched: matchedReq, missing: missingReq },
@@ -955,7 +1212,7 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
     { key: "education", name: "Education",          weight: W_EDU, active: educationActive,
       fill: educationFill, detected: candEdu.label || "None", required: reqEdu.label || "None" },
     { key: "location",  name: "Location / Commute", weight: W_LOC, active: locationActive,
-      fill: locationFill, detected: candState || (candidate.location || "").trim() || "Unknown", required: jdLoc || "Any" },
+      fill: locationFill, detected: formatRegion(candState) || (candidate.location || "").trim() || "Unknown", required: jdLoc || "Any" },
   ];
 
   // ── Auto-scheduling gate (doc §4) — pass/fail on the four critical categories,
@@ -1012,13 +1269,15 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
     parts.push(`Remote role — location not a constraint.`);
   } else if (jdState) {
     const candLoc = (candidate.location || "").trim();
+    const jdName   = formatRegion(jdState);
+    const candName = formatRegion(candState);
     parts.push(!candState
       ? (candLoc
-          ? `Located in ${candLoc}; job located in ${jdState}.`
-          : `Candidate location unknown; job located in ${jdState}.`)
-      : jdState === candState
-        ? `Located in ${candState} — matches the ${jdState} job location.`
-        : `Located in ${candState}, outside the ${jdState} job location.`);
+          ? `Located in ${candLoc}; job located in ${jdName}.`
+          : `Candidate location unknown; job located in ${jdName}.`)
+      : regionsMatch(jdState, candState)
+        ? `Located in ${candName} — matches the ${jdName} job location.`
+        : `Located in ${candName}, outside the ${jdName} job location.`);
   }
 
   return { score, label, rationale: parts.join(" "), categories, gates, auto_schedule };
@@ -1085,6 +1344,10 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     // override when set, so a blank intake keeps a location the JD text stated.
     const structState = detectState([job.city, job.state].filter(Boolean).join(", "), true);
     if (structState) requirements.jd_state = structState;
+    // Last resort: many postings carry the city only in the title
+    // ("… (Python / FastAPI) - Chennai · Chennai, India"). bareAbbr stays false so
+    // a title word like "IN" can't be read as Indiana.
+    if (!requirements.jd_state) requirements.jd_state = detectState(job.title || "", false);
     cached = { title: job.title, requirements };
     jobCache.set(jd_id, cached);
   }

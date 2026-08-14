@@ -884,13 +884,20 @@ function renderScore(data, updated = false) {
   validateEmail(emailTouched);
 }
 
-// Doc §3.4 — per-category breakdown: weight, sub-score, and a fill bar. Only the
-// categories the JD actually specifies are shown (others renormalized out).
+// Doc §3.4 — per-category breakdown: weight, sub-score, points earned, and a fill
+// bar. Only the categories the JD actually specifies are shown (others renormalized
+// out).
 function renderBreakdown(categories) {
   if (!scoreBreakdown) return;
   if (!categories || !categories.length) { scoreBreakdown.innerHTML = ''; return; }
 
-  const rows = categories.filter(c => c.active).map(c => {
+  const active = categories.filter(c => c.active);
+  // `weight` is the raw rubric weight (35/15/20/15/15); the score renormalizes over
+  // the active buckets only, so the points shown must do the same to add up to the
+  // number in the ring.
+  const totalWeight = active.reduce((s, c) => s + (c.weight || 0), 0) || 1;
+
+  const rows = active.map(c => {
     const pct = Math.round((c.fill || 0) * 100);
     const tone = pct >= 100 ? 'excellent' : pct >= 60 ? 'good' : pct >= 30 ? 'fair' : 'poor';
     let detail = '';
@@ -902,6 +909,9 @@ function renderBreakdown(categories) {
       const m = (c.matched || []).length, t = m + (c.missing || []).length;
       detail = `<span class="cat-detail">${m}/${t}</span>`;
     }
+    // Points this category put into the 100-point total, out of the most it could.
+    const maxPoints = Math.round(((c.weight || 0) / totalWeight) * 100);
+    const points = Math.round(maxPoints * (c.fill || 0));
     return `
       <div class="cat-row">
         <div class="cat-head">
@@ -909,9 +919,12 @@ function renderBreakdown(categories) {
           <span class="cat-score ${tone}">${pct}%</span>
         </div>
         <div class="cat-bar"><div class="cat-bar-fill ${tone}" style="width:${pct}%"></div></div>
-        <div class="cat-foot">${detail}</div>
+        <div class="cat-foot">
+          <span class="cat-points ${tone}">${points}<span class="cat-points-max">/${maxPoints} pts</span></span>
+          ${detail}
+        </div>
       </div>`;
-  }).join('');
+  }).join('') + renderSkippedRows(categories);
 
   // Collapsible so the score + rationale stay above the fold on short panels.
   scoreBreakdown.innerHTML =
@@ -919,6 +932,38 @@ function renderBreakdown(categories) {
     `<summary class="report-summary">Category Breakdown</summary>` +
     `<div class="report-body">${rows}</div>` +
     `</details>`;
+}
+
+// A bucket the scorer left out (unstated on the JD, or undetectable on the profile)
+// is renormalized away — it neither helps nor hurts the score. Silently omitting the
+// row reads as a bug ("why is there no Location?"), so the row is still drawn, muted,
+// with the reason it wasn't scored. Location is the one that goes missing in practice;
+// clearance/education are only skipped when the JD plainly never mentions them.
+function renderSkippedRows(categories) {
+  const loc = (categories || []).find(c => c.key === 'location');
+  if (!loc || loc.active) return '';
+
+  const jdLoc = (loc.required || '').trim();          // 'Any' when the JD stated none
+  const candLoc = (loc.detected || '').trim();        // 'Unknown' when the profile had none
+  const jdKnown = jdLoc && jdLoc !== 'Any';
+  const candKnown = candLoc && candLoc !== 'Unknown';
+
+  let why;
+  if (!jdKnown && !candKnown) why = 'no location on the job or the profile';
+  else if (!jdKnown) why = `job location not specified (profile: ${candLoc})`;
+  else why = `profile location not recognized (job: ${jdLoc})`;
+
+  return `
+    <div class="cat-row skipped">
+      <div class="cat-head">
+        <span class="cat-name">${escapeHtml(loc.name)} <span class="cat-weight">${loc.weight}%</span></span>
+        <span class="cat-score muted">Not scored</span>
+      </div>
+      <div class="cat-foot">
+        <span class="cat-points muted">0/0 pts</span>
+        <span class="cat-detail">${escapeHtml(why)}</span>
+      </div>
+    </div>`;
 }
 
 // Doc §3.4 — matched vs missing required + preferred skills as chips.
