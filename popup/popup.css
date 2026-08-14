@@ -150,6 +150,18 @@ body {
   white-space: nowrap;
 }
 
+/* Non-production backend warning (localhost dev) — amber so it reads as "not live". */
+.env-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.18);
+  color: #fcd34d;
+  border: 1px solid rgba(252, 211, 77, 0.35);
+  white-space: nowrap;
+}
+
 .icon-btn {
   display: grid;
   place-items: center;

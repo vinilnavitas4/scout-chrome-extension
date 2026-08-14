@@ -10,6 +10,7 @@ const emailError = document.getElementById('email-error');
 const profilePhone = document.getElementById('profile-phone');
 const profilePhoneFound = document.getElementById('profile-phone-found');
 const sourceBadge = document.getElementById('source-badge');
+const envBadge = document.getElementById('env-badge');
 const jdSelect = document.getElementById('jd-select');
 const jdSpinner = document.getElementById('jd-spinner');
 const scoreCard = document.getElementById('score-card');
@@ -519,7 +520,22 @@ async function handleActiveTab() {
   }
 }
 
+// Show which backend this build talks to, but only when it isn't the deployed
+// one — a dev pointing at localhost should never wonder whether the candidate
+// they just added went to production.
+function showEnvBadge() {
+  chrome.runtime.sendMessage({ type: 'GET_CONFIG' }, (res) => {
+    if (chrome.runtime.lastError || !res?.ok) return;
+    const url = res.baseUrl || '';
+    if (url.includes('azurecontainerapps.io')) return;
+    envBadge.textContent = url.replace(/^https?:\/\//, '');
+    envBadge.title = `SCOUT backend: ${url}`;
+    envBadge.style.display = '';
+  });
+}
+
 window.addEventListener('DOMContentLoaded', () => {
+  showEnvBadge();
   loadJds();
   handleActiveTab();
 });

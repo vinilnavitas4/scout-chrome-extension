@@ -1,8 +1,19 @@
-const BASE_URL = "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
+// Runtime config. config.js holds the deployed defaults; config.local.js is a
+// gitignored local override (see config.local.example.js) that points the
+// extension at a scout-service running on this machine. A missing local file is
+// the normal case — importScripts throws on 404, so swallow that.
+importScripts(chrome.runtime.getURL("config.js"));
+try { importScripts(chrome.runtime.getURL("config.local.js")); }
+catch (_) { /* no local override — using deployed defaults */ }
+
+const BASE_URL = self.SCOUT_CONFIG.BASE_URL;
 
 // Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
 // Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
-const SCOUT_KEY = "scout_a5ThvEKUjRbZmlpDyKQOF9WcKb2fiEl8Vat-8f_3Bzg";
+const SCOUT_KEY = self.SCOUT_CONFIG.SCOUT_KEY;
+
+// Logged on every worker start so it's never ambiguous which backend is in use.
+console.log(`[SCOUT] backend: ${BASE_URL}`);
 
 // Standard JSON headers + Scout key for all backend calls.
 function scoutHeaders(extra) {
@@ -1225,6 +1236,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.target === "offscreen-embed" || message?.target === "offscreen-embed-status" || message?.target === "offscreen-pdf") return;
   const { type, payload } = message;
+
+  // ── GET_CONFIG — which backend is this build talking to? The panel uses it
+  // to show a LOCAL badge so a dev session is never mistaken for production.
+  // The worker owns the config (it does the importScripts), so pages ask it
+  // rather than loading the possibly-absent config.local.js themselves. ──────
+  if (type === "GET_CONFIG") {
+    sendResponse({ ok: true, baseUrl: BASE_URL });
+    return;
+  }
 
   // ── PARSE_RESUME_PDF — content script fetched résumé bytes but can't load
   // pdf.js in its world; parse them in the offscreen doc and return the text. ──
