@@ -456,7 +456,10 @@ const WORLD_CITY_MATCHERS = Object.entries(WORLD_CITY_NAMES).map(([key, code]) =
   code,
   re: new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
 }));
-const titleCase = s => s.replace(/\b[a-z]/g, ch => ch.toUpperCase());
+// Upper-cases the first letter of each word. `\b[a-z]` would also fire after a
+// non-ASCII letter (\b sits between "ü" and "r"), turning "türkiye" into
+// "TÜRkiye" — anchor on an actual word separator instead.
+const titleCase = s => s.replace(/(^|[\s,.'’\-])([a-z])/g, (_, sep, ch) => sep + ch.toUpperCase());
 // Country code → display name, taken from the first (canonical) alias listed.
 const COUNTRY_LABELS = {};
 for (const name in COUNTRY_NAMES) {
