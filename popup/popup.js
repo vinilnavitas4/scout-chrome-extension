@@ -910,8 +910,11 @@ function renderBreakdown(categories) {
       detail = `<span class="cat-detail">${m}/${t}</span>`;
     }
     // Points this category put into the 100-point total, out of the most it could.
-    const maxPoints = Math.round(((c.weight || 0) / totalWeight) * 100);
-    const points = Math.round(maxPoints * (c.fill || 0));
+    // Round each column off the true renormalized share (maxRaw), never off an
+    // already-rounded value — double-rounding drifts the earned total off the ring.
+    const maxRaw = ((c.weight || 0) / totalWeight) * 100;
+    const maxPoints = Math.round(maxRaw);
+    const points = Math.round(maxRaw * (c.fill || 0));
     return `
       <div class="cat-row">
         <div class="cat-head">
