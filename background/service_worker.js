@@ -1,4 +1,4 @@
-const BASE_URL = "https://navitas-ai-platform.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
+const BASE_URL = "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
 // Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
 // Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
@@ -7,6 +7,22 @@ const SCOUT_KEY = "scout_a5ThvEKUjRbZmlpDyKQOF9WcKb2fiEl8Vat-8f_3Bzg";
 // Standard JSON headers + Scout key for all backend calls.
 function scoutHeaders(extra) {
   return { "Content-Type": "application/json", "X-Scout-Key": SCOUT_KEY, ...(extra || {}) };
+}
+
+// GET a Scout JSON endpoint. When the host answers with an HTML page instead —
+// an Azure error page, an auth redirect, or a deploy where the Scout routes are
+// missing — r.json() throws the useless "Unexpected token '<'". Report the
+// status and path so the panel says what actually broke.
+async function scoutGetJson(path) {
+  const r    = await fetch(`${BASE_URL}${path}`, { headers: scoutHeaders() });
+  const text = await r.text();
+  if (!r.ok) {
+    throw new Error(r.status === 404
+      ? `Scout API not found at ${path} (HTTP 404) — backend not deployed`
+      : `Backend HTTP ${r.status} at ${path}`);
+  }
+  try { return JSON.parse(text); }
+  catch (_) { throw new Error(`Backend returned non-JSON at ${path}: ${text.slice(0, 80)}`); }
 }
 
 // Open the side panel when the toolbar icon is clicked.
@@ -193,37 +209,348 @@ const STATE_NAMES = {
 // LinkedIn often reports a metro/city only ("Greater Boston Area", "San Francisco
 // Bay Area"), with no state token. Map the major US metros to a state so those
 // locations still score instead of reading as "unknown". Mirrored in score_endpoint.py.
+// Ambiguous names (one city name, several states) are mapped to the metro the
+// JDs we see actually mean — e.g. "Arlington" → VA (DC metro), not TX. An
+// explicit "City, ST" always wins because the comma form is checked first.
 const CITY_NAMES = {
   "san francisco":"CA","bay area":"CA","silicon valley":"CA","san jose":"CA",oakland:"CA",
   "los angeles":"CA","san diego":"CA",sacramento:"CA","orange county":"CA",
-  "new york":"NY",nyc:"NY",manhattan:"NY",brooklyn:"NY",
-  boston:"MA",chicago:"IL",seattle:"WA",portland:"OR","las vegas":"NV",
+  "long beach":"CA",anaheim:"CA",irvine:"CA",fresno:"CA",riverside:"CA","santa clara":"CA",
+  "palo alto":"CA","mountain view":"CA",sunnyvale:"CA",cupertino:"CA","redwood city":"CA",
+  berkeley:"CA","santa monica":"CA","san mateo":"CA","el segundo":"CA","culver city":"CA",
+  "new york":"NY",nyc:"NY",manhattan:"NY",brooklyn:"NY",queens:"NY",bronx:"NY",
+  "long island":"NY",westchester:"NY",albany:"NY",buffalo:"NY",rochester:"NY",syracuse:"NY",
+  boston:"MA",cambridge:"MA",somerville:"MA",quincy:"MA",worcester:"MA",springfield:"MA",
+  chicago:"IL",naperville:"IL",schaumburg:"IL",evanston:"IL",
+  seattle:"WA",bellevue:"WA",redmond:"WA",tacoma:"WA",spokane:"WA",
+  portland:"OR",beaverton:"OR","las vegas":"NV",reno:"NV",henderson:"NV",
   houston:"TX",dallas:"TX",austin:"TX","san antonio":"TX","fort worth":"TX",
-  philadelphia:"PA",pittsburgh:"PA",atlanta:"GA",
-  miami:"FL",orlando:"FL",tampa:"FL",jacksonville:"FL",
-  denver:"CO",phoenix:"AZ",tucson:"AZ",detroit:"MI",
-  minneapolis:"MN","st. paul":"MN","saint paul":"MN","st paul":"MN",
-  charlotte:"NC",raleigh:"NC",durham:"NC",nashville:"TN",memphis:"TN",
-  baltimore:"MD","salt lake city":"UT",columbus:"OH",cleveland:"OH",cincinnati:"OH",
+  plano:"TX",irving:"TX",frisco:"TX",richardson:"TX","el paso":"TX",
+  philadelphia:"PA",pittsburgh:"PA",allentown:"PA","king of prussia":"PA",
+  newark:"NJ","jersey city":"NJ",princeton:"NJ",hoboken:"NJ",edison:"NJ",trenton:"NJ",
+  atlanta:"GA",alpharetta:"GA",savannah:"GA",augusta:"GA",
+  miami:"FL",orlando:"FL",tampa:"FL",jacksonville:"FL","fort lauderdale":"FL",
+  "st. petersburg":"FL","saint petersburg":"FL",tallahassee:"FL",
+  denver:"CO",boulder:"CO","colorado springs":"CO",aurora:"CO",
+  phoenix:"AZ",tucson:"AZ",scottsdale:"AZ",chandler:"AZ",tempe:"AZ",mesa:"AZ",
+  detroit:"MI","ann arbor":"MI",troy:"MI",dearborn:"MI",
+  minneapolis:"MN","st. paul":"MN","saint paul":"MN","st paul":"MN",bloomington:"MN",
+  charlotte:"NC",raleigh:"NC",durham:"NC","chapel hill":"NC",cary:"NC",greensboro:"NC",
+  "research triangle":"NC","rtp":"NC",
+  nashville:"TN",memphis:"TN",knoxville:"TN",chattanooga:"TN",
+  "salt lake city":"UT",provo:"UT",
+  columbus:"OH",cleveland:"OH",cincinnati:"OH",dayton:"OH",
   "kansas city":"MO","st. louis":"MO","saint louis":"MO","st louis":"MO",
-  indianapolis:"IN",milwaukee:"WI","new orleans":"LA",richmond:"VA",
+  indianapolis:"IN",milwaukee:"WI","new orleans":"LA","baton rouge":"LA",
+  "oklahoma city":"OK",tulsa:"OK","little rock":"AR",boise:"ID",omaha:"NE",
+  wichita:"KS","overland park":"KS",louisville:"KY",lexington:"KY",birmingham:"AL",huntsville:"AL",
+  charleston:"SC",columbia:"SC",greenville:"SC",jackson:"MS",
+  hartford:"CT",stamford:"CT","new haven":"CT",providence:"RI",manchester:"NH",
+  wilmington:"DE",albuquerque:"NM",
+  // DC metro — the largest source of "city only" cleared-work JDs.
+  arlington:"VA",alexandria:"VA",reston:"VA",herndon:"VA",tysons:"VA","mclean":"VA",
+  vienna:"VA",fairfax:"VA",chantilly:"VA",ashburn:"VA",sterling:"VA",dulles:"VA",
+  quantico:"VA",richmond:"VA","virginia beach":"VA",norfolk:"VA",
+  chesapeake:"VA",charlottesville:"VA",roanoke:"VA",
+  baltimore:"MD",bethesda:"MD",rockville:"MD","silver spring":"MD",annapolis:"MD",
+  "college park":"MD",gaithersburg:"MD",frederick:"MD",
+  "fort meade":"MD","ft. meade":"MD",
+  "dmv area":"DC","national capital region":"DC",
 };
-// Extract a US state abbreviation. `bareAbbr` allows a lone two-letter token —
-// safe for a short controlled string (candidate "City, ST") but NOT for JD prose,
-// where words like "IN"/"OR"/"OK" would false-match, so JD parsing passes false.
+// Matched with word boundaries so a short key can't hit inside a longer word
+// (e.g. "cary" inside "Carytown"). Insertion order decides ties.
+const CITY_MATCHERS = Object.keys(CITY_NAMES).map(key => ({
+  state: CITY_NAMES[key],
+  re: new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
+}));
+
+// ── Non-US geography ──────────────────────────────────────────────────────────
+// Postings and profiles outside the US carried no US state token, so the location
+// bucket silently dropped out of every such score ("job location not specified").
+//
+// Region codes are ALWAYS country-namespaced: "US-TX", "IN-TN", "CA-ON", or a
+// bare ISO country code ("DE", "SG") when only the country is known. The prefix
+// is what keeps two-letter collisions apart — Tennessee is "US-TN", Tunisia "TN";
+// Delaware "US-DE", Germany "DE"; California "US-CA", Canada "CA".
+//
+// Sub-region granularity exists where these postings need it (US states, Indian
+// states, Canadian provinces). Everywhere else the country is the unit: two cities
+// in Germany count as the same location. regionsMatch() handles the mixed case
+// (country-only vs country+sub-region).
+const INDIA_STATE_NAMES = {
+  "andhra pradesh":"IN-AP","arunachal pradesh":"IN-AR",assam:"IN-AS",bihar:"IN-BR",
+  chhattisgarh:"IN-CG",chattisgarh:"IN-CG",goa:"IN-GA",gujarat:"IN-GJ",haryana:"IN-HR",
+  "himachal pradesh":"IN-HP",jharkhand:"IN-JH",karnataka:"IN-KA",kerala:"IN-KL",
+  "madhya pradesh":"IN-MP",maharashtra:"IN-MH",manipur:"IN-MN",meghalaya:"IN-ML",
+  mizoram:"IN-MZ",nagaland:"IN-NL",odisha:"IN-OD",orissa:"IN-OD",punjab:"IN-PB",
+  rajasthan:"IN-RJ",sikkim:"IN-SK","tamil nadu":"IN-TN",tamilnadu:"IN-TN",
+  telangana:"IN-TG",tripura:"IN-TR","uttar pradesh":"IN-UP",uttarakhand:"IN-UK",
+  "west bengal":"IN-WB","new delhi":"IN-DL",delhi:"IN-DL","jammu and kashmir":"IN-JK",
+  ladakh:"IN-LA",puducherry:"IN-PY",pondicherry:"IN-PY",chandigarh:"IN-CH",
+};
+// City → state for the metros that actually appear on these postings. Names that
+// also name a US city (Salem, Aurora, Columbia) are deliberately left out — the
+// country cue can't be relied on to disambiguate them.
+const INDIA_CITY_NAMES = {
+  chennai:"IN-TN",madras:"IN-TN",coimbatore:"IN-TN",madurai:"IN-TN",
+  tiruchirappalli:"IN-TN",trichy:"IN-TN",tirunelveli:"IN-TN",vellore:"IN-TN",
+  bengaluru:"IN-KA",bangalore:"IN-KA",mysuru:"IN-KA",mysore:"IN-KA",
+  mangaluru:"IN-KA",mangalore:"IN-KA",hubli:"IN-KA",belgaum:"IN-KA",
+  hyderabad:"IN-TG",secunderabad:"IN-TG",warangal:"IN-TG","hitec city":"IN-TG",
+  vijayawada:"IN-AP",visakhapatnam:"IN-AP",vizag:"IN-AP",tirupati:"IN-AP",guntur:"IN-AP",
+  mumbai:"IN-MH",bombay:"IN-MH",pune:"IN-MH","navi mumbai":"IN-MH",thane:"IN-MH",
+  nagpur:"IN-MH",nashik:"IN-MH",aurangabad:"IN-MH",
+  ahmedabad:"IN-GJ",surat:"IN-GJ",vadodara:"IN-GJ",baroda:"IN-GJ",rajkot:"IN-GJ",
+  gandhinagar:"IN-GJ",
+  kochi:"IN-KL",cochin:"IN-KL",thiruvananthapuram:"IN-KL",trivandrum:"IN-KL",
+  kozhikode:"IN-KL",calicut:"IN-KL",thrissur:"IN-KL",
+  kolkata:"IN-WB",calcutta:"IN-WB","salt lake sector v":"IN-WB",siliguri:"IN-WB",
+  noida:"IN-UP","greater noida":"IN-UP",ghaziabad:"IN-UP",lucknow:"IN-UP",
+  kanpur:"IN-UP",varanasi:"IN-UP",agra:"IN-UP",prayagraj:"IN-UP",allahabad:"IN-UP",
+  gurgaon:"IN-HR",gurugram:"IN-HR",faridabad:"IN-HR",panchkula:"IN-HR",
+  jaipur:"IN-RJ",udaipur:"IN-RJ",jodhpur:"IN-RJ",
+  indore:"IN-MP",bhopal:"IN-MP",jabalpur:"IN-MP",gwalior:"IN-MP",
+  patna:"IN-BR",ranchi:"IN-JH",jamshedpur:"IN-JH",bhubaneswar:"IN-OD",
+  raipur:"IN-CG",dehradun:"IN-UK",guwahati:"IN-AS",panaji:"IN-GA",
+  ludhiana:"IN-PB",amritsar:"IN-PB",mohali:"IN-PB",
+};
+// Canadian provinces. The two-letter forms are checked against a "City, XX" comma
+// the same way US states are, since none of them collide with a US abbreviation.
+const CANADA_PROVINCE_ABBRS = new Set(["ON","QC","BC","AB","MB","SK","NS","NB","NL","PE","YT","NT","NU"]);
+const CANADA_PROVINCE_NAMES = {
+  ontario:"CA-ON",quebec:"CA-QC","québec":"CA-QC","british columbia":"CA-BC",alberta:"CA-AB",
+  manitoba:"CA-MB",saskatchewan:"CA-SK","nova scotia":"CA-NS","new brunswick":"CA-NB",
+  newfoundland:"CA-NL","prince edward island":"CA-PE",yukon:"CA-YT",
+  "northwest territories":"CA-NT",nunavut:"CA-NU",
+};
+const CANADA_CITY_NAMES = {
+  toronto:"CA-ON",ottawa:"CA-ON",mississauga:"CA-ON",brampton:"CA-ON",markham:"CA-ON",
+  waterloo:"CA-ON",kitchener:"CA-ON","north york":"CA-ON",oshawa:"CA-ON",windsor:"CA-ON",
+  montreal:"CA-QC","montréal":"CA-QC","quebec city":"CA-QC",laval:"CA-QC",gatineau:"CA-QC",
+  vancouver:"CA-BC",burnaby:"CA-BC",surrey:"CA-BC",richmond:"CA-BC",kelowna:"CA-BC",
+  calgary:"CA-AB",edmonton:"CA-AB",winnipeg:"CA-MB",saskatoon:"CA-SK",regina:"CA-SK",
+  halifax:"CA-NS",moncton:"CA-NB","st. john's":"CA-NL",
+};
+// Country names/aliases → ISO-3166 alpha-2. Canonical name listed first per code:
+// the display label is derived from it. Names that are also US places (Georgia)
+// or common English words (Chad, Turkey as a noun, Jordan as a surname) are
+// omitted rather than risk a false match in JD prose.
+const COUNTRY_NAMES = {
+  "united states of america":"US","united states":"US",usa:"US","u.s.a.":"US",
+  canada:"CA",mexico:"MX",brazil:"BR",brasil:"BR",argentina:"AR",chile:"CL",colombia:"CO",
+  peru:"PE",uruguay:"UY","costa rica":"CR",panama:"PA",ecuador:"EC",guatemala:"GT",
+  "dominican republic":"DO",paraguay:"PY",bolivia:"BO","puerto rico":"PR",
+  "united kingdom":"GB",uk:"GB",england:"GB",scotland:"GB",wales:"GB","northern ireland":"GB",
+  "great britain":"GB",ireland:"IE",france:"FR",germany:"DE",deutschland:"DE",spain:"ES",
+  portugal:"PT",italy:"IT",netherlands:"NL",holland:"NL",belgium:"BE",luxembourg:"LU",
+  switzerland:"CH",austria:"AT",denmark:"DK",norway:"NO",sweden:"SE",finland:"FI",
+  iceland:"IS",poland:"PL",czechia:"CZ","czech republic":"CZ",slovakia:"SK",hungary:"HU",
+  romania:"RO",bulgaria:"BG",greece:"GR",croatia:"HR",serbia:"RS",slovenia:"SI",
+  ukraine:"UA",lithuania:"LT",latvia:"LV",estonia:"EE",russia:"RU",belarus:"BY",
+  cyprus:"CY",malta:"MT",albania:"AL","bosnia and herzegovina":"BA","north macedonia":"MK",
+  "türkiye":"TR",turkiye:"TR",israel:"IL","united arab emirates":"AE",uae:"AE",
+  "saudi arabia":"SA",qatar:"QA",kuwait:"KW",bahrain:"BH",oman:"OM",lebanon:"LB",
+  egypt:"EG",morocco:"MA",tunisia:"TN",algeria:"DZ",
+  "south africa":"ZA",nigeria:"NG",kenya:"KE",ghana:"GH",ethiopia:"ET",rwanda:"RW",
+  uganda:"UG",tanzania:"TZ",
+  india:"IN",pakistan:"PK",bangladesh:"BD","sri lanka":"LK",nepal:"NP",bhutan:"BT",
+  maldives:"MV",afghanistan:"AF",
+  china:"CN","hong kong":"HK",taiwan:"TW",japan:"JP","south korea":"KR",korea:"KR",
+  singapore:"SG",malaysia:"MY",indonesia:"ID",thailand:"TH",vietnam:"VN","viet nam":"VN",
+  philippines:"PH",cambodia:"KH",myanmar:"MM",laos:"LA",brunei:"BN",mongolia:"MN",
+  australia:"AU","new zealand":"NZ",fiji:"FJ",
+  kazakhstan:"KZ",uzbekistan:"UZ",armenia:"AM",azerbaijan:"AZ",
+};
+// Major cities → country, for postings that name only the city ("Hiring in Berlin").
+// Deliberately excludes any name that also appears in CITY_NAMES above or names a
+// well-known US city (Manchester, Birmingham, Vienna, Athens, Alexandria, Naples,
+// Florence, Valencia, Columbia, Salem, Cordoba) — those stay US.
+const WORLD_CITY_NAMES = {
+  london:"GB",edinburgh:"GB",glasgow:"GB",leeds:"GB",bristol:"GB",cardiff:"GB",
+  belfast:"GB",liverpool:"GB",sheffield:"GB",nottingham:"GB","milton keynes":"GB",
+  dublin:"IE",galway:"IE",limerick:"IE",
+  paris:"FR",lyon:"FR",toulouse:"FR",marseille:"FR",bordeaux:"FR",lille:"FR",nantes:"FR",
+  "sophia antipolis":"FR",
+  berlin:"DE",munich:"DE","münchen":"DE",hamburg:"DE",frankfurt:"DE",cologne:"DE","köln":"DE",
+  stuttgart:"DE","düsseldorf":"DE",dusseldorf:"DE",leipzig:"DE",dresden:"DE",nuremberg:"DE",
+  madrid:"ES",barcelona:"ES",seville:"ES",sevilla:"ES",malaga:"ES","málaga":"ES",bilbao:"ES",
+  zaragoza:"ES",
+  lisbon:"PT",lisboa:"PT",porto:"PT",braga:"PT",
+  rome:"IT",milan:"IT",milano:"IT",turin:"IT",torino:"IT",bologna:"IT",palermo:"IT",
+  amsterdam:"NL",rotterdam:"NL","the hague":"NL",utrecht:"NL",eindhoven:"NL",
+  brussels:"BE",antwerp:"BE",ghent:"BE",leuven:"BE",
+  zurich:"CH","zürich":"CH",geneva:"CH",basel:"CH",lausanne:"CH",bern:"CH",zug:"CH",
+  salzburg:"AT",graz:"AT",linz:"AT",
+  copenhagen:"DK",aarhus:"DK",oslo:"NO",bergen:"NO",trondheim:"NO",
+  stockholm:"SE",gothenburg:"SE",gothenberg:"SE","malmö":"SE",
+  helsinki:"FI",espoo:"FI",tampere:"FI",oulu:"FI",reykjavik:"IS",
+  warsaw:"PL",warszawa:"PL",krakow:"PL","kraków":"PL",wroclaw:"PL","wrocław":"PL",
+  gdansk:"PL","gdańsk":"PL",poznan:"PL","poznań":"PL",lodz:"PL",katowice:"PL",
+  prague:"CZ",praha:"CZ",brno:"CZ",ostrava:"CZ",bratislava:"SK",kosice:"SK",
+  budapest:"HU",debrecen:"HU",
+  bucharest:"RO","cluj-napoca":"RO",cluj:"RO",timisoara:"RO","timișoara":"RO",iasi:"RO","iași":"RO",
+  sofia:"BG",plovdiv:"BG",varna:"BG",
+  thessaloniki:"GR",zagreb:"HR",belgrade:"RS","novi sad":"RS",ljubljana:"SI",
+  kyiv:"UA",kiev:"UA",lviv:"UA",kharkiv:"UA",odesa:"UA",odessa:"UA",dnipro:"UA",
+  vilnius:"LT",kaunas:"LT",riga:"LV",tallinn:"EE",minsk:"BY",
+  moscow:"RU","novosibirsk":"RU",yekaterinburg:"RU",kazan:"RU",
+  istanbul:"TR",ankara:"TR",izmir:"TR",
+  "tel aviv":"IL",jerusalem:"IL",haifa:"IL",herzliya:"IL","ramat gan":"IL","be'er sheva":"IL",
+  dubai:"AE","abu dhabi":"AE",sharjah:"AE",ajman:"AE",doha:"QA",
+  riyadh:"SA",jeddah:"SA",dammam:"SA",khobar:"SA","kuwait city":"KW",manama:"BH",muscat:"OM",
+  amman:"JO",beirut:"LB",cairo:"EG",giza:"EG",casablanca:"MA",rabat:"MA",marrakech:"MA",
+  tunis:"TN",algiers:"DZ",
+  lagos:"NG",abuja:"NG","port harcourt":"NG",nairobi:"KE",mombasa:"KE",accra:"GH",
+  "cape town":"ZA",johannesburg:"ZA",pretoria:"ZA",durban:"ZA",centurion:"ZA",
+  kigali:"RW",kampala:"UG",
+  karachi:"PK",lahore:"PK",islamabad:"PK",rawalpindi:"PK",dhaka:"BD",chittagong:"BD",
+  colombo:"LK",kandy:"LK",kathmandu:"NP",
+  beijing:"CN",shanghai:"CN",shenzhen:"CN",guangzhou:"CN",hangzhou:"CN",chengdu:"CN",
+  "xi'an":"CN",wuhan:"CN",suzhou:"CN",nanjing:"CN",tianjin:"CN",dalian:"CN",xiamen:"CN",
+  "hong kong":"HK",kowloon:"HK",taipei:"TW",hsinchu:"TW",kaohsiung:"TW",
+  tokyo:"JP",osaka:"JP",kyoto:"JP",yokohama:"JP",nagoya:"JP",fukuoka:"JP",sapporo:"JP",kobe:"JP",
+  seoul:"KR",busan:"KR",incheon:"KR",pangyo:"KR",daejeon:"KR",
+  "kuala lumpur":"MY",penang:"MY","johor bahru":"MY",cyberjaya:"MY",putrajaya:"MY",
+  jakarta:"ID",bandung:"ID",surabaya:"ID",denpasar:"ID",yogyakarta:"ID",
+  bangkok:"TH","chiang mai":"TH",phuket:"TH",
+  hanoi:"VN","ho chi minh":"VN",saigon:"VN","da nang":"VN",danang:"VN","can tho":"VN",
+  manila:"PH",makati:"PH",cebu:"PH","quezon city":"PH",taguig:"PH",davao:"PH",pasig:"PH",
+  "phnom penh":"KH",yangon:"MM",vientiane:"LA",
+  sydney:"AU",melbourne:"AU",brisbane:"AU",perth:"AU",adelaide:"AU",canberra:"AU",
+  "gold coast":"AU",hobart:"AU",
+  auckland:"NZ",wellington:"NZ",christchurch:"NZ",
+  "mexico city":"MX",guadalajara:"MX",monterrey:"MX",tijuana:"MX",queretaro:"MX",
+  "querétaro":"MX",merida:"MX",puebla:"MX",
+  "sao paulo":"BR","são paulo":"BR","rio de janeiro":"BR",brasilia:"BR","brasília":"BR",
+  curitiba:"BR","belo horizonte":"BR",campinas:"BR",recife:"BR","porto alegre":"BR",
+  florianopolis:"BR","florianópolis":"BR",fortaleza:"BR",
+  "buenos aires":"AR",rosario:"AR",mendoza:"AR",
+  santiago:"CL","viña del mar":"CL",bogota:"CO","bogotá":"CO",medellin:"CO","medellín":"CO",
+  barranquilla:"CO",lima:"PE",quito:"EC",guayaquil:"EC",montevideo:"UY",asuncion:"PY",
+  "san jose costa rica":"CR",heredia:"CR",escazu:"CR","santo domingo":"DO",
+  almaty:"KZ",astana:"KZ",tashkent:"UZ",yerevan:"AM",baku:"AZ",
+};
+// One matcher list, ordered most-specific first: sub-region names and cities
+// resolve to "CC-XX" before a bare country name collapses the text to "CC".
+const WORLD_MATCHERS = [
+  ...Object.entries(INDIA_STATE_NAMES),
+  ...Object.entries(INDIA_CITY_NAMES),
+  ...Object.entries(CANADA_PROVINCE_NAMES),
+  ...Object.entries(CANADA_CITY_NAMES),
+].map(([key, code]) => ({
+  code,
+  re: new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
+}));
+const WORLD_CITY_MATCHERS = Object.entries(WORLD_CITY_NAMES).map(([key, code]) => ({
+  code,
+  re: new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
+}));
+// Upper-cases the first letter of each word. `\b[a-z]` would also fire after a
+// non-ASCII letter (\b sits between "ü" and "r"), turning "türkiye" into
+// "TÜRkiye" — anchor on an actual word separator instead.
+const titleCase = s => s.replace(/(^|[\s,.'’\-])([a-z])/g, (_, sep, ch) => sep + ch.toUpperCase());
+// Country code → display name, taken from the first (canonical) alias listed.
+const COUNTRY_LABELS = {};
+for (const name in COUNTRY_NAMES) {
+  const code = COUNTRY_NAMES[name];
+  if (!COUNTRY_LABELS[code]) COUNTRY_LABELS[code] = titleCase(name);
+}
+// Sub-region code → display name ("IN-TN" → "Tamil Nadu, India").
+const REGION_LABELS = {};
+for (const [table, country] of [[INDIA_STATE_NAMES, "India"], [CANADA_PROVINCE_NAMES, "Canada"]]) {
+  for (const name in table) {
+    const code = table[name];
+    if (!REGION_LABELS[code]) REGION_LABELS[code] = `${titleCase(name)}, ${country}`;
+  }
+}
+// "US-TX" → "TX" (the US display the card has always shown), "IN-TN" → "Tamil
+// Nadu, India", "DE" → "Germany".
+function formatRegion(code) {
+  if (!code) return "";
+  if (code.startsWith("US-")) return code.slice(3);
+  return REGION_LABELS[code] || COUNTRY_LABELS[code] || code;
+}
+function regionCountry(code) {
+  const i = code.indexOf("-");
+  return i === -1 ? code : code.slice(0, i);
+}
+// Same region → match. Different countries → no match. Same country where one
+// side is country-only ("DE" vs a hypothetical "DE-BY") → match: a mismatch can't
+// be proven, and crossing a border is the constraint that actually matters.
+function regionsMatch(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (regionCountry(a) !== regionCountry(b)) return false;
+  return !a.includes("-") || !b.includes("-");
+}
+// Non-US lookup: sub-regions and cities first, bare country name last.
+function detectWorldRegion(text) {
+  for (const m of WORLD_MATCHERS)      if (m.re.test(text)) return m.code;
+  return "";
+}
+// `strict` (JD prose) makes a bare country NAME count only next to a location
+// cue or a "City, Country" comma — a description that merely mentions "our India
+// team" must not relocate the job. City names stay unconditional: they're
+// specific enough, same as the US CITY_MATCHERS above.
+function detectWorldFallback(text, strict) {
+  for (const m of WORLD_CITY_MATCHERS) if (m.re.test(text)) return m.code;
+  for (const name in COUNTRY_NAMES) {
+    const key = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = strict
+      ? new RegExp(`(?:,\\s*|\\b(?:in|near|located\\s+in|based\\s+in|onsite\\s+in|relocate\\s+to|location\\s*[:\\-–—]?)\\s+)${key}\\b`, "i")
+      : new RegExp(`\\b${key}\\b`, "i");
+    if (re.test(text)) return COUNTRY_NAMES[name];
+  }
+  return "";
+}
+// Two-letter abbreviations that are also common English words or mean something
+// else in a JD ("onsite OR remote", "experience IN Java", "LA" = Los Angeles).
+// The preposition cue below refuses these; an explicit "Location: OR" still counts.
+const WORDLIKE_ABBRS = new Set(["IN", "OR", "OK", "ME", "HI", "DE", "LA"]);
+// Extract a country-namespaced region code: "US-TX", "IN-TN", "CA-ON", or a bare
+// country code ("DE") when only the country is known. `bareAbbr` allows a lone
+// two-letter token — safe for a short controlled string (candidate "City, ST")
+// but NOT for JD prose, where words like "IN"/"OR"/"OK" would false-match, so JD
+// parsing passes false. Returns "" when nothing is recognized (the location
+// bucket then stays out of the score rather than guessing).
+//
+// Order is most-specific-first: an explicit "City, XX" beats every name table, US
+// and known-sub-region names beat bare city names, and a bare country name is the
+// last resort so "Chennai, India" resolves to IN-TN rather than a flat IN.
 function detectState(text, bareAbbr) {
   if (!text) return "";
   const comma = text.match(/,\s*([A-Za-z]{2})\b/);
-  if (comma && STATE_ABBRS.has(comma[1].toUpperCase())) return comma[1].toUpperCase();
+  if (comma) {
+    const ab = comma[1].toUpperCase();
+    if (STATE_ABBRS.has(ab)) return "US-" + ab;
+    if (CANADA_PROVINCE_ABBRS.has(ab)) return "CA-" + ab;
+  }
   const low = text.toLowerCase();
   // "Washington DC" must beat the plain "washington" → WA state name.
-  if (/washington\s*,?\s*d\.?\s*c\.?/.test(low)) return "DC";
-  for (const name in STATE_NAMES) if (low.includes(name)) return STATE_NAMES[name];
-  for (const city in CITY_NAMES) if (low.includes(city)) return CITY_NAMES[city];
+  if (/washington\s*,?\s*d\.?\s*c\.?/.test(low)) return "US-DC";
+  // Non-US sub-regions are checked before the US tables: the key sets are disjoint,
+  // and an explicit "City, ST" (the only real overlap risk) already returned above.
+  const sub = detectWorldRegion(text);
+  if (sub) return sub;
+  for (const name in STATE_NAMES) if (low.includes(name)) return "US-" + STATE_NAMES[name];
+  for (const c of CITY_MATCHERS) if (c.re.test(text)) return "US-" + c.state;
+  // Foreign city / country names come after the US tables so a shared name
+  // (London KY, Paris TX) keeps resolving to the US place it does today.
+  const world = detectWorldFallback(text, !bareAbbr);
+  if (world) return world;
   if (bareAbbr) {
     const bare = text.match(/\b([A-Z]{2})\b/);
-    if (bare && STATE_ABBRS.has(bare[1])) return bare[1];
+    if (bare && STATE_ABBRS.has(bare[1])) return "US-" + bare[1];
+    return "";
   }
+  // JD prose: a lone abbreviation is only trusted when a location cue precedes
+  // it, and the token must be uppercase in the source (so the sentence word
+  // "in" can't pull a state out of lowercase text).
+  const label = text.match(/\b(?:work\s+|job\s+)?location\s*[:\-–—]?\s*([A-Za-z]{2})\b/i);
+  if (label && label[1] === label[1].toUpperCase() && STATE_ABBRS.has(label[1])) return "US-" + label[1];
+  const cue = text.match(/\b(?:in|near|onsite\s+in|located\s+in|based\s+in|relocate\s+to)\s+([A-Za-z]{2})\b/i);
+  if (cue && cue[1] === cue[1].toUpperCase()
+      && STATE_ABBRS.has(cue[1]) && !WORDLIKE_ABBRS.has(cue[1])) return "US-" + cue[1];
   return "";
 }
 
@@ -231,6 +558,25 @@ function detectRemote(text) {
   if (!text) return false;
   if (/\b(?:not|no|non[\s-]?)\s*remote\b/i.test(text)) return false;
   return /\bremote\b/i.test(text);
+}
+
+// One rationale sentence for the location bucket. Shared by the local scorer and
+// the backend-location repair so both word it identically. Returns "" when the
+// JD expresses no location at all — nothing truthful to say.
+function locationSentence(jdRemote, jdState, candState, candLocationRaw) {
+  if (jdRemote) return "Remote role — location not a constraint.";
+  if (!jdState) return "";
+  const candLoc  = (candLocationRaw || "").trim();
+  const jdName   = formatRegion(jdState);
+  const candName = formatRegion(candState);
+  if (!candState) {
+    return candLoc
+      ? `Located in ${candLoc}; job located in ${jdName}.`
+      : `Candidate location unknown; job located in ${jdName}.`;
+  }
+  return regionsMatch(jdState, candState)
+    ? `Located in ${candName} — matches the ${jdName} job location.`
+    : `Located in ${candName}, outside the ${jdName} job location.`;
 }
 
 // ── Education signals ─────────────────────────────────────────────────────────
@@ -276,6 +622,109 @@ function resumeEducationSection(text) {
   const rest = text.slice(pick.index + pick[0].length);
   const next = rest.search(RESUME_NEXT_SECTION_RE);
   return (next >= 0 ? rest.slice(0, next) : rest).trim();
+}
+
+// ── Résumé Skills-section reader ──────────────────────────────────────────────
+// findKeywords only ever returns the fixed TOOL_KEYWORDS whitelist, so when a
+// résumé replaces the profile's skills every technology outside that list
+// (Blazor, RabbitMQ, Entity Framework, SSIS…) was silently dropped. Read the
+// résumé's own Skills section verbatim as well and union the two.
+const RESUME_SKILLS_HEADING_RE =
+  /\b(?:technical\s+skills|technical\s+expertise|technical\s+proficienc(?:y|ies)|core\s+competenc(?:y|ies)|skills\s*(?:&|and)\s*(?:tools|technologies|abilities)|key\s+skills|skills|technologies|tech\s+stack)\b\s*:?/gi;
+const RESUME_SKILLS_NEXT_RE =
+  /\b(?:(?:work|professional|employment)\s+(?:experience|history)|experience|education|academic|projects?|certifications?|licen[cs]es?|awards?|achievements?|publications?|interests|hobbies|references?|declaration|summary|objective)\b\s*:?/i;
+
+// Separators inside a skills block: commas, pipes, slashes-with-space, bullets,
+// semicolons, newlines. A bare "/" is NOT a separator — "CI/CD" is one skill.
+// Two-or-more spaces is a column gap left by the PDF/DOCX extractors, not a
+// space inside a phrase — "Machine Learning" keeps its single space.
+const SKILL_SPLIT_RE = /[,;|•·▪●•\n\r\t]+|\s+[-–—]\s+|\s{2,}/;
+
+function resumeListedSkills(text) {
+  if (!text) return [];
+  const matches = [...text.matchAll(RESUME_SKILLS_HEADING_RE)];
+  if (matches.length === 0) return [];
+  // Résumés routinely split their skills over several headings ("TECHNICAL
+  // SKILLS" then "Tools & Technologies"); reading only the first one dropped
+  // every later block. Take every match that reads like a real heading (ALL-CAPS
+  // or line-start) and union their sections, falling back to the first prose
+  // mention only when none of them qualify.
+  let heads = matches.filter(
+    m => m[0] === m[0].toUpperCase() || m.index === 0 || text[m.index - 1] === "\n"
+  );
+  if (heads.length === 0) heads = [matches[0]];
+
+  const out = [];
+  for (let i = 0; i < heads.length; i++) {
+    const head = heads[i];
+    // Stop before the following skills heading too, else that heading's own
+    // words ("Tools & Technologies") get read as a skill.
+    const limit = heads[i + 1] ? heads[i + 1].index : text.length;
+    for (const skill of skillsFromSection(text.slice(0, limit), head)) {
+      if (!out.some(s => s.toLowerCase() === skill.toLowerCase())) out.push(skill);
+      if (out.length >= 120) return out;   // runaway section guard
+    }
+  }
+  return out;
+}
+
+// Slice one skills block starting after `head` and split it into entries.
+function skillsFromSection(text, head) {
+  const rest = text.slice(head.index + head[0].length);
+  // End the block at the next section — but only where that word reads like a
+  // heading. A plain `search` ended the block on inline prose ("Java — 5 years
+  // experience"), truncating everything listed after it.
+  let end = rest.length;
+  const nextRe = new RegExp(RESUME_SKILLS_NEXT_RE.source, "gi");
+  let m;
+  while ((m = nextRe.exec(rest)) !== null) {
+    if (m.index === 0 || rest[m.index - 1] === "\n" || m[0] === m[0].toUpperCase()) {
+      end = m.index;
+      break;
+    }
+  }
+  const section = rest.slice(0, end).trim();
+  if (!section) return [];
+
+  const out = [];
+  for (let raw of section.split(SKILL_SPLIT_RE)) {
+    // Drop a leading category label ("Languages: Java Python" → "Java Python").
+    raw = raw.replace(/^[^:]{0,40}:\s*/, "").trim();
+    // Strip list punctuation and trailing "(5 yrs)" style annotations.
+    raw = raw.replace(/\(.*?\)/g, " ").replace(/^[^A-Za-z0-9+#.]+|[^A-Za-z0-9+#)]+$/g, "").trim();
+    raw = raw.replace(/\s+/g, " ");
+    if (!isPlausibleSkill(raw)) continue;
+    if (isSkillsHeading(raw)) continue;   // a sub-heading inside the block, not a skill
+    if (!out.some(s => s.toLowerCase() === raw.toLowerCase())) out.push(raw);
+  }
+  return out;
+}
+
+// True when the whole entry is nothing but heading words ("Tools & Technologies",
+// "Tech Stack") — a sub-heading the split picked up, not a skill.
+function isSkillsHeading(s) {
+  const bare = s.replace(/^[\s&|:-]+|[\s&|:-]+$/g, "");
+  const re = new RegExp(`^(?:${RESUME_SKILLS_HEADING_RE.source})$`, "i");
+  if (re.test(bare)) return true;
+  // "Tools & Technologies" / "Skills and Tools": every word is heading filler.
+  const filler = /^(?:tools?|technolog(?:y|ies)|skills?|stack|tech|core|key|technical|expertise|competenc(?:y|ies)|proficienc(?:y|ies)|abilities|&|and)$/i;
+  const words = bare.split(/[\s&]+/).filter(Boolean);
+  return words.length > 0 && words.every(w => filler.test(w));
+}
+
+// Single-letter language names the length floor would otherwise throw away.
+const ONE_CHAR_SKILLS = new Set(["c", "r"]);
+
+// A skills list holds short noun phrases, not sentences. Reject anything that
+// reads like prose so résumé narrative can't leak into the skill set.
+function isPlausibleSkill(s) {
+  if (!s) return false;
+  if (s.length === 1) return ONE_CHAR_SKILLS.has(s.toLowerCase());
+  if (s.length > 40) return false;
+  if (!/[A-Za-z]/.test(s)) return false;                     // "5+" etc.
+  if (s.split(/\s+/).length > 4) return false;               // sentence fragment
+  if (/\b(?:and|with|the|for|of|in|to|using|experience|years?)\b/i.test(s)) return false;
+  return true;
 }
 
 // ── Certification signals ─────────────────────────────────────────────────────
@@ -431,6 +880,23 @@ function calibrate(raw) {
   const { k, x0 } = CALIBRATION;
   return 100 / (1 + Math.exp(-k * (raw - x0)));
 }
+// Never show a 0 or a 100 — the rubric can't prove either end.
+function clampScore(raw) { return Math.min(Math.max(Math.round(raw), 5), 99); }
+function fitLabel(score) {
+  if (score >= 80) return "Excellent Fit";
+  if (score >= 65) return "Good Fit";
+  if (score >= 45) return "Fair Fit";
+  return "Poor Fit";
+}
+// Composite over the ACTIVE buckets only, renormalized to 100 (doc §3.3). Reads
+// the same category list the breakdown card renders, so the points in the card
+// and the number in the ring are always derived from one source.
+function compositeFromCategories(categories) {
+  const on = (categories || []).filter(c => c && c.active);
+  const w  = on.reduce((s, c) => s + (c.weight || 0), 0);
+  if (!w) return null;
+  return on.reduce((s, c) => s + ((c.weight || 0) / w) * (c.fill || 0) * 100, 0);
+}
 
 let creatingOffscreen = null; // de-dupe concurrent createDocument calls
 async function ensureOffscreen() {
@@ -580,8 +1046,13 @@ function makeTextMatcher(rawText) {
   const text = " " + normalizeSkill(rawText) + " ";
   if (!text.trim()) return () => false;
   const escWord = w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const phraseRe = (s) =>
-    new RegExp(`(?:^|[^A-Za-z0-9])${s.split(/\s+/).map(escWord).join("\\s+")}(?:$|[^A-Za-z0-9+#])`);
+  const phraseRe = (s) => {
+    // A skill that starts with punctuation (".NET") carries its own left
+    // boundary — demanding a non-alphanumeric char before it missed every
+    // "ASP.NET" / "VB.NET" mention in a résumé.
+    const lead = /^[A-Za-z0-9]/.test(s) ? "(?:^|[^A-Za-z0-9])" : "";
+    return new RegExp(`${lead}${s.split(/\s+/).map(escWord).join("\\s+")}(?:$|[^A-Za-z0-9+#])`);
+  };
   return (target) => {
     // Match the target's canonical + raw forms AND every alias variant that
     // canonicalizes to it — the text may use the alias ("k8s") while the JD
@@ -723,14 +1194,15 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
     :                              0;
 
   // Location bucket — active when the JD is remote, or both JD and candidate
-  // states are known. Remote → location is not a constraint (full credit); same
-  // state → full; different state → zero (penalized). Unknown either side and
-  // not remote → bucket stays out (no penalty for missing data).
+  // regions are known. Remote → location is not a constraint (full credit); same
+  // region → full; different region → zero (penalized). Unknown either side and
+  // not remote → bucket stays out (no penalty for missing data). Regions are
+  // country-namespaced, so this works the same for "US-TX" and "IN-TN".
   const jdRemote  = !!requirements.jd_remote;
   const jdState   = requirements.jd_state || "";
   const candState = detectState(candidate.location || "", true);
   const locationActive = jdRemote || (!!jdState && !!candState);
-  const locationFill = jdRemote ? 1 : (jdState && candState && jdState === candState ? 1 : 0);
+  const locationFill = jdRemote ? 1 : (regionsMatch(jdState, candState) ? 1 : 0);
 
   // ── Composite (doc §3.3 weights) ────────────────────────────────────────────
   // Required 35 / Preferred 15 / Clearance 20 / Education 15 / Location 15.
@@ -748,16 +1220,11 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   if (educationActive)         raw += (W_EDU / active) * educationFill * 100;
   if (locationActive)          raw += (W_LOC / active) * locationFill * 100;
 
-  const score = Math.min(Math.max(Math.round(calibrate(raw)), 5), 99);
-
-  let label;
-  if      (score >= 80) label = "Excellent Fit";
-  else if (score >= 65) label = "Good Fit";
-  else if (score >= 45) label = "Fair Fit";
-  else                  label = "Poor Fit";
+  const score = clampScore(calibrate(raw));
+  const label = fitLabel(score);
 
   // ── Per-category breakdown for the score card (doc §3.4) ────────────────────
-  const jdLoc = jdRemote ? "Remote" : (jdState || "");
+  const jdLoc = jdRemote ? "Remote" : formatRegion(jdState);
   const categories = [
     { key: "required",  name: "Required Skills",    weight: W_REQ, active: true,
       fill: reqFill,  matched: matchedReq, missing: missingReq },
@@ -768,7 +1235,7 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
     { key: "education", name: "Education",          weight: W_EDU, active: educationActive,
       fill: educationFill, detected: candEdu.label || "None", required: reqEdu.label || "None" },
     { key: "location",  name: "Location / Commute", weight: W_LOC, active: locationActive,
-      fill: locationFill, detected: candState || (candidate.location || "").trim() || "Unknown", required: jdLoc || "Any" },
+      fill: locationFill, detected: formatRegion(candState) || (candidate.location || "").trim() || "Unknown", required: jdLoc || "Any" },
   ];
 
   // ── Auto-scheduling gate (doc §4) — pass/fail on the four critical categories,
@@ -821,20 +1288,102 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   // Always report location whenever the JD expresses one (remote or a state),
   // even if the candidate's state is unknown — the bucket may stay out of the
   // score, but the match/mismatch is always surfaced in the rationale.
-  if (jdRemote) {
-    parts.push(`Remote role — location not a constraint.`);
-  } else if (jdState) {
-    const candLoc = (candidate.location || "").trim();
-    parts.push(!candState
-      ? (candLoc
-          ? `Located in ${candLoc}; job located in ${jdState}.`
-          : `Candidate location unknown; job located in ${jdState}.`)
-      : jdState === candState
-        ? `Located in ${candState} — matches the ${jdState} job location.`
-        : `Located in ${candState}, outside the ${jdState} job location.`);
-  }
+  const locLine = locationSentence(jdRemote, jdState, candState, candidate.location);
+  if (locLine) parts.push(locLine);
 
   return { score, label, rationale: parts.join(" "), categories, gates, auto_schedule };
+}
+
+// ── JD requirements (fetch + parse + cache) ───────────────────────────────────
+// One fetch per JD, shared by the local scorer and the backend location repair
+// so both read the same parsed requirements.
+// Parse one /api/scout/jobs/:id payload into a jobCache entry. EVERY writer of
+// jobCache goes through this — the prefetch warmer used to store the bare prose
+// parse, so a warm cache silently lost the location fallbacks below.
+function jobCacheEntry(job) {
+  const requirements = parseRequirements(job.description || "");
+  // The posting's structured city/state outrank whatever the description prose
+  // implies — prose is a guess, the intake fields are what was entered. Only
+  // override when set, so a blank intake keeps a location the JD text stated.
+  const structState = detectState([job.city, job.state].filter(Boolean).join(", "), true);
+  if (structState) requirements.jd_state = structState;
+  // Last resort: many postings carry the city only in the title
+  // ("… (Python / FastAPI) - Chennai · Chennai, India"). bareAbbr stays false so
+  // a title word like "IN" can't be read as Indiana.
+  if (!requirements.jd_state) requirements.jd_state = detectState(job.title || "", false);
+  return { title: job.title, requirements };
+}
+
+async function getJobRequirements(jd_id) {
+  const hit = jobCache.get(jd_id);
+  if (hit) return hit;
+  const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
+  if (job.error) throw new Error(job.error);
+  const entry = jobCacheEntry(job);
+  jobCache.set(jd_id, entry);
+  return entry;
+}
+
+// The backend scorer resolves a JD's location from the description prose alone —
+// it has neither the posting's structured city/state fields nor the city tables
+// this worker carries, so it drops the Location bucket on postings that DO name
+// a place, and the card reads "Not scored — job location not specified". Resolve
+// the region here and fold the bucket back in, renormalizing the composite over
+// the buckets that are then active. No-op when the location is genuinely unknown
+// on either side (missing data must not penalize the candidate).
+async function repairBackendLocation(result, jd_id, candidate) {
+  const cats = result.categories;
+  if (!Array.isArray(cats) || !cats.length) return result;
+  const loc = cats.find(c => c && c.key === "location");
+  if (!loc || loc.active) return result;
+
+  let requirements;
+  try {
+    ({ requirements } = await getJobRequirements(jd_id));
+  } catch (e) {
+    console.warn("[SCOUT] location repair: job fetch failed —", e.message);
+    return result;
+  }
+
+  const jdRemote  = !!requirements.jd_remote;
+  const jdState   = requirements.jd_state || "";
+  const candState = detectState(candidate.location || "", true);
+  if (!jdRemote && !(jdState && candState)) return result;   // still unknown → stays out
+
+  const fill = jdRemote ? 1 : (regionsMatch(jdState, candState) ? 1 : 0);
+  const categories = cats.map(c => c.key !== "location" ? c : {
+    ...c,
+    active: true,
+    fill,
+    detected: formatRegion(candState) || (candidate.location || "").trim() || "Unknown",
+    required: jdRemote ? "Remote" : formatRegion(jdState),
+  });
+
+  // Guard: recomputing WITHOUT location must reproduce the backend's own number.
+  // If it doesn't, the two sides disagree on the formula — patching the score
+  // from here would be a guess, so leave the backend result untouched.
+  const before = compositeFromCategories(cats);
+  const after  = compositeFromCategories(categories);
+  if (before === null || after === null) return result;
+  const rebuilt = clampScore(calibrate(before));
+  if (Math.abs(rebuilt - result.score) > 1) {
+    console.warn(`[SCOUT] location repair: score formula mismatch (backend ${result.score}, local ${rebuilt}) — leaving the backend result as-is`);
+    return result;
+  }
+
+  const score = clampScore(calibrate(after));
+  const gates = result.gates ? { ...result.gates, locality: fill >= 1 } : result.gates;
+  const auto_schedule = gates
+    ? score >= 80 && !!gates.required_skills && !!gates.certifications
+      && !!gates.clearance && !!gates.locality
+    : !!result.auto_schedule && score >= 80;
+  // The backend never resolved the location, so its rationale can't mention one.
+  const locLine = locationSentence(jdRemote, jdState, candState, candidate.location);
+  const rationale = [result.rationale, locLine].filter(Boolean).join(" ").trim();
+
+  console.log(`[SCOUT] location repair: bucket restored (jd ${jdRemote ? "Remote" : jdState}`
+    + ` vs candidate ${candState || "?"}) | score ${result.score} → ${score}`);
+  return { ...result, score, label: fitLabel(score), rationale, categories, gates, auto_schedule };
 }
 
 // ── Score one candidate against one JD (backend-first, local fallback) ────────
@@ -860,7 +1409,14 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
   // profile-scraped skills). Guard: empty keyword scan keeps original skills.
   let scored = candidate;
   if (resume_text) {
-    const resumeSkills = findKeywords(resume_text);
+    // Whitelist hits (any section of the résumé) ∪ the résumé's own Skills
+    // section read verbatim — the whitelist alone drops every technology it
+    // doesn't already know about.
+    const listed = resumeListedSkills(resume_text);
+    const seen = new Set();
+    const resumeSkills = [...findKeywords(resume_text), ...listed]
+      .filter(s => { const k = s.toLowerCase(); return seen.has(k) ? false : seen.add(k); });
+    console.log(`[SCOUT] résumé skills: ${resumeSkills.length} (${listed.length} from Skills section)`);
     if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
     // Résumé also replaces education — but ONLY its Education section text, so
     // degree words in résumé prose can't inflate the level. Guard: no Education
@@ -871,18 +1427,26 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
 
   // 1) Backend scoring (consistent across devices).
   const backend = await backendScore(jd_id, scored, resume_text);
-  if (backend) return { ...backend, source: "backend" };
+  if (backend) {
+    // The backend's location detection is weaker than this worker's — fold the
+    // bucket back in when we can resolve it locally.
+    const repaired = await repairBackendLocation(backend, jd_id, scored);
+    // Which buckets are active after the repair — the breakdown card renders only
+    // these, so a missing row (e.g. location) means neither side could resolve it.
+    console.log("[SCOUT] score source: backend | buckets:",
+      (repaired.categories || []).map(c => `${c.key}=${c.active ? "on" : "off"}`).join(" ") || "none",
+      "| candidate location:", scored.location || "(none)");
+    return { ...repaired, source: "backend" };
+  }
 
   // 2) Local fallback (per-device embeddings — may differ across browsers).
-  let cached = jobCache.get(jd_id);
-  if (!cached) {
-    const r   = await fetch(`${BASE_URL}/api/scout/jobs/${jd_id}`, { headers: scoutHeaders() });
-    const job = await r.json();
-    if (job.error) throw new Error(job.error);
-    cached = { title: job.title, requirements: parseRequirements(job.description || "") };
-    jobCache.set(jd_id, cached);
-  }
+  const cached = await getJobRequirements(jd_id);
   const result = await computeScore(cached.requirements, cached.title, scored, resume_text);
+  console.log("[SCOUT] score source: local | buckets:",
+    (result.categories || []).map(c => `${c.key}=${c.active ? "on" : "off"}`).join(" "),
+    "| jd_state:", cached.requirements.jd_state || "(none)",
+    "| jd_remote:", !!cached.requirements.jd_remote,
+    "| candidate location:", scored.location || "(none)");
   return { ...result, source: "local" };
 }
 
@@ -894,8 +1458,7 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
 const JOBS_CACHE_KEY = "scout_jobs_cache";
 
 async function fetchJobs() {
-  const r    = await fetch(`${BASE_URL}/api/scout/jobs`, { headers: scoutHeaders() });
-  const data = await r.json();
+  const data = await scoutGetJson(`/api/scout/jobs`);
   return (data.jobs || []).map(j => ({
     id:     j.id,
     title:  j.title,
@@ -930,14 +1493,8 @@ chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); });
 async function prefetchJobDescriptions(jobs) {
   await Promise.allSettled(jobs.map(async (job) => {
     try {
-      const r   = await fetch(`${BASE_URL}/api/scout/jobs/${job.id}`, { headers: scoutHeaders() });
-      const data = await r.json();
-      if (!data.error) {
-        jobCache.set(job.id, {
-          title:        data.title,
-          requirements: parseRequirements(data.description || ""),
-        });
-      }
+      const data = await scoutGetJson(`/api/scout/jobs/${job.id}`);
+      if (!data.error) jobCache.set(job.id, jobCacheEntry(data));
     } catch (_) { /* silently skip — GET_SCORE will fall back to a live fetch */ }
   }));
   console.log(`[SCOUT] Pre-cached ${jobCache.size} job descriptions`);
@@ -1203,7 +1760,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (type === "ADD_CANDIDATE") {
     (async () => {
       try {
-        const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime, candidate_source } = payload;
+        const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime, candidate_source,
+                override_note, override_score } = payload;
         const jazzhr_token = await getJazzhrToken();
         // Sourcing channel ("LinkedIn" / "Dice.com") — sent top-level as well as on
         // the candidate; the backend normalizes it into scout_candidates.candidate_source
@@ -1212,7 +1770,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           method:  "POST",
           headers: scoutHeaders(),
           body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token,
-                                    candidate_source: candidate_source || candidate?.source || "" }),
+                                    candidate_source: candidate_source || candidate?.source || "",
+                                    // Set only when the recruiter added below the fit-score
+                                    // floor; the backend files it on the candidate timeline.
+                                    override_note, override_score }),
         });
         const text = await r.text();
         let data;

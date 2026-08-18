@@ -62,8 +62,7 @@
             <label class="field-label" for="profile-email">Email</label>
             <div class="input-wrap">
               <span class="input-icon" aria-hidden="true">✉</span>
-              <input class="text-input" id="profile-email" type="email"
-                placeholder="Add email  e.g. jane@example.com"
+              <input class="text-input" id="profile-email" type="email" placeholder="Add email  e.g. jane@example.com"
                 aria-describedby="email-error" />
             </div>
             <div class="field-error" id="email-error" role="alert"></div>
@@ -86,7 +85,7 @@
 
         <!-- JD dropdown -->
         <div class="jd-section">
-          <label class="section-label" for="jd-select">Match to Job Description</label>
+          <label class="section-label" for="jd-select">Job Openings</label>
           <div class="jd-wrap">
             <select class="jd-select" id="jd-select" disabled>
               <option value="">Loading jobs…</option>
@@ -151,6 +150,12 @@
         <div class="action-bar">
           <button class="btn btn-primary" id="add-btn" disabled>Add to JazzHR</button>
 
+          <!-- Escape hatch for a below-threshold score: only ever shown when the
+               score gate is what's blocking the add. Needs a written reason. -->
+          <button class="btn btn-override" id="override-btn" style="display:none">
+            Still want to add
+          </button>
+
           <a class="btn btn-jazzhr" id="jazzhr-btn" target="_blank" style="display:none">
             View in JazzHR →
           </a>
@@ -175,6 +180,26 @@
   </div>
 
   <div class="footer">SCOUT · Navitas AI Labs</div>
+
+  <!-- Override reason — the recruiter must justify adding a below-threshold
+       candidate. The note lands on the SCOUT candidate timeline. -->
+  <div class="modal" id="note-modal" style="display:none" role="dialog" aria-modal="true"
+    aria-labelledby="note-modal-title">
+    <div class="modal-card">
+      <div class="modal-title" id="note-modal-title">Why add this candidate?</div>
+      <p class="modal-sub" id="note-modal-sub">
+        This candidate scored below the minimum. Your reason is recorded on their SCOUT timeline.
+      </p>
+      <textarea id="note-text" class="modal-textarea" rows="4" maxlength="2000"
+        placeholder="e.g. Strong domain background the JD doesn't list; client asked for this profile."
+        aria-describedby="note-error"></textarea>
+      <div class="modal-error" id="note-error"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="note-cancel">Cancel</button>
+        <button class="btn btn-primary" id="note-confirm">Add with reason</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Résumé text parsers (local, no network): PDF.js + fflate (DOCX unzip) -->
   <script src="../lib/pdf.min.js"></script>
