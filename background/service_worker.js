@@ -1,19 +1,8 @@
-// Runtime config. config.js holds the deployed defaults; config.local.js is a
-// gitignored local override (see config.local.example.js) that points the
-// extension at a scout-service running on this machine. A missing local file is
-// the normal case — importScripts throws on 404, so swallow that.
-importScripts(chrome.runtime.getURL("config.js"));
-try { importScripts(chrome.runtime.getURL("config.local.js")); }
-catch (_) { /* no local override — using deployed defaults */ }
-
-const BASE_URL = self.SCOUT_CONFIG.BASE_URL;
+const BASE_URL = "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
 // Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
 // Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
-const SCOUT_KEY = self.SCOUT_CONFIG.SCOUT_KEY;
-
-// Logged on every worker start so it's never ambiguous which backend is in use.
-console.log(`[SCOUT] backend: ${BASE_URL}`);
+const SCOUT_KEY = "scout_a5ThvEKUjRbZmlpDyKQOF9WcKb2fiEl8Vat-8f_3Bzg";
 
 // Standard JSON headers + Scout key for all backend calls.
 function scoutHeaders(extra) {
@@ -571,6 +560,25 @@ function detectRemote(text) {
   return /\bremote\b/i.test(text);
 }
 
+// One rationale sentence for the location bucket. Shared by the local scorer and
+// the backend-location repair so both word it identically. Returns "" when the
+// JD expresses no location at all — nothing truthful to say.
+function locationSentence(jdRemote, jdState, candState, candLocationRaw) {
+  if (jdRemote) return "Remote role — location not a constraint.";
+  if (!jdState) return "";
+  const candLoc  = (candLocationRaw || "").trim();
+  const jdName   = formatRegion(jdState);
+  const candName = formatRegion(candState);
+  if (!candState) {
+    return candLoc
+      ? `Located in ${candLoc}; job located in ${jdName}.`
+      : `Candidate location unknown; job located in ${jdName}.`;
+  }
+  return regionsMatch(jdState, candState)
+    ? `Located in ${candName} — matches the ${jdName} job location.`
+    : `Located in ${candName}, outside the ${jdName} job location.`;
+}
+
 // ── Education signals ─────────────────────────────────────────────────────────
 // Degree level scored as its own bucket (doc §3.3, 15%). Ranked high→low so a
 // higher degree satisfies a lower requirement (a Master's meets a Bachelor's
@@ -871,6 +879,23 @@ function calibrate(raw) {
   if (!CALIBRATION.enabled) return raw;
   const { k, x0 } = CALIBRATION;
   return 100 / (1 + Math.exp(-k * (raw - x0)));
+}
+// Never show a 0 or a 100 — the rubric can't prove either end.
+function clampScore(raw) { return Math.min(Math.max(Math.round(raw), 5), 99); }
+function fitLabel(score) {
+  if (score >= 80) return "Excellent Fit";
+  if (score >= 65) return "Good Fit";
+  if (score >= 45) return "Fair Fit";
+  return "Poor Fit";
+}
+// Composite over the ACTIVE buckets only, renormalized to 100 (doc §3.3). Reads
+// the same category list the breakdown card renders, so the points in the card
+// and the number in the ring are always derived from one source.
+function compositeFromCategories(categories) {
+  const on = (categories || []).filter(c => c && c.active);
+  const w  = on.reduce((s, c) => s + (c.weight || 0), 0);
+  if (!w) return null;
+  return on.reduce((s, c) => s + ((c.weight || 0) / w) * (c.fill || 0) * 100, 0);
 }
 
 let creatingOffscreen = null; // de-dupe concurrent createDocument calls
@@ -1195,13 +1220,8 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   if (educationActive)         raw += (W_EDU / active) * educationFill * 100;
   if (locationActive)          raw += (W_LOC / active) * locationFill * 100;
 
-  const score = Math.min(Math.max(Math.round(calibrate(raw)), 5), 99);
-
-  let label;
-  if      (score >= 80) label = "Excellent Fit";
-  else if (score >= 65) label = "Good Fit";
-  else if (score >= 45) label = "Fair Fit";
-  else                  label = "Poor Fit";
+  const score = clampScore(calibrate(raw));
+  const label = fitLabel(score);
 
   // ── Per-category breakdown for the score card (doc §3.4) ────────────────────
   const jdLoc = jdRemote ? "Remote" : formatRegion(jdState);
@@ -1268,22 +1288,102 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   // Always report location whenever the JD expresses one (remote or a state),
   // even if the candidate's state is unknown — the bucket may stay out of the
   // score, but the match/mismatch is always surfaced in the rationale.
-  if (jdRemote) {
-    parts.push(`Remote role — location not a constraint.`);
-  } else if (jdState) {
-    const candLoc = (candidate.location || "").trim();
-    const jdName   = formatRegion(jdState);
-    const candName = formatRegion(candState);
-    parts.push(!candState
-      ? (candLoc
-          ? `Located in ${candLoc}; job located in ${jdName}.`
-          : `Candidate location unknown; job located in ${jdName}.`)
-      : regionsMatch(jdState, candState)
-        ? `Located in ${candName} — matches the ${jdName} job location.`
-        : `Located in ${candName}, outside the ${jdName} job location.`);
-  }
+  const locLine = locationSentence(jdRemote, jdState, candState, candidate.location);
+  if (locLine) parts.push(locLine);
 
   return { score, label, rationale: parts.join(" "), categories, gates, auto_schedule };
+}
+
+// ── JD requirements (fetch + parse + cache) ───────────────────────────────────
+// One fetch per JD, shared by the local scorer and the backend location repair
+// so both read the same parsed requirements.
+// Parse one /api/scout/jobs/:id payload into a jobCache entry. EVERY writer of
+// jobCache goes through this — the prefetch warmer used to store the bare prose
+// parse, so a warm cache silently lost the location fallbacks below.
+function jobCacheEntry(job) {
+  const requirements = parseRequirements(job.description || "");
+  // The posting's structured city/state outrank whatever the description prose
+  // implies — prose is a guess, the intake fields are what was entered. Only
+  // override when set, so a blank intake keeps a location the JD text stated.
+  const structState = detectState([job.city, job.state].filter(Boolean).join(", "), true);
+  if (structState) requirements.jd_state = structState;
+  // Last resort: many postings carry the city only in the title
+  // ("… (Python / FastAPI) - Chennai · Chennai, India"). bareAbbr stays false so
+  // a title word like "IN" can't be read as Indiana.
+  if (!requirements.jd_state) requirements.jd_state = detectState(job.title || "", false);
+  return { title: job.title, requirements };
+}
+
+async function getJobRequirements(jd_id) {
+  const hit = jobCache.get(jd_id);
+  if (hit) return hit;
+  const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
+  if (job.error) throw new Error(job.error);
+  const entry = jobCacheEntry(job);
+  jobCache.set(jd_id, entry);
+  return entry;
+}
+
+// The backend scorer resolves a JD's location from the description prose alone —
+// it has neither the posting's structured city/state fields nor the city tables
+// this worker carries, so it drops the Location bucket on postings that DO name
+// a place, and the card reads "Not scored — job location not specified". Resolve
+// the region here and fold the bucket back in, renormalizing the composite over
+// the buckets that are then active. No-op when the location is genuinely unknown
+// on either side (missing data must not penalize the candidate).
+async function repairBackendLocation(result, jd_id, candidate) {
+  const cats = result.categories;
+  if (!Array.isArray(cats) || !cats.length) return result;
+  const loc = cats.find(c => c && c.key === "location");
+  if (!loc || loc.active) return result;
+
+  let requirements;
+  try {
+    ({ requirements } = await getJobRequirements(jd_id));
+  } catch (e) {
+    console.warn("[SCOUT] location repair: job fetch failed —", e.message);
+    return result;
+  }
+
+  const jdRemote  = !!requirements.jd_remote;
+  const jdState   = requirements.jd_state || "";
+  const candState = detectState(candidate.location || "", true);
+  if (!jdRemote && !(jdState && candState)) return result;   // still unknown → stays out
+
+  const fill = jdRemote ? 1 : (regionsMatch(jdState, candState) ? 1 : 0);
+  const categories = cats.map(c => c.key !== "location" ? c : {
+    ...c,
+    active: true,
+    fill,
+    detected: formatRegion(candState) || (candidate.location || "").trim() || "Unknown",
+    required: jdRemote ? "Remote" : formatRegion(jdState),
+  });
+
+  // Guard: recomputing WITHOUT location must reproduce the backend's own number.
+  // If it doesn't, the two sides disagree on the formula — patching the score
+  // from here would be a guess, so leave the backend result untouched.
+  const before = compositeFromCategories(cats);
+  const after  = compositeFromCategories(categories);
+  if (before === null || after === null) return result;
+  const rebuilt = clampScore(calibrate(before));
+  if (Math.abs(rebuilt - result.score) > 1) {
+    console.warn(`[SCOUT] location repair: score formula mismatch (backend ${result.score}, local ${rebuilt}) — leaving the backend result as-is`);
+    return result;
+  }
+
+  const score = clampScore(calibrate(after));
+  const gates = result.gates ? { ...result.gates, locality: fill >= 1 } : result.gates;
+  const auto_schedule = gates
+    ? score >= 80 && !!gates.required_skills && !!gates.certifications
+      && !!gates.clearance && !!gates.locality
+    : !!result.auto_schedule && score >= 80;
+  // The backend never resolved the location, so its rationale can't mention one.
+  const locLine = locationSentence(jdRemote, jdState, candState, candidate.location);
+  const rationale = [result.rationale, locLine].filter(Boolean).join(" ").trim();
+
+  console.log(`[SCOUT] location repair: bucket restored (jd ${jdRemote ? "Remote" : jdState}`
+    + ` vs candidate ${candState || "?"}) | score ${result.score} → ${score}`);
+  return { ...result, score, label: fitLabel(score), rationale, categories, gates, auto_schedule };
 }
 
 // ── Score one candidate against one JD (backend-first, local fallback) ────────
@@ -1328,32 +1428,19 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
   // 1) Backend scoring (consistent across devices).
   const backend = await backendScore(jd_id, scored, resume_text);
   if (backend) {
-    // Which buckets the BACKEND marked active — the breakdown card renders only
-    // these, so a missing row (e.g. location) is a backend decision, not a UI bug.
+    // The backend's location detection is weaker than this worker's — fold the
+    // bucket back in when we can resolve it locally.
+    const repaired = await repairBackendLocation(backend, jd_id, scored);
+    // Which buckets are active after the repair — the breakdown card renders only
+    // these, so a missing row (e.g. location) means neither side could resolve it.
     console.log("[SCOUT] score source: backend | buckets:",
-      (backend.categories || []).map(c => `${c.key}=${c.active ? "on" : "off"}`).join(" ") || "none",
+      (repaired.categories || []).map(c => `${c.key}=${c.active ? "on" : "off"}`).join(" ") || "none",
       "| candidate location:", scored.location || "(none)");
-    return { ...backend, source: "backend" };
+    return { ...repaired, source: "backend" };
   }
 
   // 2) Local fallback (per-device embeddings — may differ across browsers).
-  let cached = jobCache.get(jd_id);
-  if (!cached) {
-    const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
-    if (job.error) throw new Error(job.error);
-    const requirements = parseRequirements(job.description || "");
-    // The posting's structured city/state outrank whatever the description prose
-    // implies — prose is a guess, the intake fields are what was entered. Only
-    // override when set, so a blank intake keeps a location the JD text stated.
-    const structState = detectState([job.city, job.state].filter(Boolean).join(", "), true);
-    if (structState) requirements.jd_state = structState;
-    // Last resort: many postings carry the city only in the title
-    // ("… (Python / FastAPI) - Chennai · Chennai, India"). bareAbbr stays false so
-    // a title word like "IN" can't be read as Indiana.
-    if (!requirements.jd_state) requirements.jd_state = detectState(job.title || "", false);
-    cached = { title: job.title, requirements };
-    jobCache.set(jd_id, cached);
-  }
+  const cached = await getJobRequirements(jd_id);
   const result = await computeScore(cached.requirements, cached.title, scored, resume_text);
   console.log("[SCOUT] score source: local | buckets:",
     (result.categories || []).map(c => `${c.key}=${c.active ? "on" : "off"}`).join(" "),
@@ -1407,12 +1494,7 @@ async function prefetchJobDescriptions(jobs) {
   await Promise.allSettled(jobs.map(async (job) => {
     try {
       const data = await scoutGetJson(`/api/scout/jobs/${job.id}`);
-      if (!data.error) {
-        jobCache.set(job.id, {
-          title:        data.title,
-          requirements: parseRequirements(data.description || ""),
-        });
-      }
+      if (!data.error) jobCache.set(job.id, jobCacheEntry(data));
     } catch (_) { /* silently skip — GET_SCORE will fall back to a live fetch */ }
   }));
   console.log(`[SCOUT] Pre-cached ${jobCache.size} job descriptions`);
@@ -1502,15 +1584,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.target === "offscreen-embed" || message?.target === "offscreen-embed-status" || message?.target === "offscreen-pdf") return;
   const { type, payload } = message;
-
-  // ── GET_CONFIG — which backend is this build talking to? The panel uses it
-  // to show a LOCAL badge so a dev session is never mistaken for production.
-  // The worker owns the config (it does the importScripts), so pages ask it
-  // rather than loading the possibly-absent config.local.js themselves. ──────
-  if (type === "GET_CONFIG") {
-    sendResponse({ ok: true, baseUrl: BASE_URL });
-    return;
-  }
 
   // ── PARSE_RESUME_PDF — content script fetched résumé bytes but can't load
   // pdf.js in its world; parse them in the offscreen doc and return the text. ──

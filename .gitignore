@@ -15,7 +15,6 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Environment and local configurations
-config.local.js
 .env
 .env.local
 .env.development.local
