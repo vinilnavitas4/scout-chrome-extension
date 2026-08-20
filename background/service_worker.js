@@ -134,12 +134,37 @@ const TOOL_KEYWORDS = [
   "SQL","Power BI","Power Apps","Power Automate","SharePoint","DAX","Power Query","Spark","ETL","Kafka","dbt","Airflow","Databricks","Snowflake","Tableau","Looker","MongoDB","PostgreSQL","MySQL","Redis","Elasticsearch","Neo4j",
   "LLM","GPT","OpenAI","LangChain","TensorFlow","PyTorch","Scikit","RAG",
   "Top Secret","TS/SCI","Secret clearance","FISMA","FedRAMP","NIST","DISA","STIGs",
-  "REST","API","Microservices","Git","Maven","Hibernate","JUnit","Selenium","Agile","Scrum","Jira","ServiceNow","Salesforce","AEM"
+  "REST","API","Microservices","Git","Maven","Hibernate","JUnit","Selenium","Agile","Scrum","Jira","ServiceNow","Salesforce","AEM",
+  // Whatever the whitelist omits can only be caught by a cue-phrase enumeration
+  // (JD) or a Skills section (résumé); a stack named in plain prose was dropped
+  // entirely. These are the stacks that kept showing up as misses.
+  "Kotlin","Swift","PHP","Ruby","Rails","Scala","Perl","MATLAB","Bash","PowerShell","HTML","CSS","SASS",
+  "ASP.NET","Blazor","Entity Framework","WPF","WinForms","Xamarin","MAUI","LINQ","NuGet",
+  "Next.js","Express","NestJS","Svelte","jQuery","Redux","Bootstrap","Tailwind","Webpack","Vite",
+  "SQL Server","SSIS","SSRS","SSAS","Oracle","DB2","SQLite","DynamoDB","Cassandra","Cosmos DB","Couchbase",
+  "Hadoop","Hive","Presto","Flink","NiFi","Informatica","Talend","SSMS","Alteryx","Qlik","SAS",
+  "Pandas","NumPy","Keras","Hugging Face","MLflow","SageMaker","Vertex AI","Bedrock","NLP","Computer Vision",
+  "GitHub Actions","GitLab CI","Azure DevOps","ArgoCD","CircleCI","Bamboo","Octopus","Puppet","TeamCity",
+  "Prometheus","Grafana","Datadog","Splunk","ELK","New Relic","Dynatrace","AppDynamics","Nagios",
+  "OpenShift","Rancher","Istio","Service Mesh","Lambda","EC2","S3","EKS","ECS","RDS","CloudFormation",
+  "RabbitMQ","ActiveMQ","SQS","Event Hubs","Service Bus","gRPC","SOAP","WebSockets","Swagger","OpenAPI",
+  "OAuth","SAML","OIDC","JWT","Okta","Active Directory","Entra","Cognito","Vault","Zero Trust","SIEM",
+  "Postman","Cypress","Playwright","TestNG","Cucumber","JMeter","Appium","Jasmine","Jest","Mocha",
+  "Confluence","Bitbucket","Kanban","Figma","Workday","SAP","Dynamics 365","Sitecore","WordPress","Snowpark"
 ];
 
 // Short keywords that double as common English words — match case-sensitively
 // so "trusted" doesn't hit Rust, "go through" doesn't hit Go, etc.
-const CASE_SENSITIVE_KEYWORDS = new Set(["Go","Rust","React","Spark","Helm","DAX","RAG","Secret clearance"]);
+const CASE_SENSITIVE_KEYWORDS = new Set([
+  "Go","Rust","React","Spark","Helm","DAX","RAG","Secret clearance",
+  // Same trap in the widened list: "express shipping", "we sap morale",
+  // "puppet regime", "off the rails", "bedrock of the team".
+  // Only genuine English-word collisions belong here — a name that is never an
+  // ordinary word (Redux, Kanban, Perl, API…) must stay case-INsensitive, or a
+  // résumé that writes it lowercase stops matching.
+  "Swift","Express","Vault","Hive","Bedrock","Rails","Bamboo","Puppet","Cucumber","Jasmine","Mocha",
+  "Presto","SAP","SAS",
+]);
 
 // Whole-word keyword scan (allows trailing plural "s"/"es"). Substring scanning is
 // what caused "Rust"⊂"trusted", "Git"⊂"digital", "REST"⊂"Reston" false positives.
@@ -159,7 +184,23 @@ function findKeywords(text) {
 // Slice `text` from heading `startRe` up to the next known heading. JD text from
 // the backend is a single line with apostrophes stripped ("What You ll Need :"),
 // so headings — not newlines — are the only reliable section boundaries.
-const NEXT_HEADING_RE = /Set\s+Yourself\s+Apart|Clearance\s*:|About\s+Navitas|What\s+We\s+Offer|Equal\s+Opportunity|Who\s+We\s+Are|Benefits\s*:/i;
+// Required/preferred headings. Navitas JDs use "What You'll Need" / "Set Yourself
+// Apart", but LinkedIn and Dice postings use the generic ATS wording — matching
+// only the Navitas phrasing meant the preferred section was never found on an
+// outside posting, so Preferred skills always came back empty.
+const JD_REQUIRED_HEADING_RE =
+  /What\s+You\s*'?\s*ll?\s*'?\s*(?:Need|Bring|Have|Do)|(?:Basic|Minimum|Required|Core)\s+Qualifications?|Required\s+(?:Skills?|Experience)|Requirements?|Qualifications?|Must[\s-]?Haves?|Skills?\s+(?:&|and)\s+(?:Experience|Qualifications?)|What\s+We\s*(?:'|\s)?re\s+Looking\s+For/i;
+const JD_PREFERRED_HEADING_RE =
+  /Set\s+Yourself\s+Apart|Preferred\s+(?:Qualifications?|Skills?|Experience)|Nice[\s-]?to[\s-]?Haves?|Good\s+to\s+Haves?|Bonus\s+Points?|Desired\s+(?:Skills?|Qualifications?|Experience)|Plus(?:s)?es\s*:/i;
+
+// Section terminators: the preferred headings (so the required slice stops before
+// them) plus the boilerplate that follows the requirements.
+const NEXT_HEADING_RE = new RegExp(
+  JD_PREFERRED_HEADING_RE.source +
+  "|Clearance\\s*:|About\\s+(?:Navitas|Us|the\\s+Company)|What\\s+We\\s+Offer|Equal\\s+Opportunity" +
+  "|Who\\s+We\\s+Are|Benefits\\s*:|Compensation|Salary\\s+Range|How\\s+to\\s+Apply|Perks",
+  "i"
+);
 function sliceSection(text, startRe) {
   const start = text.search(startRe);
   if (start === -1) return "";
@@ -629,8 +670,14 @@ function resumeEducationSection(text) {
 // résumé replaces the profile's skills every technology outside that list
 // (Blazor, RabbitMQ, Entity Framework, SSIS…) was silently dropped. Read the
 // résumé's own Skills section verbatim as well and union the two.
+// Résumés name this section a dozen different ways ("AREAS OF EXPERTISE",
+// "SKILL SET", "TECHNICAL SUMMARY", "PROGRAMMING LANGUAGES"); matching only the
+// handful of literal phrases meant those résumés yielded zero listed skills, so
+// everything outside TOOL_KEYWORDS was dropped. Build the alternation from an
+// optional qualifier + a head noun + an optional trailing "summary/profile/set"
+// so the variants fall out of one pattern.
 const RESUME_SKILLS_HEADING_RE =
-  /\b(?:technical\s+skills|technical\s+expertise|technical\s+proficienc(?:y|ies)|core\s+competenc(?:y|ies)|skills\s*(?:&|and)\s*(?:tools|technologies|abilities)|key\s+skills|skills|technologies|tech\s+stack)\b\s*:?/gi;
+  /\b(?:areas?\s+of\s+(?:expertise|specialization)|(?:technical|technolog(?:y|ies)|tech)\s+summary|programming\s+languages|(?:(?:technical|core|key|professional|computer|it|software|programming|engineering|relevant)\s+)?(?:skills?\s*(?:&|and)\s*(?:tools|technologies|abilities|expertise)|skill\s*set|skills?|expertise|proficienc(?:y|ies)|competenc(?:y|ies)|technolog(?:y|ies)|tech(?:nical)?\s*stack)(?:\s+(?:summary|profile|set|matrix))?)\b\s*:?/gi;
 const RESUME_SKILLS_NEXT_RE =
   /\b(?:(?:work|professional|employment)\s+(?:experience|history)|experience|education|academic|projects?|certifications?|licen[cs]es?|awards?|achievements?|publications?|interests|hobbies|references?|declaration|summary|objective)\b\s*:?/i;
 
@@ -727,6 +774,53 @@ function isPlausibleSkill(s) {
   return true;
 }
 
+// ── Résumé Experience-section reader ──────────────────────────────────────────
+// The Skills section is not the whole story: a résumé names most of its stack
+// inside the role bullets ("Environment: Java, Autosys, Denodo"). findKeywords
+// only sees the tools already on TOOL_KEYWORDS, so everything else in the
+// experience entries was dropped. Slice the experience block so the cue-based
+// miner can read those enumerations.
+const RESUME_EXP_HEADING_RE =
+  /\b(?:(?:work|professional|employment|relevant|industry)\s+(?:experience|history)|experience|employment|work\s+history|professional\s+background|projects?|project\s+experience)\b\s*:?/gi;
+const RESUME_EXP_NEXT_RE =
+  /\b(?:education(?:al)?|academic|certifications?|licen[cs]es?|awards?|achievements?|publications?|interests|hobbies|references?|declaration|personal\s+details)\b\s*:?/i;
+
+function resumeExperienceSection(text) {
+  if (!text) return "";
+  const matches = [...text.matchAll(RESUME_EXP_HEADING_RE)];
+  if (matches.length === 0) return "";
+  // Same heading test as the other slicers: ALL-CAPS or line-start is a real
+  // heading, a mid-sentence "experience" is prose.
+  const pick =
+    matches.find(m => m[0] === m[0].toUpperCase()) ||
+    matches.find(m => m.index === 0 || text[m.index - 1] === "\n");
+  if (!pick) return "";
+  const rest = text.slice(pick.index + pick[0].length);
+  const nextRe = new RegExp(RESUME_EXP_NEXT_RE.source, "gi");
+  let end = rest.length, m;
+  while ((m = nextRe.exec(rest)) !== null) {
+    if (m.index === 0 || rest[m.index - 1] === "\n" || m[0] === m[0].toUpperCase()) {
+      end = m.index;
+      break;
+    }
+  }
+  return rest.slice(0, end).trim();
+}
+
+// Skills named in the résumé's experience entries: whitelist hits plus the
+// enumerations behind a cue ("Environment:", "Technologies used:").
+function resumeExperienceSkills(text) {
+  const section = resumeExperienceSection(text);
+  if (!section) return [];
+  const out = [];
+  for (const s of [...findKeywords(section), ...extractListedSkills(section, 60)]) {
+    if (!isPlausibleSkill(s)) continue;
+    if (isSkillsHeading(s)) continue;
+    if (!out.some(o => o.toLowerCase() === s.toLowerCase())) out.push(s);
+  }
+  return out;
+}
+
 // ── Certification signals ─────────────────────────────────────────────────────
 // Not a scored bucket, but the auto-scheduling gate (doc §4) needs a pass/fail on
 // "Required Certifications". Whole-word scan for named certs; a JD with none
@@ -752,7 +846,10 @@ function findCerts(text) {
 // would never score it. Mine extra skill phrases from explicit enumerations only
 // (a "skills cue" followed by a delimited list) so we capture off-list skills
 // without scraping whole prose sentences into the requirement set.
-const SKILL_CUE_RE = /(?:experience (?:with|in|using)|proficien\w* (?:with|in)|knowledge of|familiar\w* with|expertise in|skilled in|hands[\s-]?on (?:experience )?with|working knowledge of|background in|competen\w* in|specific tools[^:]*:|skills?\s*:|technologies?\s*:|tech\s*stack\s*:)/ig;
+// "Environment:" / "Technologies used:" trailer lines are where consulting
+// résumés actually name a project's stack — without those cues every off-list
+// tool in an experience entry was invisible to the scorer.
+const SKILL_CUE_RE = /(?:experience (?:with|in|using)|proficien\w* (?:with|in)|knowledge of|familiar\w* with|expertise in|skilled in|hands[\s-]?on (?:experience )?with|working knowledge of|background in|competen\w* in|specific tools[^:]*:|skills?\s*:|(?:technologies|tools|platforms|languages|frameworks|environment)\s*(?:used|utilized)?\s*:|tech\s*stack\s*:)/ig;
 
 // Generic words that survive the length/word-count filter but aren't skills.
 const SKILL_STOPWORDS = new Set([
@@ -763,15 +860,21 @@ const SKILL_STOPWORDS = new Set([
   "the","and","or","with","in","of","to","using","for","on","at","an","but","not","this","that",
 ]);
 
-function extractListedSkills(section) {
+// `max` is the cap on mined phrases. A JD states its stack once (15 is plenty);
+// a résumé restates it per project, so the résumé callers raise the cap or every
+// tool past the first couple of roles is cut off.
+function extractListedSkills(section, max = 15) {
   if (!section) return [];
   const out = [];
   let m;
   SKILL_CUE_RE.lastIndex = 0;
-  while ((m = SKILL_CUE_RE.exec(section)) && out.length < 15) {
+  while ((m = SKILL_CUE_RE.exec(section)) && out.length < max) {
     const from = m.index + m[0].length;
     let clause = section.slice(from, from + 140);
-    const stop = clause.search(/[.;]/);          // end the list at the first sentence break
+    // End the list at the first sentence break — but a period only ends a
+    // sentence when whitespace follows it. A bare /[.;]/ cut "Vert.x", "Node.js"
+    // and ".NET Core" in half at their internal dot.
+    const stop = clause.search(/\.(?=\s|$)|;/);
     if (stop !== -1) clause = clause.slice(0, stop);
     for (let phrase of clause.split(/[,/|]|\band\b|\n/i)) {
       phrase = phrase.replace(/^[\s\-*•]+/, "").replace(/\s+/g, " ").trim();
@@ -780,6 +883,10 @@ function extractListedSkills(section) {
       if (toks.length > 3) continue;                          // skills are short phrases
       if (toks.every(t => SKILL_STOPWORDS.has(t))) continue;  // pure boilerplate
       if (!/[a-z0-9]/i.test(phrase)) continue;
+      // A clause fragment is not a skill. "…with FastAPI to design REST APIs"
+      // mined "FastAPI to design", which then sat in Required as a permanent
+      // miss — nothing can ever match it. Same prose test the résumé reader uses.
+      if (!isPlausibleSkill(phrase)) continue;
       if (!out.some(o => o.toLowerCase() === phrase.toLowerCase())) out.push(phrase);
     }
   }
@@ -807,8 +914,8 @@ function dedupeBy(list, keyFn) {
 function parseRequirements(description) {
   const text = description || "";
 
-  const needSection      = sliceSection(text, /What\s+You\s*'?\s*ll?\s*'?\s*Need/i) || text;
-  const preferredSection = sliceSection(text, /Set\s+Yourself\s+Apart/i);
+  const needSection      = sliceSection(text, JD_REQUIRED_HEADING_RE) || text;
+  const preferredSection = sliceSection(text, JD_PREFERRED_HEADING_RE);
 
   // Take the LARGEST stated year requirement in the need section, not the first
   // match (#6) — a stray "3 years" in an unrelated line must not undercut "8+ years".
@@ -1051,7 +1158,10 @@ function makeTextMatcher(rawText) {
     // boundary — demanding a non-alphanumeric char before it missed every
     // "ASP.NET" / "VB.NET" mention in a résumé.
     const lead = /^[A-Za-z0-9]/.test(s) ? "(?:^|[^A-Za-z0-9])" : "";
-    return new RegExp(`${lead}${s.split(/\s+/).map(escWord).join("\\s+")}(?:$|[^A-Za-z0-9+#])`);
+    // Tolerate a trailing plural, as findKeywords does. Without it a JD asking
+    // for "API" / "Microservice" never matched a résumé that wrote "APIs" /
+    // "microservices" — the required skill read as missing on a pure plural.
+    return new RegExp(`${lead}${s.split(/\s+/).map(escWord).join("\\s+")}(?:e?s)?(?:$|[^A-Za-z0-9+#])`);
   };
   return (target) => {
     // Match the target's canonical + raw forms AND every alias variant that
@@ -1413,10 +1523,15 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     // section read verbatim — the whitelist alone drops every technology it
     // doesn't already know about.
     const listed = resumeListedSkills(resume_text);
+    // …∪ the stack named inside the experience entries. The whitelist scan alone
+    // saw only the tools it already knew, so an off-list tool that appears only
+    // in a role's "Environment:" line never reached the scorer.
+    const fromExp = resumeExperienceSkills(resume_text);
     const seen = new Set();
-    const resumeSkills = [...findKeywords(resume_text), ...listed]
+    const resumeSkills = [...findKeywords(resume_text), ...listed, ...fromExp]
       .filter(s => { const k = s.toLowerCase(); return seen.has(k) ? false : seen.add(k); });
-    console.log(`[SCOUT] résumé skills: ${resumeSkills.length} (${listed.length} from Skills section)`);
+    console.log(`[SCOUT] résumé skills: ${resumeSkills.length}`
+      + ` (${listed.length} from Skills section, ${fromExp.length} from Experience)`);
     if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
     // Résumé also replaces education — but ONLY its Education section text, so
     // degree words in résumé prose can't inflate the level. Guard: no Education
