@@ -10,7 +10,10 @@ const emailError = document.getElementById('email-error');
 const profilePhone = document.getElementById('profile-phone');
 const profilePhoneFound = document.getElementById('profile-phone-found');
 const sourceBadge = document.getElementById('source-badge');
-const jdSelect = document.getElementById('jd-select');
+const jdInput = document.getElementById('jd-input');
+const jdToggle = document.getElementById('jd-toggle');
+const jdList = document.getElementById('jd-list');
+const jdWrap = jdInput.closest('.jd-wrap');
 const jdSpinner = document.getElementById('jd-spinner');
 const scoreCard = document.getElementById('score-card');
 const scoreHeading = document.getElementById('score-heading');
@@ -397,6 +400,20 @@ chrome.runtime.onMessage.addListener((message) => {
     }
   }
 
+  // Required clearances arrive after the SW has parsed every JD description —
+  // the job list itself doesn't carry them. Fold them into the options already
+  // on screen and repaint if the picker happens to be open.
+  if (message?.type === "JD_CLEARANCES" && message.data) {
+    let changed = 0;
+    jdOptions = jdOptions.map(o => {
+      const clearance = message.data[o.id] || '';
+      if (clearance === o.clearance) return o;
+      changed++;
+      return makeJdOption({ ...o, clearance });
+    });
+    if (changed && jdWrap.classList.contains('open')) renderJdList(jdQuery);
+  }
+
   // Dice résumé finished rendering after the first scan → adopt the updated
   // candidate (real email + résumé skills + résumé text) and re-score.
   if (message?.type === "DICE_PROFILE_UPDATED" && message.profile) {
@@ -455,7 +472,7 @@ function siteFor(url) {
 function clearJdAndResume() {
   selectedJd = null;
   selectedJdTitle = null;
-  jdSelect.value = '';
+  syncJdInput();
   currentScore = null;
   scoreCard.classList.remove('show');
   resumeUpload.style.display = 'none';
@@ -604,7 +621,9 @@ function applyCachedExtras(hit) {
   if (hit.jdId) {
     selectedJd = hit.jdId;
     selectedJdTitle = hit.jdTitle || hit.jdId;
-    jdSelect.value = hit.jdId;   // no-op if the JD list hasn't loaded yet — loadJds re-applies it
+    // No-op until the JD list has loaded — loadJds re-applies the selection and
+    // syncs the input once the labels exist.
+    syncJdInput();
   }
   if (hit.resume?.b64) {
     resumeB64 = hit.resume.b64;
@@ -747,55 +766,297 @@ function renderProfile(p) {
   if (!selectedJd) statusEl.classList.remove('show');
 }
 
-// ── JD dropdown ───────────────────────────────────────────────────────────────
+// ── JD combobox ───────────────────────────────────────────────────────────────
+// A searchable dropdown, not a <select>: the openings list runs to dozens of
+// near-identical titles ("26-5021: Software Developer .Net", "26-5025: Software
+// Developer- DevOps", …), so scanning it by eye is the slow path. Typing filters;
+// the chevron (or an empty focus) still opens the whole list to browse.
+
+let jdOptions  = [];   // [{ id, title, client, clearance, label, search }] — every open JD
+let jdFiltered = [];   // the subset currently rendered
+let jdActive   = -1;   // index into jdFiltered that Enter would pick
+// The live search text. NOT the same as jdInput.value: opening with the chevron
+// leaves the selected JD's label sitting in the field while the query is still
+// empty, so a repaint driven off the field would filter down to that one row.
+let jdQuery    = '';
+
+function jdOptionById(id) {
+  return jdOptions.find(o => o.id === id) || null;
+}
+
+// `label` is what the closed input shows; `search` is the haystack typing runs
+// against. They differ because a required clearance is worth searching for
+// ("show me the TS/SCI roles") without padding the collapsed field with it.
+function makeJdOption(jd) {
+  const clearance = jd.clearance || '';
+  const label = jd.client ? `${jd.title}  ·  ${jd.client}` : jd.title;
+  return {
+    id: jd.id,
+    title: jd.title,
+    client: jd.client || '',
+    clearance,
+    label,
+    search: (label + ' ' + clearance).toLowerCase(),
+  };
+}
+
+// What the closed input shows for the current selection.
+function jdDisplayText() {
+  const o = jdOptionById(selectedJd);
+  if (o) return o.label;
+  // Selection restored from the profile cache before the list finished loading —
+  // show the cached title rather than leaving the box blank.
+  return selectedJd ? (selectedJdTitle || '') : '';
+}
+
+// Set the input's visible text without touching the selection or scoring.
+function syncJdInput() {
+  jdInput.value = jdDisplayText();
+}
+
+// Case-insensitive substring over id + title + client + clearance, so "3098",
+// "fastapi", "chennai" and "ts/sci" all find the postings they should.
+function filterJds(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return jdOptions.slice();
+  return jdOptions.filter(o => o.search.includes(q));
+}
+
+// Render `text` with the matched run of `query` wrapped in <mark>.
+function highlight(text, query) {
+  const q = query.trim();
+  if (!q) return escapeHtml(text);
+  const at = text.toLowerCase().indexOf(q.toLowerCase());
+  if (at === -1) return escapeHtml(text);
+  return escapeHtml(text.slice(0, at)) +
+         '<mark>' + escapeHtml(text.slice(at, at + q.length)) + '</mark>' +
+         escapeHtml(text.slice(at + q.length));
+}
+
+// Stands in for the old "— Choose a JD —" blank option: offered only when there
+// is a selection to clear and the list isn't filtered.
+const JD_CLEAR = { id: '', title: '— Clear selection —', client: '', label: '', clear: true };
+
+function renderJdList(query) {
+  jdQuery = query;
+  const matches = filterJds(query);
+  jdFiltered = (selectedJd && !query.trim()) ? [JD_CLEAR, ...matches] : matches;
+  jdList.innerHTML = '';
+
+  if (jdFiltered.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'jd-empty';
+    li.textContent = jdOptions.length ? 'No matching job openings' : 'No job openings';
+    jdList.appendChild(li);
+    setJdActive(-1);
+    return;
+  }
+
+  jdFiltered.forEach((o, i) => {
+    const li = document.createElement('li');
+    li.className = 'jd-option' + (o.clear ? ' jd-clear' : '');
+    li.id = `jd-opt-${i}`;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', String(!o.clear && o.id === selectedJd));
+    li.dataset.id = o.id;
+    li.innerHTML = o.clear
+      ? escapeHtml(o.title)
+      : (o.clearance
+          ? `<span class="jd-opt-clearance" title="This job requires a ${escapeHtml(o.clearance)} clearance">${escapeHtml(o.clearance)}</span>`
+          : '') +
+        highlight(o.title, query) +
+        (o.client ? `<span class="jd-opt-client">${highlight(o.client, query)}</span>` : '');
+    // mousedown, not click: mousedown beats the input's blur, so the option is
+    // still in the DOM when the pick runs.
+    li.addEventListener('mousedown', (e) => { e.preventDefault(); pickJd(o.id); });
+    li.addEventListener('mousemove', () => setJdActive(i));
+    jdList.appendChild(li);
+  });
+
+  // Preselect the current JD so Enter on an unfiltered list is a no-op rather
+  // than a surprise switch to whatever sits at the top.
+  const cur = jdFiltered.findIndex(o => !o.clear && o.id === selectedJd);
+  setJdActive(cur >= 0 ? cur : 0);
+}
+
+function setJdActive(i) {
+  jdActive = i;
+  [...jdList.querySelectorAll('.jd-option')].forEach((el, idx) => {
+    el.classList.toggle('active', idx === i);
+  });
+  if (i >= 0) {
+    jdInput.setAttribute('aria-activedescendant', `jd-opt-${i}`);
+    jdList.querySelector(`#jd-opt-${i}`)?.scrollIntoView({ block: 'nearest' });
+  } else {
+    jdInput.removeAttribute('aria-activedescendant');
+  }
+}
+
+// Give the list every pixel between the input and the bottom of the panel, so
+// opening it shows the whole list rather than a five-row peephole. The old
+// native <select> drew its popup outside the panel and could show ~17 rows at
+// once; a DOM listbox is clipped by the panel, so the next best thing is to use
+// all of it. Falls back to scrolling when even that isn't enough.
+const JD_LIST_MIN_H = 180;   // never smaller than this, even on a short panel
+const JD_LIST_GAP   = 12;    // breathing room above the panel's bottom edge
+
+function sizeJdList() {
+  const below = window.innerHeight - jdInput.getBoundingClientRect().bottom - JD_LIST_GAP;
+  jdList.style.maxHeight = Math.max(JD_LIST_MIN_H, Math.floor(below)) + 'px';
+}
+
+function openJdList(query = '') {
+  if (jdInput.disabled) return;
+  jdWrap.classList.add('open');
+  jdInput.setAttribute('aria-expanded', 'true');
+  renderJdList(query);
+  sizeJdList();
+}
+
+// The panel is resizable, and the input's position shifts as cards above it
+// render — re-measure rather than trusting the height from open time.
+window.addEventListener('resize', () => {
+  if (jdWrap.classList.contains('open')) sizeJdList();
+});
+
+// Closing always restores the selected JD's label — a half-typed query must
+// never be left sitting in the box looking like a selection.
+function closeJdList() {
+  jdWrap.classList.remove('open');
+  jdInput.setAttribute('aria-expanded', 'false');
+  jdInput.removeAttribute('aria-activedescendant');
+  setJdActive(-1);
+  syncJdInput();
+}
+
+function pickJd(id) {
+  closeJdList();
+  if (id === selectedJd) return;   // re-picking the same JD must not re-score
+  applyJdSelection(id);
+  syncJdInput();
+}
 
 function loadJds(preserveId, fresh) {
   jdSpinner.classList.add('show');
-  jdSelect.disabled = true;
+  jdWrap.classList.add('loading');
+  jdInput.disabled = true;
+  jdToggle.disabled = true;
+  jdInput.placeholder = 'Loading jobs…';
 
   chrome.runtime.sendMessage({ type: 'GET_JDS', fresh: !!fresh }, (res) => {
     jdSpinner.classList.remove('show');
+    jdWrap.classList.remove('loading');
     if (!res?.ok) {
-      jdSelect.innerHTML = '<option value="">Failed to load jobs</option>';
+      jdOptions = [];
+      jdInput.placeholder = 'Failed to load jobs';
       return;
     }
-    jdSelect.innerHTML = '<option value="">— Choose a JD —</option>';
-    res.data.forEach(jd => {
-      const opt = document.createElement('option');
-      opt.value = jd.id;
-      opt.dataset.title = jd.title;
-      opt.textContent = jd.client ? `${jd.title}  ·  ${jd.client}` : jd.title;
-      jdSelect.appendChild(opt);
-    });
-    jdSelect.disabled = false;
+    jdOptions = res.data.map(makeJdOption);
+    jdInput.disabled = false;
+    jdToggle.disabled = false;
+    jdInput.placeholder = 'Search or select a job…';
+
     // Re-apply the selection: explicit preserveId (refresh button) or a JD
     // restored from the profile cache before the list finished loading.
     const keep = preserveId || selectedJd;
     if (keep) {
-      jdSelect.value = keep;
-      if (jdSelect.value !== keep) {
+      if (jdOptionById(keep)) {
+        selectedJd = keep;
+        selectedJdTitle = jdOptionById(keep).title;
+      } else {
         // JD no longer exists on the backend — clear stale selection
         selectedJd = null;
         selectedJdTitle = null;
       }
     }
+    syncJdInput();
+    if (jdWrap.classList.contains('open')) renderJdList(jdQuery);
   });
 }
 
-jdSelect.addEventListener('change', () => {
-  const jdId = jdSelect.value;
+// ── Combobox interaction ──────────────────────────────────────────────────────
+
+// The chevron is the only thing that opens the full list — clicking into the
+// field just puts a cursor there. The existing text is selected on focus so the
+// first keystroke replaces the label instead of appending to it.
+jdInput.addEventListener('focus', () => { jdInput.select(); });
+
+// Typing searches. Clearing the box ends the search outright rather than
+// falling back to the full list — browsing everything is the chevron's job, so
+// an empty field means "never mind" and the picker closes.
+jdInput.addEventListener('input', () => {
+  const q = jdInput.value;
+  if (!q.trim()) { closeJdList(); return; }
+  if (!jdWrap.classList.contains('open')) openJdList(q);
+  else renderJdList(q);
+});
+
+jdInput.addEventListener('keydown', (e) => {
+  const open = jdWrap.classList.contains('open');
+  switch (e.key) {
+    case 'ArrowDown':
+    case 'ArrowUp': {
+      e.preventDefault();
+      if (!open) { openJdList(''); return; }
+      if (!jdFiltered.length) return;
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = (jdActive + step + jdFiltered.length) % jdFiltered.length;
+      setJdActive(next);
+      break;
+    }
+    case 'Home':
+      if (open && jdFiltered.length) { e.preventDefault(); setJdActive(0); }
+      break;
+    case 'End':
+      if (open && jdFiltered.length) { e.preventDefault(); setJdActive(jdFiltered.length - 1); }
+      break;
+    case 'Enter':
+      if (open && jdActive >= 0 && jdFiltered[jdActive]) {
+        e.preventDefault();
+        pickJd(jdFiltered[jdActive].id);
+      }
+      break;
+    case 'Escape':
+      if (open) { e.stopPropagation(); closeJdList(); }
+      break;
+    case 'Tab':
+      if (open) closeJdList();
+      break;
+  }
+});
+
+// Blur closes — but a click on an option fires mousedown first, so the pick has
+// already run by the time we get here.
+jdInput.addEventListener('blur', () => {
+  if (jdWrap.classList.contains('open')) closeJdList();
+});
+
+jdToggle.addEventListener('mousedown', (e) => {
+  e.preventDefault();               // keep focus off the button
+  if (jdWrap.classList.contains('open')) { closeJdList(); jdInput.focus(); }
+  else { jdInput.focus(); jdInput.select(); openJdList(''); }
+});
+
+// Selecting a JD — the work that used to hang off the <select>'s change event.
+function applyJdSelection(jdId) {
   if (!jdId) {
+    // Cleared. The old <select> left selectedJd pointing at the JD the recruiter
+    // had just deselected; drop it so the Add gate and the saved profile agree
+    // with what the box shows.
+    selectedJd = null;
+    selectedJdTitle = null;
     scoreCard.classList.remove('show');
     scoreReady = false;
     disableAddButtons();
     currentScore = null;
     scoreVersion++;
     statusEl.classList.remove('show');
+    saveLastProfile();
     return;
   }
 
   selectedJd = jdId;
-  selectedJdTitle = jdSelect.selectedOptions[0]?.dataset.title || jdId;
+  selectedJdTitle = jdOptionById(jdId)?.title || jdId;
   scoreCard.classList.remove('show');
   scoreReady = false;
   disableAddButtons();
@@ -811,7 +1072,7 @@ jdSelect.addEventListener('change', () => {
     // Profile fetch already failed
     showStatus('Could not read profile. Try refreshing the page.', 'error');
   }
-});
+}
 
 // ── Score ─────────────────────────────────────────────────────────────────────
 
@@ -1034,8 +1295,9 @@ function renderBestFit(list) {
       `<span class="bestfit-title">${escapeHtml(label)}</span>`;
     // Click a row → select that JD in the dropdown and score it normally.
     const pick = () => {
-      jdSelect.value = jd.id;
-      jdSelect.dispatchEvent(new Event('change'));
+      if (jd.id === selectedJd) return;
+      applyJdSelection(jd.id);
+      syncJdInput();
     };
     row.addEventListener('click', pick);
     row.addEventListener('keydown', (e) => {

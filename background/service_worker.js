@@ -687,6 +687,32 @@ const RESUME_SKILLS_NEXT_RE =
 // space inside a phrase — "Machine Learning" keeps its single space.
 const SKILL_SPLIT_RE = /[,;|•·▪●•\n\r\t]+|\s+[-–—]\s+|\s{2,}/;
 
+// ── Heading detection ─────────────────────────────────────────────────────────
+// Every section slicer needs the same answer: "is this word a heading, or is it
+// prose that happens to use the heading's word?" The old test accepted ANY
+// ALL-CAPS match, wherever it sat on the line — so a skills row spelled
+// "CLOUD EXPERIENCE: AWS, Azure" ended the Skills block at "EXPERIENCE" and
+// every skill after that row was dropped. Line position is the reliable signal
+// whenever the extractor produced real lines; the ALL-CAPS guess is only a
+// fallback for text that came back flattened (no line breaks to read).
+function hasLineStructure(text) {
+  return (text.match(/\n/g) || []).length >= 3;
+}
+
+// True when the match at `idx` starts its own line (leading bullets/whitespace
+// allowed). `heading` is the matched text, used only for the flattened fallback.
+function isHeadingMatch(text, idx, heading, flattened) {
+  if (idx === 0) return true;
+  const lineStart = text.lastIndexOf("\n", idx - 1) + 1;
+  if (/^[\s\-*•·▪●]*$/.test(text.slice(lineStart, idx))) return true;
+  // Flattened text has no line breaks to test — fall back to ALL-CAPS, but only
+  // when the word is not part of a longer ALL-CAPS phrase ("CLOUD EXPERIENCE").
+  if (!flattened) return false;
+  if (heading !== heading.toUpperCase()) return false;
+  const before = text.slice(Math.max(0, idx - 30), idx);
+  return !/[A-Z0-9][A-Z0-9&+/.#-]*\s+$/.test(before);
+}
+
 function resumeListedSkills(text) {
   if (!text) return [];
   const matches = [...text.matchAll(RESUME_SKILLS_HEADING_RE)];
@@ -696,9 +722,8 @@ function resumeListedSkills(text) {
   // every later block. Take every match that reads like a real heading (ALL-CAPS
   // or line-start) and union their sections, falling back to the first prose
   // mention only when none of them qualify.
-  let heads = matches.filter(
-    m => m[0] === m[0].toUpperCase() || m.index === 0 || text[m.index - 1] === "\n"
-  );
+  const flattened = !hasLineStructure(text);
+  let heads = matches.filter(m => isHeadingMatch(text, m.index, m[0], flattened));
   if (heads.length === 0) heads = [matches[0]];
 
   const out = [];
@@ -722,10 +747,11 @@ function skillsFromSection(text, head) {
   // heading. A plain `search` ended the block on inline prose ("Java — 5 years
   // experience"), truncating everything listed after it.
   let end = rest.length;
+  const flattened = !hasLineStructure(rest);
   const nextRe = new RegExp(RESUME_SKILLS_NEXT_RE.source, "gi");
   let m;
   while ((m = nextRe.exec(rest)) !== null) {
-    if (m.index === 0 || rest[m.index - 1] === "\n" || m[0] === m[0].toUpperCase()) {
+    if (isHeadingMatch(rest, m.index, m[0], flattened)) {
       end = m.index;
       break;
     }
@@ -734,15 +760,34 @@ function skillsFromSection(text, head) {
   if (!section) return [];
 
   const out = [];
-  for (let raw of section.split(SKILL_SPLIT_RE)) {
+  const add = (s) => {
+    if (!isPlausibleSkill(s)) return;
+    if (isSkillsHeading(s)) return;   // a sub-heading inside the block, not a skill
+    if (!out.some(x => x.toLowerCase() === s.toLowerCase())) out.push(s);
+  };
+  const parts = section.split(SKILL_SPLIT_RE);
+  for (let i = 0; i < parts.length; i++) {
+    let raw = parts[i];
+    // A category label and its values are often split apart by the column gap
+    // ("Languages" ⟂ ": C#, VB.NET"), which left the label itself sitting in the
+    // list as a skill. A fragment whose values begin in the NEXT entry is a
+    // label — drop it, and drop the colon the next entry now starts with.
+    if (/:\s*$/.test(raw)) continue;
+    if (/^\s*:/.test(parts[i + 1] || "")) continue;
+    raw = raw.replace(/^\s*:\s*/, "");
     // Drop a leading category label ("Languages: Java Python" → "Java Python").
     raw = raw.replace(/^[^:]{0,40}:\s*/, "").trim();
     // Strip list punctuation and trailing "(5 yrs)" style annotations.
     raw = raw.replace(/\(.*?\)/g, " ").replace(/^[^A-Za-z0-9+#.]+|[^A-Za-z0-9+#)]+$/g, "").trim();
     raw = raw.replace(/\s+/g, " ");
-    if (!isPlausibleSkill(raw)) continue;
-    if (isSkillsHeading(raw)) continue;   // a sub-heading inside the block, not a skill
-    if (!out.some(s => s.toLowerCase() === raw.toLowerCase())) out.push(raw);
+    add(raw);
+    // "HTML5/CSS3/JavaScript" is three skills written as one entry, but "CI/CD"
+    // and "TCP/IP" are single skills — the difference is segment length, so keep
+    // the whole entry and additionally split only when every segment is a word.
+    if (raw.includes("/")) {
+      const segs = raw.split("/").map(s => s.trim());
+      if (segs.length > 1 && segs.every(s => s.length >= 3)) segs.forEach(add);
+    }
   }
   return out;
 }
@@ -754,7 +799,10 @@ function isSkillsHeading(s) {
   const re = new RegExp(`^(?:${RESUME_SKILLS_HEADING_RE.source})$`, "i");
   if (re.test(bare)) return true;
   // "Tools & Technologies" / "Skills and Tools": every word is heading filler.
-  const filler = /^(?:tools?|technolog(?:y|ies)|skills?|stack|tech|core|key|technical|expertise|competenc(?:y|ies)|proficienc(?:y|ies)|abilities|&|and)$/i;
+  // The category labels résumés use inside a skills block ("Languages",
+  // "Frameworks", "Databases", "Methodologies") are filler too — without them
+  // the label rows were scored as if they were skills.
+  const filler = /^(?:tools?|technolog(?:y|ies)|skills?|stack|tech|core|key|technical|expertise|competenc(?:y|ies)|proficienc(?:y|ies)|abilities|languages?|frameworks?|librar(?:y|ies)|databases?|platforms?|environments?|methodolog(?:y|ies)|practices?|concepts?|paradigms?|web|frontend|front[\s-]?end|backend|back[\s-]?end|other|misc(?:ellaneous)?|&|and)$/i;
   const words = bare.split(/[\s&]+/).filter(Boolean);
   return words.length > 0 && words.every(w => filler.test(w));
 }
@@ -769,8 +817,16 @@ function isPlausibleSkill(s) {
   if (s.length === 1) return ONE_CHAR_SKILLS.has(s.toLowerCase());
   if (s.length > 40) return false;
   if (!/[A-Za-z]/.test(s)) return false;                     // "5+" etc.
-  if (s.split(/\s+/).length > 4) return false;               // sentence fragment
-  if (/\b(?:and|with|the|for|of|in|to|using|experience|years?)\b/i.test(s)) return false;
+  const words = s.split(/\s+/);
+  if (words.length > 4) return false;                        // sentence fragment
+  // Words that mark a clause, never a skill name — "FastAPI to design REST APIs"
+  // is prose the miner picked up mid-sentence, not a skill.
+  // Match on whitespace, not \b: \b treats a hyphen as a word break, so "in"
+  // fired inside "In-Memory Caching" and threw a real skill away.
+  if (/(?:^|\s)(?:with|the|using|experience|years?|to|for|in)(?:$|\s)/i.test(s)) return false;
+  // "and" and "of" are different — they sit inside real skill names ("Internet
+  // of Things", "Extract Transform and Load"), and the ≤4-word cap above
+  // already keeps prose sentences out.
   return true;
 }
 
@@ -791,15 +847,15 @@ function resumeExperienceSection(text) {
   if (matches.length === 0) return "";
   // Same heading test as the other slicers: ALL-CAPS or line-start is a real
   // heading, a mid-sentence "experience" is prose.
-  const pick =
-    matches.find(m => m[0] === m[0].toUpperCase()) ||
-    matches.find(m => m.index === 0 || text[m.index - 1] === "\n");
+  const flat = !hasLineStructure(text);
+  const pick = matches.find(m => isHeadingMatch(text, m.index, m[0], flat));
   if (!pick) return "";
   const rest = text.slice(pick.index + pick[0].length);
+  const restFlat = !hasLineStructure(rest);
   const nextRe = new RegExp(RESUME_EXP_NEXT_RE.source, "gi");
   let end = rest.length, m;
   while ((m = nextRe.exec(rest)) !== null) {
-    if (m.index === 0 || rest[m.index - 1] === "\n" || m[0] === m[0].toUpperCase()) {
+    if (isHeadingMatch(rest, m.index, m[0], restFlat)) {
       end = m.index;
       break;
     }
@@ -1083,7 +1139,18 @@ const SCORE_TIMEOUT_MS = 12000;
 async function backendScore(jd_id, candidate, resume_text) {
   const body = JSON.stringify({
     jd_id,
-    resume_text: resume_text || undefined, // backend applies résumé-replace rule
+    // resume_text is deliberately NOT sent as its own field. The backend's port
+    // of the résumé rule is the older whitelist-only one
+    // (findKeywords(resume_text)), so when it received the text it re-derived
+    // the skill set from scratch and threw away everything
+    // scoreCandidateForJd had already mined from the résumé's Skills section
+    // and experience entries — a résumé listing "Database Design, Query
+    // Optimization, Scalable System Design" scored as if it listed none of
+    // them, while the local path matched all three. The service worker already
+    // applies the résumé-replace rule (skills below, education too) before
+    // calling here, so there is nothing left for the backend to re-derive;
+    // `candidate` IS the résumé. Re-add the field only once the backend's
+    // parser matches this file's (README §"Scoring" calls them faithful ports).
     candidate: {
       title:            candidate.title || "",   // headline — backend scans it for clearance
       skills:           candidate.skills || [],
@@ -1099,9 +1166,13 @@ async function backendScore(jd_id, candidate, resume_text) {
       certifications:   (candidate.certifications || [])
                           .map(c => `${c.name || ""} ${c.issuer || ""}`.trim())
                           .filter(Boolean),
-      // Full experience descriptions — backend scans them so a JD skill only
-      // mentioned in role bullets (not the Skills section) still matches.
-      experience_text:  (candidate.experience || [])
+      // Prose the backend scans so a JD skill mentioned only in role bullets
+      // (never in the Skills list) still matches. A résumé replaces the profile
+      // here for the same reason it replaces the skills — it is the fuller
+      // document. This mirrors computeScore's textHas source exactly, so the
+      // backend and local paths read the same prose and agree on the result.
+      experience_text:  resume_text ||
+                        (candidate.experience || [])
                           .map(e => e && e.description).filter(Boolean).join("\n"),
     },
   });
@@ -1531,7 +1602,9 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     const resumeSkills = [...findKeywords(resume_text), ...listed, ...fromExp]
       .filter(s => { const k = s.toLowerCase(); return seen.has(k) ? false : seen.add(k); });
     console.log(`[SCOUT] résumé skills: ${resumeSkills.length}`
-      + ` (${listed.length} from Skills section, ${fromExp.length} from Experience)`);
+      + ` (${listed.length} from Skills section, ${fromExp.length} from Experience)`,
+      "\n[SCOUT]   Skills section:", listed.join(", ") || "(none)",
+      "\n[SCOUT]   Experience:", fromExp.join(", ") || "(none)");
     if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
     // Résumé also replaces education — but ONLY its Education section text, so
     // degree words in résumé prose can't inflate the level. Guard: no Education
@@ -1574,10 +1647,15 @@ const JOBS_CACHE_KEY = "scout_jobs_cache";
 
 async function fetchJobs() {
   const data = await scoutGetJson(`/api/scout/jobs`);
+  // Carry over any clearance already parsed this session: every writer of the
+  // jobs cache goes through here, so without this a background revalidate would
+  // silently strip the badges off a dropdown that was already showing them.
+  const clr = jobClearanceMap();
   return (data.jobs || []).map(j => ({
     id:     j.id,
     title:  j.title,
-    client: j.internal_code || [j.city, j.state].filter(Boolean).join(", ") || j.type || ""
+    client: j.internal_code || [j.city, j.state].filter(Boolean).join(", ") || j.type || "",
+    ...(clr[j.id] ? { clearance: clr[j.id] } : {}),
   }));
 }
 
@@ -1613,6 +1691,44 @@ async function prefetchJobDescriptions(jobs) {
     } catch (_) { /* silently skip — GET_SCORE will fall back to a live fetch */ }
   }));
   console.log(`[SCOUT] Pre-cached ${jobCache.size} job descriptions`);
+  await publishJobClearances();
+}
+
+// ── Clearance labels for the JD picker ────────────────────────────────────────
+// A required clearance is a hard gate — a recruiter should see it while CHOOSING
+// the JD, not after scoring a candidate against it. It lives in the description
+// (the /jobs list payload doesn't carry one), so it only becomes known once
+// prefetchJobDescriptions has parsed each JD. Fold the labels into the cached
+// job list and push them to any open panel so the dropdown can badge the rows.
+function jobClearanceMap() {
+  const out = {};
+  for (const [id, entry] of jobCache) {
+    const clr = entry?.requirements?.required_clearance;
+    if (clr && clr.rank > 0 && clr.label) out[id] = clr.label;
+  }
+  return out;
+}
+
+async function publishJobClearances() {
+  const map = jobClearanceMap();
+  if (!Object.keys(map).length) return;
+
+  // Merge by id rather than rewriting the list: refreshJobsCache may have
+  // replaced it (with no clearance field) while the prefetch was in flight.
+  try {
+    const cached = await getCachedJobs();
+    if (cached && cached.jobs.length) {
+      const jobs = cached.jobs.map(j => (map[j.id] ? { ...j, clearance: map[j.id] } : j));
+      await chrome.storage.local.set({ [JOBS_CACHE_KEY]: { ts: cached.ts, jobs } });
+    }
+  } catch (e) {
+    console.warn("[SCOUT] clearance cache merge failed:", e.message);
+  }
+
+  console.log(`[SCOUT] JD clearances: ${Object.keys(map).length} of ${jobCache.size} jobs`,
+    Object.entries(map).map(([id, l]) => `${id}=${l}`).join(", "));
+  // The panel may be closed — a failed send is expected, not an error.
+  chrome.runtime.sendMessage({ type: "JD_CLEARANCES", data: map }).catch(() => {});
 }
 
 // ── Floating panel window ──────────────────────────────────────────────────────

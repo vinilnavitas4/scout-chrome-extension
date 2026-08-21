@@ -85,12 +85,18 @@
 
         <!-- JD dropdown -->
         <div class="jd-section">
-          <label class="section-label" for="jd-select">Job Openings</label>
+          <label class="section-label" for="jd-input">Job Openings</label>
+          <!-- Combobox, not a <select>: the list runs to dozens of near-identical
+               titles, so it has to be type-to-filter AND still browsable in full. -->
           <div class="jd-wrap">
-            <select class="jd-select" id="jd-select" disabled>
-              <option value="">Loading jobs…</option>
-            </select>
+            <input class="jd-input" id="jd-input" type="text" role="combobox"
+                   aria-expanded="false" aria-controls="jd-list" aria-autocomplete="list"
+                   aria-haspopup="listbox" autocomplete="off" spellcheck="false"
+                   placeholder="Loading jobs…" disabled />
+            <button class="jd-toggle" id="jd-toggle" type="button" tabindex="-1"
+                    aria-label="Show all job openings" disabled></button>
             <span class="jd-spinner" id="jd-spinner"></span>
+            <ul class="jd-list" id="jd-list" role="listbox" aria-label="Job openings"></ul>
           </div>
         </div>
 
