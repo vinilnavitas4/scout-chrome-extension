@@ -121,9 +121,43 @@ const SKILL_ALIASES = new Map([
   ["clearable", "clearance"],
 ]);
 
+// Trailing words that describe the SHAPE of a skill rather than the skill
+// itself. A JD writes "Fast API framework", "microservices architecture" and
+// "API development" for the same things it elsewhere calls "FastAPI",
+// "Microservices" and "API" — all three then rendered as separate chips beside
+// the plain name. Strip the qualifier ONLY when what remains is itself a skill
+// we know, so genuine compounds survive: "database design", "system
+// architecture" and "ORM tools" stay whole because "database", "system" and
+// "ORM" are not skills on their own.
+const SKILL_QUALIFIER_TAIL_RE =
+  /\s+(?:frameworks?|librar(?:y|ies)|technolog(?:y|ies)|tools?|stack|architecture|development|programming|design|concepts?|principles?|practices?|fundamentals|methodolog(?:y|ies)|management)$/;
+
+// Every skill name the whitelist and the alias map know, normalized. Built
+// lazily because TOOL_KEYWORDS is declared below this point.
+let KNOWN_SKILLS = null;
+function knownSkills() {
+  if (!KNOWN_SKILLS) {
+    KNOWN_SKILLS = new Set();
+    for (const k of TOOL_KEYWORDS) KNOWN_SKILLS.add(normalizeSkill(k));
+    for (const [alias, target] of SKILL_ALIASES) { KNOWN_SKILLS.add(alias); KNOWN_SKILLS.add(target); }
+  }
+  return KNOWN_SKILLS;
+}
+
 function canonicalSkill(s) {
-  const n = normalizeSkill(s);
-  return SKILL_ALIASES.get(n) || n;
+  let n = normalizeSkill(s);
+  n = SKILL_ALIASES.get(n) || n;
+  // Peel qualifier tails until the remainder is a known skill ("fast api
+  // framework" → "fast api" → alias → "fastapi"). Bail the moment stripping
+  // would leave something we don't recognize — that means the qualifier is
+  // part of the skill's actual name.
+  for (let i = 0; i < 3 && !knownSkills().has(n); i++) {
+    const stripped = n.replace(SKILL_QUALIFIER_TAIL_RE, "");
+    if (stripped === n || !stripped) break;
+    if (!knownSkills().has(stripped)) break;
+    n = SKILL_ALIASES.get(stripped) || stripped;
+  }
+  return n;
 }
 
 // ── Parse "What You'll Need" section → structured requirements ────────────────
@@ -810,6 +844,27 @@ function isSkillsHeading(s) {
 // Single-letter language names the length floor would otherwise throw away.
 const ONE_CHAR_SKILLS = new Set(["c", "r"]);
 
+// Verbs the enumeration splitter leaves stranded at the head of a fragment
+// ("…FastAPI to design and build scalable" → "build scalable"). Only words that
+// are never nouns belong here — "design", "test", "support" and "architect"
+// lead real skill names ("design patterns", "test automation"), so they stay out.
+const SKILL_LEADING_VERBS = new Set([
+  "build","develop","create","implement","maintain","manage","deliver","drive",
+  "ensure","deploy","optimize","integrate","troubleshoot","translate","partner",
+  "contribute","participate","perform","provide","handle","understand","utilize",
+  "leverage","collaborate","assist","enable","execute","oversee","spearhead",
+]);
+
+// Marketing adjectives + the generic outcome nouns they attach to. Together they
+// name what the work produces ("high-performance backend systems", "scalable
+// solutions"), never a skill a résumé can list. Either half alone is fine —
+// "distributed systems" and "scalable system design" are real skills — so both
+// must be present before the phrase is rejected.
+const SKILL_PUFF_ADJ_RE =
+  /(?:^|\s|-)(?:high[\s-]?performance|performant|scalable|robust|reliable|efficient|resilient|seamless|cutting[\s-]?edge|world[\s-]?class|best[\s-]?in[\s-]?class|enterprise[\s-]?grade|mission[\s-]?critical|state[\s-]?of[\s-]?the[\s-]?art|innovative|large[\s-]?scale|next[\s-]?gen(?:eration)?)(?:$|\s|-)/i;
+const SKILL_OUTCOME_TAIL_RE =
+  /(?:^|\s)(?:systems?|solutions?|applications?|apps?|environments?|products?|processes?|workflows?|capabilities|features?|deliverables?|initiatives?|experiences?)$/i;
+
 // A skills list holds short noun phrases, not sentences. Reject anything that
 // reads like prose so résumé narrative can't leak into the skill set.
 function isPlausibleSkill(s) {
@@ -827,6 +882,17 @@ function isPlausibleSkill(s) {
   // "and" and "of" are different — they sit inside real skill names ("Internet
   // of Things", "Extract Transform and Load"), and the ≤4-word cap above
   // already keeps prose sentences out.
+  // Nothing but generic words ("Secure", "Scalable", "Best Practices") is a
+  // scrap the splitter tore off a sentence, never a skill. One real word is
+  // enough to keep the phrase — "design patterns", "performance tuning".
+  if (words.every(w => SKILL_STOPWORDS.has(w.toLowerCase()))) return false;
+  if (words.length > 1) {
+    const lead = words[0].toLowerCase().replace(/[^a-z]/g, "");
+    if (SKILL_LEADING_VERBS.has(lead)) return false;
+    // A puffed-up outcome, unless the whole phrase is a name we actually know.
+    if (SKILL_PUFF_ADJ_RE.test(s) && SKILL_OUTCOME_TAIL_RE.test(s) &&
+        !knownSkills().has(canonicalSkill(s))) return false;
+  }
   return true;
 }
 
@@ -914,6 +980,12 @@ const SKILL_STOPWORDS = new Set([
   "related","equivalent","degree","plus","preferred","required","work","working","other","various",
   "such","as","is","are","be","you","your","our","we","will","must","should","have","proven","a","an",
   "the","and","or","with","in","of","to","using","for","on","at","an","but","not","this","that",
+  // Bare verbs and adjectives a split leaves behind ("build secure" → "secure",
+  // "build scalable"). Only phrases made ENTIRELY of these are dropped, so
+  // "database design" and "performance tuning" are untouched.
+  "build","develop","create","implement","deliver","drive","ensure","deploy","design",
+  "secure","scalable","robust","reliable","efficient","resilient","seamless","performant",
+  "modern","complex","high","performance","best","practices","well","highly","across","within",
 ]);
 
 // `max` is the cap on mined phrases. A JD states its stack once (15 is plenty);
@@ -932,18 +1004,27 @@ function extractListedSkills(section, max = 15) {
     // and ".NET Core" in half at their internal dot.
     const stop = clause.search(/\.(?=\s|$)|;/);
     if (stop !== -1) clause = clause.slice(0, stop);
-    for (let phrase of clause.split(/[,/|]|\band\b|\n/i)) {
+    const add = (phrase) => {
       phrase = phrase.replace(/^[\s\-*•]+/, "").replace(/\s+/g, " ").trim();
-      if (phrase.length < 2 || phrase.length > 40) continue;
+      if (phrase.length < 2 || phrase.length > 40) return;
       const toks = phrase.toLowerCase().split(/\s+/);
-      if (toks.length > 3) continue;                          // skills are short phrases
-      if (toks.every(t => SKILL_STOPWORDS.has(t))) continue;  // pure boilerplate
-      if (!/[a-z0-9]/i.test(phrase)) continue;
+      if (toks.length > 3) return;                          // skills are short phrases
+      if (toks.every(t => SKILL_STOPWORDS.has(t))) return;  // pure boilerplate
+      if (!/[a-z0-9]/i.test(phrase)) return;
       // A clause fragment is not a skill. "…with FastAPI to design REST APIs"
       // mined "FastAPI to design", which then sat in Required as a permanent
       // miss — nothing can ever match it. Same prose test the résumé reader uses.
-      if (!isPlausibleSkill(phrase)) continue;
+      if (!isPlausibleSkill(phrase)) return;
       if (!out.some(o => o.toLowerCase() === phrase.toLowerCase())) out.push(phrase);
+    };
+    // A bare "/" is NOT a list separator: splitting on it shredded "CI/CD" into
+    // a "CI" chip and a "CD" chip, neither of which any résumé can match. Same
+    // rule the résumé reader uses — "HTML5/CSS3/JavaScript" is three skills,
+    // "CI/CD" and "TCP/IP" are one, and segment length tells them apart.
+    for (const entry of clause.split(/[,|]|\band\b|\n/i)) {
+      const segs = entry.includes("/") ? entry.split("/").map(x => x.trim()) : [];
+      if (segs.length > 1 && segs.every(x => x.length >= 3)) segs.forEach(add);
+      else add(entry);
     }
   }
   return out;
@@ -1598,9 +1679,12 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     // saw only the tools it already knew, so an off-list tool that appears only
     // in a role's "Environment:" line never reached the scorer.
     const fromExp = resumeExperienceSkills(resume_text);
+    // Dedupe on the CANONICAL name, not the literal text: a résumé that writes
+    // both "FastAPI" and "Fast API framework" (or "REST" and "REST APIs") named
+    // one skill twice, and the raw-text key kept both.
     const seen = new Set();
     const resumeSkills = [...findKeywords(resume_text), ...listed, ...fromExp]
-      .filter(s => { const k = s.toLowerCase(); return seen.has(k) ? false : seen.add(k); });
+      .filter(s => { const k = canonicalSkill(s); return seen.has(k) ? false : seen.add(k); });
     console.log(`[SCOUT] résumé skills: ${resumeSkills.length}`
       + ` (${listed.length} from Skills section, ${fromExp.length} from Experience)`,
       "\n[SCOUT]   Skills section:", listed.join(", ") || "(none)",
