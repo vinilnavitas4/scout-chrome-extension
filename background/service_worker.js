@@ -196,7 +196,7 @@ const TOOL_KEYWORDS = [
   "Prometheus","Grafana","Datadog","Splunk","ELK","New Relic","Dynatrace","AppDynamics","Nagios",
   "OpenShift","Rancher","Istio","Service Mesh","Lambda","EC2","S3","EKS","ECS","RDS","CloudFormation",
   "RabbitMQ","ActiveMQ","SQS","Event Hubs","Service Bus","gRPC","SOAP","WebSockets","Swagger","OpenAPI",
-  "OAuth","SAML","OIDC","JWT","Okta","Active Directory","Entra","Cognito","Vault","Zero Trust","SIEM",
+  "OAuth","SAML","OIDC","Okta","Active Directory","Entra","Cognito","Vault","Zero Trust","SIEM",
   "Postman","Cypress","Playwright","TestNG","Cucumber","JMeter","Appium","Jasmine","Jest","Mocha",
   "Confluence","Bitbucket","Kanban","Figma","Workday","SAP","Dynamics 365","Sitecore","WordPress","Snowpark"
 ];
@@ -932,6 +932,11 @@ const GENERIC_SKILL_WORDS = new Set([
   "concepts","practice","practices","principle","principles","environment","environments",
   "stack","suite","suites","product","products","programming","scripting","coding",
   "development","engineering","web","frontend","backend","general","various","modern","related",
+  // Security umbrellas a JD lists in a parenthetical ("secure APIs (OAuth, JWT,
+  // encryption, etc.)"). They name a property of the work, not a tool a résumé
+  // lists, so alone they sit in Missing forever. A phrase naming the actual
+  // mechanism still survives — "AES encryption", "encryption at rest".
+  "encryption","encrypted","cryptography","jwt",
 ]);
 
 // Gerunds are always verbal — "designing REST APIs" and "coaching junior
@@ -1518,13 +1523,14 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   });
 
   // ── Category fills (each 0-1) ───────────────────────────────────────────────
-  // Prominence-weighted required fill (#7): each required skill counts by how
-  // often the JD mentions it, so core skills dominate the ratio.
-  const prom = requirements.prominence || {};
-  const wOf  = s => Math.max(prom[s] || 1, 1);
-  const reqTotal   = required_skills.reduce((a, s) => a + wOf(s), 0);
-  const reqMatched = matchedReq.reduce((a, s) => a + wOf(s), 0);
-  const reqFill  = reqTotal ? reqMatched / reqTotal : 0;
+  // Required fill is a plain ratio of the skills matched, so the count drawn
+  // beside the bar IS the bar. This used to be prominence-weighted (#7): each
+  // skill counted by how often the JD named it, which made one missed skill the
+  // posting repeated four times cost as much as four one-off misses — the card
+  // then read "21/24" next to a 77% bar, and dropping a bogus requirement moved
+  // no number. requirements.prominence is still carried in the payload (both the
+  // backend and the stored requirements hold the field); nothing scores off it.
+  const reqFill  = required_skills.length ? matchedReq.length / required_skills.length : 0;
   const prefFill = preferred_skills.length ? matchedPref.length / preferred_skills.length : 0;
 
   // Clearance bucket — active ONLY when the JD states a required clearance. Meets
@@ -1756,6 +1762,73 @@ async function repairBackendLocation(result, jd_id, candidate) {
   return { ...result, score, label: fitLabel(score), rationale, categories, gates, auto_schedule };
 }
 
+// Chip hygiene for backend results. The backend runs its own copy of this
+// file's JD parser, so a deployment older than the parser's filters ships
+// requirement chips this worker would never mine — "secure", "etc.)", "build
+// scalable" — and they render in the breakdown as permanent misses no résumé
+// can ever clear.
+//
+// Dropping the chip is only half the job: `fill` is what draws the bar and the
+// points, so a filtered chip list left the card contradicting itself — "21/24"
+// beside a 77% bar still computed over the 26 the backend counted, and removing
+// a junk requirement moved no number at all. Recompute the two skill fills off
+// the surviving chips (prominence-weighted for required, exactly as
+// computeScore does) and renormalize the composite, with the same guard
+// repairBackendLocation uses: if replaying the backend's own fills doesn't
+// reproduce its score, the two sides disagree on the formula and patching the
+// number from here would be a guess.
+function sanitizeCategorySkills(result) {
+  const cats = result && result.categories;
+  if (!Array.isArray(cats) || !cats.length) return result;
+
+  const dropped = [];
+  const clean = (list) => Array.isArray(list)
+    ? list.filter(s => {
+        const ok = isPlausibleSkill(String(s || "").trim());
+        if (!ok) dropped.push(s);
+        return ok;
+      })
+    : list;
+
+  const cleaned = cats.map(c =>
+    (c && (Array.isArray(c.matched) || Array.isArray(c.missing)))
+      ? { ...c, matched: clean(c.matched), missing: clean(c.missing) }
+      : c);
+  if (!dropped.length) return result;
+  console.log("[SCOUT] dropped non-skill chips from backend result:", dropped.join(", "));
+
+  const categories = cleaned.map(c => {
+    if (!c || !Array.isArray(c.matched) || !Array.isArray(c.missing)) return c;
+    if (c.key !== "required" && c.key !== "preferred") return c;
+    const total = c.matched.length + c.missing.length;
+    const fill  = total ? c.matched.length / total : 0;
+    return c.key === "preferred" ? { ...c, fill, active: total > 0 } : { ...c, fill };
+  });
+
+  const before = compositeFromCategories(cats);
+  const after  = compositeFromCategories(categories);
+  if (before === null || after === null) return { ...result, categories };
+  const rebuilt = clampScore(calibrate(before));
+  if (Math.abs(rebuilt - result.score) > 1) {
+    console.warn(`[SCOUT] chip filter: score formula mismatch (backend ${result.score}, local ${rebuilt})`
+      + " — chips filtered, score left as-is");
+    return { ...result, categories };
+  }
+
+  const score = clampScore(calibrate(after));
+  const reqCat = categories.find(c => c && c.key === "required");
+  const gates = result.gates
+    ? { ...result.gates, required_skills: !reqCat || reqCat.fill >= 1 }
+    : result.gates;
+  const auto_schedule = gates
+    ? score >= 80 && !!gates.required_skills && !!gates.certifications
+      && !!gates.clearance && !!gates.locality
+    : !!result.auto_schedule && score >= 80;
+
+  console.log(`[SCOUT] chip filter: ${dropped.length} chip(s) dropped | score ${result.score} → ${score}`);
+  return { ...result, score, label: fitLabel(score), categories, gates, auto_schedule };
+}
+
 // ── Score one candidate against one JD (backend-first, local fallback) ────────
 // Shared by GET_SCORE (single JD) and SCORE_ALL (every JD). Folds experience-
 // description skills + résumé skills, then scores. Returns { score, label,
@@ -1810,7 +1883,8 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
   if (backend) {
     // The backend's location detection is weaker than this worker's — fold the
     // bucket back in when we can resolve it locally.
-    const repaired = await repairBackendLocation(backend, jd_id, scored);
+    const repaired = sanitizeCategorySkills(
+      await repairBackendLocation(backend, jd_id, scored));
     // Which buckets are active after the repair — the breakdown card renders only
     // these, so a missing row (e.g. location) means neither side could resolve it.
     console.log("[SCOUT] score source: backend | buckets:",
