@@ -32,6 +32,7 @@ const noteCancel = document.getElementById('note-cancel');
 const noteConfirm = document.getElementById('note-confirm');
 const jazzhrBtn = document.getElementById('jazzhr-btn');
 const statusEl = document.getElementById('status');
+const addStatusEl = document.getElementById('add-status');
 const resumeUpload = document.getElementById('resume-upload');
 const resumeFile = document.getElementById('resume-file');
 const resumeName = document.getElementById('resume-name');
@@ -150,6 +151,7 @@ function scoreProblem() {
 // or the score is being recomputed — the override button is only ever brought
 // back by updateAddButton, once a fresh score has actually rendered.
 function disableAddButtons() {
+  addStatusEl.classList.remove('show');
   addBtn.disabled = true;
   overrideBtn.disabled = true;
   overrideBtn.style.display = 'none';
@@ -168,7 +170,8 @@ function updateAddButton() {
   // A too-low score is a hard stop rather than something the recruiter can fix
   // in the form, so say it on the button — a disabled button never gets a click
   // to surface a status line, and its tooltip needs a hover to find.
-  addBtn.textContent = lowScore ? `Score below ${MIN_ADD_SCORE} — can't add` : 'Add to JazzHR';
+  addBtn.textContent = lowScore ? `Score below ${MIN_ADD_SCORE} — can't add`
+                                : (isInternalJob() ? 'Add to SCOUT' : 'Add to JazzHR');
 
   // The override button appears only when the score is the sole thing in the
   // way — a missing/invalid email still has to be fixed in the form first.
@@ -996,8 +999,15 @@ function applyJobs(jobs, preserveId, quiet = false) {
 // Coming back to the panel (after creating a job on the dashboard, say) asks
 // for the list again. The service worker answers from its cache at once and
 // revalidates behind it, pushing JOBS_UPDATED if anything changed — no spinner.
+// Focus and visibility events fire in bursts (every click back into the panel),
+// so the re-check runs at most once per JD_QUIET_REFRESH_MS; a newly created
+// job still shows within that window, and JOBS_UPDATED covers the rest.
+const JD_QUIET_REFRESH_MS = 30 * 1000;
+let lastQuietRefresh = 0;
 function refreshJdsQuietly() {
   if (!jdOptions.length) return; // first load still in flight or failed — loadJds owns that
+  if (Date.now() - lastQuietRefresh < JD_QUIET_REFRESH_MS) return;
+  lastQuietRefresh = Date.now();
   chrome.runtime.sendMessage({ type: 'GET_JDS', quiet: true }, (res) => {
     if (chrome.runtime.lastError || !res?.ok) return;
     applyJobs(res.data, null, true);
@@ -1110,6 +1120,27 @@ function applyJdSelection(jdId) {
 
 // ── Score ─────────────────────────────────────────────────────────────────────
 
+// Ask the service worker for a score. No reply at all (`res` undefined) means
+// the worker was stopped or restarted mid-request and the message port closed
+// — try once more, since a fresh worker answers fine. What reaches the callback
+// always carries a readable error instead of "unknown error".
+function sendScoreMessage(message, callback, retried = false) {
+  chrome.runtime.sendMessage(message, (res) => {
+    const lastErr = chrome.runtime.lastError?.message;
+    if (res) { callback(res); return; }
+    if (!retried && !/context invalidated/i.test(lastErr || '')) {
+      setTimeout(() => sendScoreMessage(message, callback, true), 300);
+      return;
+    }
+    callback({
+      ok: false,
+      error: /context invalidated/i.test(lastErr || '')
+        ? 'the extension was reloaded — close and reopen this panel'
+        : (lastErr || 'no reply from the extension background — close and reopen this panel'),
+    });
+  });
+}
+
 function requestScore(jdId) {
   scoreVersion++;
   const version = scoreVersion;
@@ -1126,7 +1157,7 @@ function requestScore(jdId) {
   // scraped from the profile (Dice profiles embed the candidate's résumé).
   const effectiveResume = resumeText || candidate?.resumeText || '';
 
-  chrome.runtime.sendMessage(
+  sendScoreMessage(
     { type: 'GET_SCORE', payload: { jd_id: jdId, candidate, resume_text: effectiveResume || undefined } },
     (res) => {
       if (version !== scoreVersion) return; // stale — user changed JD
@@ -1291,7 +1322,7 @@ scanJdsBtn.addEventListener('click', () => {
   bestfitStatus.textContent = 'Scoring against all JDs…';
 
   const effectiveResume = resumeText || candidate?.resumeText || '';
-  chrome.runtime.sendMessage(
+  sendScoreMessage(
     { type: 'SCORE_ALL', payload: { candidate, resume_text: effectiveResume || undefined } },
     (res) => {
       scanJdsBtn.disabled = false;
@@ -1370,7 +1401,7 @@ addBtn.addEventListener('click', () => {
   // override path below is the only way past it.
   const lowScore = scoreProblem();
   if (lowScore) {
-    showStatus(lowScore, 'error');
+    showAddStatus(lowScore, 'error');
     return;
   }
   submitCandidate();
@@ -1380,11 +1411,11 @@ addBtn.addEventListener('click', () => {
 // candidate can't be sent regardless of score.
 function readyToSubmit() {
   if (!candidate) {
-    showStatus('Profile not loaded yet — wait and try again.', 'error');
+    showAddStatus('Profile not loaded yet — wait and try again.', 'error');
     return false;
   }
   if (!selectedJd) {
-    showStatus('Please select a Job Description first.', 'error');
+    showAddStatus('Please select a Job Description first.', 'error');
     return false;
   }
   // JazzHR needs an email — last line of defence behind the disabled button.
@@ -1392,7 +1423,7 @@ function readyToSubmit() {
   if (problem) {
     emailTouched = true;
     validateEmail(true);
-    showStatus(problem, 'error');
+    showAddStatus(problem, 'error');
     profileEmail.focus();
     return false;
   }
@@ -1496,12 +1527,17 @@ function submitCandidate(overrideNote = '') {
   addBtn.disabled = true;
   overrideBtn.disabled = true;
   jazzhrBtn.style.display = 'none';
-  showStatus('Adding to JazzHR…', 'loading');
+  showAddStatus(isInternalJob() ? 'Adding to SCOUT…' : 'Adding to JazzHR…', 'loading');
 
   chrome.runtime.sendMessage({ type: 'ADD_CANDIDATE', payload }, (res) => {
-    statusEl.classList.remove('show');
+    // Panel/SW channel dropped (SW restarted mid-request) — say so rather than
+    // leaving the spinner up with no outcome.
+    if (chrome.runtime.lastError && !res) {
+      res = { ok: false, error: `Add interrupted (${chrome.runtime.lastError.message}) — check the SCOUT dashboard before retrying.` };
+    }
+    addStatusEl.classList.remove('show');
     if (res?.ok) {
-      addBtn.textContent = 'Added to JazzHR ✓';
+      addBtn.textContent = isInternalJob() ? 'Added to SCOUT ✓' : 'Added to JazzHR ✓';
       addBtn.className = 'btn btn-success';
       addBtn.title = '';
       overrideBtn.style.display = 'none';   // the add already happened
@@ -1511,14 +1547,14 @@ function submitCandidate(overrideNote = '') {
         jazzhrBtn.style.display = 'flex';
       }
     } else {
-      showStatus(res?.error || 'Failed to add.', 'error');
       updateAddButton();
+      showAddStatus(res?.error || 'Failed to add.', 'error');
     }
   });
 }
 
 function resetAddButton() {
-  addBtn.textContent = 'Add to JazzHR';
+  addBtn.textContent = isInternalJob() ? 'Add to SCOUT' : 'Add to JazzHR';
   addBtn.className = 'btn btn-primary';
   updateAddButton();
 }
@@ -1536,6 +1572,19 @@ function escapeHtml(s) {
 function showStatus(msg, type) {
   statusEl.textContent = msg;
   statusEl.className = `status ${type} show`;
+}
+
+// Same, for the add flow: rendered under the Add buttons and scrolled into view,
+// since the recruiter is at the bottom of the report when they click.
+function showAddStatus(msg, type) {
+  addStatusEl.textContent = msg;
+  addStatusEl.className = `status ${type} show`;
+  addStatusEl.scrollIntoView({ block: 'nearest' });
+}
+
+// SCOUT-native (SCT-…) jobs never go to JazzHR — ids are int_….
+function isInternalJob() {
+  return String(selectedJd || '').startsWith('int_');
 }
 
 // Clean a phone string for the backend/JazzHR: drop "(Mobile)" tags and any

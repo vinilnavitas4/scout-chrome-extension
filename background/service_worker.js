@@ -13,8 +13,10 @@ function scoutHeaders(extra) {
 // an Azure error page, an auth redirect, or a deploy where the Scout routes are
 // missing — r.json() throws the useless "Unexpected token '<'". Report the
 // status and path so the panel says what actually broke.
-async function scoutGetJson(path) {
-  const r    = await fetch(`${BASE_URL}${path}`, { headers: scoutHeaders() });
+// `priority: "low"` marks background warm-up traffic so the browser schedules a
+// recruiter-facing request (a score) ahead of it.
+async function scoutGetJson(path, { priority } = {}) {
+  const r    = await fetch(`${BASE_URL}${path}`, { headers: scoutHeaders(), ...(priority ? { priority } : {}) });
   const text = await r.text();
   if (!r.ok) {
     throw new Error(r.status === 404
@@ -1329,6 +1331,9 @@ async function parseResumePdf(b64) {
 // (endpoint not deployed) or malformed body falls through to local.
 const SCORE_RETRIES   = 2;
 const SCORE_TIMEOUT_MS = 12000;
+// Add = JazzHR create + DB writes + résumé/profile indexing server-side; slow
+// but finite. Past this the panel reports a timeout instead of spinning forever.
+const ADD_TIMEOUT_MS = 90000;
 
 async function backendScore(jd_id, candidate, resume_text) {
   const body = JSON.stringify({
@@ -1392,6 +1397,8 @@ async function backendScore(jd_id, candidate, resume_text) {
       return {
         score: d.score, label: d.label || "", rationale: d.rationale || "",
         categories: d.categories || null, gates: d.gates || null,
+        // false = the JD yielded nothing to score against (not a real match).
+        scorable: d.scorable !== false,
         auto_schedule: !!d.auto_schedule,
       };
     } catch (e) {                                    // network / abort(timeout) → transient, retry
@@ -1690,14 +1697,24 @@ function jobCacheEntry(job) {
   return { title: job.title, requirements };
 }
 
+// In-flight fetches by JD, so a caller arriving while one is running shares it
+// instead of paying a second ~1.5s round trip for the same JD.
+const jobFetches = new Map();
+
 async function getJobRequirements(jd_id) {
+  await jobCacheReady;
   const hit = jobCache.get(jd_id);
   if (hit) return hit;
-  const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
-  if (job.error) throw new Error(job.error);
-  const entry = jobCacheEntry(job);
-  jobCache.set(jd_id, entry);
-  return entry;
+  if (jobFetches.has(jd_id)) return jobFetches.get(jd_id);
+  const p = (async () => {
+    const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
+    if (job.error) throw new Error(job.error);
+    const entry = jobCacheEntry(job);
+    rememberJob(jd_id, entry);
+    return entry;
+  })().finally(() => jobFetches.delete(jd_id));
+  jobFetches.set(jd_id, p);
+  return p;
 }
 
 // The backend scorer resolves a JD's location from the description prose alone —
@@ -1878,6 +1895,58 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     if (resumeEdu) scored = { ...scored, education: [{ degree: resumeEdu, school: "" }] };
   }
 
+  // Same JD + same scored inputs → same answer. Re-picking a JD, reopening the
+  // panel on the same profile, or "best fit" after a single-JD score is served
+  // from here instead of another round trip; an identical request already in
+  // flight is shared rather than sent twice.
+  const key = scoreCacheKey(jd_id, scored, resume_text);
+  const cachedScore = scoreCache.get(key);
+  if (cachedScore && Date.now() - cachedScore.at < SCORE_CACHE_TTL_MS) return cachedScore.result;
+  if (scoreInFlight.has(key)) return scoreInFlight.get(key);
+  const p = scoreUncached(jd_id, scored, resume_text)
+    .then(result => {
+      // Only the backend's answer is cached — a local fallback is a stopgap
+      // that the next attempt should try to replace with the real score.
+      // Nor an "unscorable" answer: that says the JD could not be read, which a
+      // backend fix or an edited JD can change at any moment.
+      if (result.source === "backend" && result.scorable !== false) {
+        scoreCache.set(key, { at: Date.now(), result });
+        if (scoreCache.size > SCORE_CACHE_MAX) scoreCache.delete(scoreCache.keys().next().value);
+      }
+      return result;
+    })
+    .finally(() => scoreInFlight.delete(key));
+  scoreInFlight.set(key, p);
+  return p;
+}
+
+// ── Score result cache ────────────────────────────────────────────────────────
+// Keyed on the JD and the exact candidate payload scored (after the résumé
+// rules above), so any change to the profile or résumé is a different key.
+// Short-lived: the backend re-reads an edited JD, and this must follow it.
+const SCORE_CACHE_TTL_MS = 10 * 60 * 1000;
+const SCORE_CACHE_MAX = 300;
+const scoreCache = new Map();
+const scoreInFlight = new Map();
+
+// FNV-1a over the serialized inputs — a compact key, not a security hash.
+function scoreCacheKey(jd_id, scored, resume_text) {
+  const s = JSON.stringify([scored, resume_text || ""]);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${jd_id}|${s.length}|${(h >>> 0).toString(36)}`;
+}
+
+async function scoreUncached(jd_id, scored, resume_text) {
+  // The JD's requirements are needed after the backend answers (location
+  // repair) or instead of it (local fallback). Start fetching now, alongside
+  // the score, rather than paying the round trip after it — a new job is not
+  // in jobCache yet. Failures surface where the result is actually used.
+  getJobRequirements(jd_id).catch(() => {});
+
   // 1) Backend scoring (consistent across devices).
   const backend = await backendScore(jd_id, scored, resume_text);
   if (backend) {
@@ -1959,16 +2028,79 @@ chrome.runtime.onStartup?.addListener(() => { refreshJobsCache(); ensureOffscree
 chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); });
 
 // ── Pre-fetch all job descriptions in background ──────────────────────────────
-// Called after GET_JDS returns. Populates jobCache so GET_SCORE is instant.
+// Fills jobCache (clearance badges in the picker, location repair, the local
+// fallback scorer). This used to fire one request per job all at once — ~150
+// on every panel open — and the browser's per-host connection limit then held
+// the recruiter's actual score request behind the whole burst, for many
+// seconds. Now it is a single background queue: low fetch priority, two at a
+// time, paused while any score is in flight, skipping JDs fetched in the last
+// JD_FRESH_MS. The parsed cache is persisted so a service-worker restart
+// (every ~30s idle) does not start the sweep over.
+
+const JD_FRESH_MS = 10 * 60 * 1000;
+const PREFETCH_CONCURRENCY = 2;
+const JD_STORE_KEY = "scout_jd_cache";
+const jobFetchedAt = new Map();          // job_id → ms of last successful fetch
+const prefetchQueue = [];
+const prefetchQueued = new Set();
+let prefetchRunning = false;
+
+// Restore the parsed JDs from the last worker lifetime before anything reads them.
+const jobCacheReady = (async () => {
+  try {
+    const { [JD_STORE_KEY]: saved } = await chrome.storage.local.get(JD_STORE_KEY);
+    for (const [id, { at, entry }] of Object.entries(saved || {})) {
+      if (!jobCache.has(id)) { jobCache.set(id, entry); jobFetchedAt.set(id, at); }
+    }
+  } catch (e) { console.warn("[SCOUT] JD cache restore failed:", e.message); }
+})();
+
+let persistTimer = null;
+function persistJobCache() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    const out = {};
+    for (const [id, entry] of jobCache) out[id] = { at: jobFetchedAt.get(id) || 0, entry };
+    chrome.storage.local.set({ [JD_STORE_KEY]: out }).catch(() => {});
+  }, 1000);
+}
+
+function rememberJob(id, entry) {
+  jobCache.set(id, entry);
+  jobFetchedAt.set(id, Date.now());
+  persistJobCache();
+}
 
 async function prefetchJobDescriptions(jobs) {
-  await Promise.allSettled(jobs.map(async (job) => {
-    try {
-      const data = await scoutGetJson(`/api/scout/jobs/${job.id}`);
-      if (!data.error) jobCache.set(job.id, jobCacheEntry(data));
-    } catch (_) { /* silently skip — GET_SCORE will fall back to a live fetch */ }
-  }));
-  console.log(`[SCOUT] Pre-cached ${jobCache.size} job descriptions`);
+  await jobCacheReady;
+  for (const job of jobs) {
+    const fresh = Date.now() - (jobFetchedAt.get(job.id) || 0) < JD_FRESH_MS;
+    if (!fresh && !prefetchQueued.has(job.id)) { prefetchQueued.add(job.id); prefetchQueue.push(job.id); }
+  }
+  if (prefetchRunning) return;           // the running sweep picks the new ids up
+  if (!prefetchQueue.length) { publishJobClearances(); return; }
+  prefetchRunning = true;
+  let done = 0;
+  const worker = async () => {
+    while (prefetchQueue.length) {
+      // A score the recruiter is waiting on always goes first.
+      while (scoreInFlight.size) await new Promise(r => setTimeout(r, 150));
+      const id = prefetchQueue.shift();
+      prefetchQueued.delete(id);
+      try {
+        const data = await scoutGetJson(`/api/scout/jobs/${id}`, { priority: "low" });
+        if (!data.error) rememberJob(id, jobCacheEntry(data));
+      } catch (_) { /* skip — GET_SCORE fetches it live if it is ever needed */ }
+      // Badges appear as the sweep goes rather than only at the very end.
+      if (++done % 25 === 0) publishJobClearances();
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: PREFETCH_CONCURRENCY }, worker));
+  } finally {
+    prefetchRunning = false;
+  }
+  console.log(`[SCOUT] Pre-cached ${jobCache.size} job descriptions (${done} fetched)`);
   await publishJobClearances();
 }
 
@@ -2167,7 +2299,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         // fresh = user hit refresh: drop cached JD requirements so the next
         // GET_SCORE re-fetches and re-parses descriptions from the backend.
-        if (message.fresh) jobCache.clear();
+        // Scores computed against the old text go with them.
+        if (message.fresh) {
+          await jobCacheReady;
+          jobCache.clear();
+          jobFetchedAt.clear();
+          scoreCache.clear();
+          chrome.storage.local.remove(JD_STORE_KEY).catch(() => {});
+        }
 
         // Stale-while-revalidate: serve ANY cached list immediately (even past
         // TTL) so the dropdown never waits on the network after the first-ever
@@ -2278,9 +2417,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Sourcing channel ("LinkedIn" / "Dice.com") — sent top-level as well as on
         // the candidate; the backend normalizes it into scout_candidates.candidate_source
         // for the dashboard chip.
+        // Bounded: with no timeout a stalled backend left the panel on
+        // "Adding…" forever with no outcome.
+        const ctrl  = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), ADD_TIMEOUT_MS);
         const r = await fetch(`${BASE_URL}/api/scout/candidates`, {
           method:  "POST",
           headers: scoutHeaders(),
+          signal:  ctrl.signal,
           body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token,
                                     candidate_source: candidate_source || candidate?.source || "",
                                     // LinkedIn-sourced only (canonical /in/<slug>/); absent for Dice.
@@ -2289,7 +2433,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     // floor; the backend files it on the candidate timeline.
                                     override_note, override_score }),
         });
-        const text = await r.text();
+        const text = await r.text().finally(() => clearTimeout(timer));
         let data;
         try { data = JSON.parse(text); }
         catch (_) { sendResponse({ ok: false, error: `Non-JSON (${r.status}): ${text.slice(0, 120)}` }); return; }
@@ -2310,7 +2454,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
       } catch (e) {
         console.error("[SCOUT] ADD_CANDIDATE error:", e.message);
-        sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
+        sendResponse({ ok: false, error: e.name === "AbortError"
+          ? `SCOUT didn't respond in ${ADD_TIMEOUT_MS / 1000}s — check the dashboard before retrying (it may still have been added).`
+          : `Fetch failed: ${e.message}` });
       }
     })();
     return true;
