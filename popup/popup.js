@@ -414,6 +414,12 @@ chrome.runtime.onMessage.addListener((message) => {
     if (changed && jdWrap.classList.contains('open')) renderJdList(jdQuery);
   }
 
+  // The service worker re-pulled the job list behind a cached answer and it
+  // changed — a job was created or closed since the panel opened.
+  if (message?.type === "JOBS_UPDATED" && Array.isArray(message.data) && jdOptions.length) {
+    applyJobs(message.data, null, true);
+  }
+
   // Dice résumé finished rendering after the first scan → adopt the updated
   // candidate (real email + résumé skills + résumé text) and re-score.
   if (message?.type === "DICE_PROFILE_UPDATED" && message.profile) {
@@ -951,28 +957,56 @@ function loadJds(preserveId, fresh) {
       jdInput.placeholder = 'Failed to load jobs';
       return;
     }
-    jdOptions = res.data.map(makeJdOption);
-    jdInput.disabled = false;
-    jdToggle.disabled = false;
-    jdInput.placeholder = 'Search or select a job…';
-
-    // Re-apply the selection: explicit preserveId (refresh button) or a JD
-    // restored from the profile cache before the list finished loading.
-    const keep = preserveId || selectedJd;
-    if (keep) {
-      if (jdOptionById(keep)) {
-        selectedJd = keep;
-        selectedJdTitle = jdOptionById(keep).title;
-      } else {
-        // JD no longer exists on the backend — clear stale selection
-        selectedJd = null;
-        selectedJdTitle = null;
-      }
-    }
-    syncJdInput();
-    if (jdWrap.classList.contains('open')) renderJdList(jdQuery);
+    applyJobs(res.data, preserveId);
   });
 }
+
+// Put a job list on screen, keeping the current selection when it is still in
+// the list. Used by the first load and by every later refresh, so a job
+// created while the panel is open simply appears. `quiet` refreshes happen
+// behind the recruiter's back, so they never drop the JD being worked on.
+function applyJobs(jobs, preserveId, quiet = false) {
+  // Clearance badges arrive separately (JD_CLEARANCES); a refreshed list that
+  // does not carry them yet keeps the ones already on screen.
+  const prevClearance = Object.fromEntries(jdOptions.map(o => [o.id, o.clearance]));
+  jdOptions = jobs.map(j => makeJdOption(
+    j.clearance || !prevClearance[j.id] ? j : { ...j, clearance: prevClearance[j.id] }));
+  jdInput.disabled = false;
+  jdToggle.disabled = false;
+  jdInput.placeholder = 'Search or select a job…';
+
+  // Re-apply the selection: explicit preserveId (refresh button) or a JD
+  // restored from the profile cache before the list finished loading.
+  const keep = preserveId || selectedJd;
+  if (keep) {
+    if (jdOptionById(keep)) {
+      selectedJd = keep;
+      selectedJdTitle = jdOptionById(keep).title;
+    } else if (!quiet) {
+      // JD no longer exists on the backend — clear stale selection
+      selectedJd = null;
+      selectedJdTitle = null;
+    }
+  }
+  // Leave the box alone while the recruiter is typing a search into it.
+  if (!(quiet && jdWrap.classList.contains('open'))) syncJdInput();
+  if (jdWrap.classList.contains('open')) renderJdList(jdQuery);
+}
+
+// Coming back to the panel (after creating a job on the dashboard, say) asks
+// for the list again. The service worker answers from its cache at once and
+// revalidates behind it, pushing JOBS_UPDATED if anything changed — no spinner.
+function refreshJdsQuietly() {
+  if (!jdOptions.length) return; // first load still in flight or failed — loadJds owns that
+  chrome.runtime.sendMessage({ type: 'GET_JDS', quiet: true }, (res) => {
+    if (chrome.runtime.lastError || !res?.ok) return;
+    applyJobs(res.data, null, true);
+  });
+}
+window.addEventListener('focus', refreshJdsQuietly);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshJdsQuietly();
+});
 
 // ── Combobox interaction ──────────────────────────────────────────────────────
 
@@ -1320,6 +1354,16 @@ function candidateSource() {
   return sourceBadge.textContent || '';
 }
 
+// Canonical LinkedIn profile URL for LinkedIn-sourced candidates, '' otherwise.
+// Rebuilt from the slug so subpage routes (/details/skills, /overlay/contact-info)
+// and locale variants all land as https://www.linkedin.com/in/<slug>/.
+function linkedinUrl() {
+  if (candidateSource() !== 'LinkedIn') return '';
+  const m = (candidate?.profileUrl || '').match(/linkedin\.com\/in\/([^\/?#]+)/i);
+  const slug = m ? m[1] : lastProfileSlug;
+  return slug ? `https://www.linkedin.com/in/${slug}/` : '';
+}
+
 addBtn.addEventListener('click', () => {
   if (!readyToSubmit()) return;
   // Fit-score floor — last line of defence behind the disabled button. The
@@ -1413,10 +1457,12 @@ function submitCandidate(overrideNote = '') {
   const rName = resumeB64 ? resumeFileName : (candidate.resumeName || 'resume.pdf');
   const rMime = resumeB64 ? resumeMime : (candidate.resumeMime || 'application/pdf');
 
+  const liUrl = linkedinUrl();
   const payload = {
     job_id: selectedJd,
     job_title: selectedJdTitle || '',
     candidate_source: candidateSource(),
+    linkedin_url: liUrl || undefined,
     resume_b64: rB64 || undefined,
     resume_name: rB64 ? rName : undefined,
     resume_mime: rB64 ? rMime : undefined,
@@ -1431,6 +1477,7 @@ function submitCandidate(overrideNote = '') {
       skills: candidate.skills,
       experience_years: candidate.experience_years,
       profileUrl: candidate.profileUrl,
+      linkedin_url: liUrl || undefined,
       email: effectiveEmail(),
       phone: normalizePhone(candidate.phone),
       experience: candidate.experience || [],

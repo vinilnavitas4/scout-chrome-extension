@@ -1930,10 +1930,22 @@ async function getCachedJobs() {
   return c && Array.isArray(c.jobs) ? c : null;
 }
 
+// Same jobs, same titles, same order — the dropdown would not change.
+const jobsSignature = (jobs) => (jobs || []).map(j => `${j.id}|${j.title}|${j.client}`).join("\n");
+
 async function refreshJobsCache() {
   try {
+    const prev = await getCachedJobs().catch(() => null);
     const jobs = await fetchJobs();
     await chrome.storage.local.set({ [JOBS_CACHE_KEY]: { ts: Date.now(), jobs } });
+    // An open popup already rendered the cached list; hand it the fresh one so
+    // a job created a moment ago shows without closing the panel or reloading
+    // the extension. No popup open just means nobody is listening.
+    if (jobsSignature(prev?.jobs) !== jobsSignature(jobs)) {
+      chrome.runtime.sendMessage({ type: "JOBS_UPDATED", data: jobs }).catch(() => {});
+      // Only the JDs not already held — the new job, typically.
+      prefetchJobDescriptions(jobs.filter(j => !jobCache.has(j.id)));
+    }
     return jobs;
   } catch (e) {
     console.error("[SCOUT] refreshJobsCache:", e.message);
@@ -2166,7 +2178,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (cached && cached.jobs.length) {
             sendResponse({ ok: true, data: cached.jobs });
             ensureOffscreen().catch(() => {});
-            prefetchJobDescriptions(cached.jobs);
+            // A quiet re-check (the panel regaining focus) only fills gaps; a
+            // real open re-pulls every JD so edited descriptions are picked up.
+            prefetchJobDescriptions(message.quiet
+              ? cached.jobs.filter(j => !jobCache.has(j.id)) : cached.jobs);
             refreshJobsCache(); // silent background revalidate
             return;
           }
@@ -2258,7 +2273,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime, candidate_source,
-                override_note, override_score } = payload;
+                linkedin_url, override_note, override_score } = payload;
         const jazzhr_token = await getJazzhrToken();
         // Sourcing channel ("LinkedIn" / "Dice.com") — sent top-level as well as on
         // the candidate; the backend normalizes it into scout_candidates.candidate_source
@@ -2268,6 +2283,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           headers: scoutHeaders(),
           body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token,
                                     candidate_source: candidate_source || candidate?.source || "",
+                                    // LinkedIn-sourced only (canonical /in/<slug>/); absent for Dice.
+                                    linkedin_url: linkedin_url || candidate?.linkedin_url || undefined,
                                     // Set only when the recruiter added below the fit-score
                                     // floor; the backend files it on the candidate timeline.
                                     override_note, override_score }),
