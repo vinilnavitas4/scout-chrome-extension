@@ -563,7 +563,18 @@ chrome.tabs.onActivated.addListener(() => handleActiveTab());
 
 function requestProfile(tabId, scriptFile, force = false) {
   chrome.tabs.sendMessage(tabId, { action: 'getProfile', force }, (response) => {
-    if (chrome.runtime.lastError || !response?.profile) {
+    const err = chrome.runtime.lastError;
+    // Inject only when no content script is listening. If it IS loaded but the
+    // extraction failed, re-injecting throws "Identifier ... already declared".
+    if (!err && !response?.profile) {
+      onProfileFailed(response?.error ? `Could not read profile: ${response.error}` : 'Could not read profile. Try refreshing the page.');
+      return;
+    }
+    if (err && !/Receiving end does not exist/i.test(err.message || '')) {
+      onProfileFailed('Could not read profile. Try refreshing the page.');
+      return;
+    }
+    if (err) {
       chrome.scripting.executeScript(
         { target: { tabId }, files: [scriptFile] },
         () => {
@@ -1521,6 +1532,8 @@ function submitCandidate(overrideNote = '') {
       score: currentScore?.score,
       score_label: currentScore?.label,
       rationale: currentScore?.rationale,
+      // The breakdown behind `score` — the dashboard timeline redraws this card.
+      score_categories: currentScore?.categories || undefined,
     }
   };
 
