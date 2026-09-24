@@ -13,8 +13,10 @@ function scoutHeaders(extra) {
 // an Azure error page, an auth redirect, or a deploy where the Scout routes are
 // missing — r.json() throws the useless "Unexpected token '<'". Report the
 // status and path so the panel says what actually broke.
-async function scoutGetJson(path) {
-  const r    = await fetch(`${BASE_URL}${path}`, { headers: scoutHeaders() });
+// `priority: "low"` marks background warm-up traffic so the browser schedules a
+// recruiter-facing request (a score) ahead of it.
+async function scoutGetJson(path, { priority } = {}) {
+  const r    = await fetch(`${BASE_URL}${path}`, { headers: scoutHeaders(), ...(priority ? { priority } : {}) });
   const text = await r.text();
   if (!r.ok) {
     throw new Error(r.status === 404
@@ -121,9 +123,57 @@ const SKILL_ALIASES = new Map([
   ["clearable", "clearance"],
 ]);
 
+// Trailing words that describe the SHAPE of a skill rather than the skill
+// itself. A JD writes "Fast API framework", "microservices architecture" and
+// "API development" for the same things it elsewhere calls "FastAPI",
+// "Microservices" and "API" — all three then rendered as separate chips beside
+// the plain name. Strip the qualifier ONLY when what remains is itself a skill
+// we know, so genuine compounds survive: "database design", "system
+// architecture" and "ORM tools" stay whole because "database", "system" and
+// "ORM" are not skills on their own.
+// A JD also writes the same tool as "CI/CD pipelines", "Docker containers",
+// "AWS cloud services" and "Salesforce Administrator", each of which showed up
+// as its own chip beside the plain name, so the container/role tails are peeled
+// on the same known-remainder rule.
+const SKILL_QUALIFIER_TAIL_RE =
+  /\s+(?:frameworks?|librar(?:y|ies)|technolog(?:y|ies)|tools?|stack|architecture|development|programming|design|concepts?|principles?|practices?|fundamentals|methodolog(?:y|ies)|management|services?|solutions?|platforms?|pipelines?|containers?|clusters?|suites?|ecosystems?|administration|administrator|cloud)$/;
+
+// Tails that carry no meaning at all — "data warehousing concepts" and "data
+// warehousing" are the same requirement, and "communication skills" is only a
+// soft trait once the tail is off. These peel unconditionally, so they are
+// stripped from the phrase itself and not merely from the match key.
+const SKILL_NOISE_TAIL_RE =
+  /\s+(?:concepts?|principles?|fundamentals|best\s+practices|expertise|proficienc(?:y|ies)|knowledge|skills?|abilit(?:y|ies)|experience)$/i;
+
+// Every skill name the whitelist and the alias map know, normalized. Built
+// lazily because TOOL_KEYWORDS is declared below this point.
+let KNOWN_SKILLS = null;
+function knownSkills() {
+  if (!KNOWN_SKILLS) {
+    KNOWN_SKILLS = new Set();
+    for (const k of TOOL_KEYWORDS) KNOWN_SKILLS.add(normalizeSkill(k));
+    for (const [alias, target] of SKILL_ALIASES) { KNOWN_SKILLS.add(alias); KNOWN_SKILLS.add(target); }
+  }
+  return KNOWN_SKILLS;
+}
+
 function canonicalSkill(s) {
-  const n = normalizeSkill(s);
-  return SKILL_ALIASES.get(n) || n;
+  let n = normalizeSkill(s);
+  n = SKILL_ALIASES.get(n) || n;
+  // Peel qualifier tails looking for a known skill ("fast api framework" → "fast
+  // api" → alias → "fastapi"). Intermediates need not themselves be skills —
+  // "aws cloud services" only reaches "aws" by way of "aws cloud" — but the peel
+  // is only KEPT if it lands on a name we know, so genuine compounds survive
+  // whole ("database design", "ORM tools").
+  let probe = n.replace(SKILL_NOISE_TAIL_RE, "").trim() || n;
+  for (let i = 0; i < 3 && !knownSkills().has(probe); i++) {
+    const stripped = probe.replace(SKILL_QUALIFIER_TAIL_RE, "");
+    if (stripped === probe || !stripped) break;
+    probe = stripped;
+  }
+  if (knownSkills().has(probe)) n = SKILL_ALIASES.get(probe) || probe;
+  else n = n.replace(SKILL_NOISE_TAIL_RE, "").trim() || n;
+  return n;
 }
 
 // ── Parse "What You'll Need" section → structured requirements ────────────────
@@ -148,7 +198,7 @@ const TOOL_KEYWORDS = [
   "Prometheus","Grafana","Datadog","Splunk","ELK","New Relic","Dynatrace","AppDynamics","Nagios",
   "OpenShift","Rancher","Istio","Service Mesh","Lambda","EC2","S3","EKS","ECS","RDS","CloudFormation",
   "RabbitMQ","ActiveMQ","SQS","Event Hubs","Service Bus","gRPC","SOAP","WebSockets","Swagger","OpenAPI",
-  "OAuth","SAML","OIDC","JWT","Okta","Active Directory","Entra","Cognito","Vault","Zero Trust","SIEM",
+  "OAuth","SAML","OIDC","Okta","Active Directory","Entra","Cognito","Vault","Zero Trust","SIEM",
   "Postman","Cypress","Playwright","TestNG","Cucumber","JMeter","Appium","Jasmine","Jest","Mocha",
   "Confluence","Bitbucket","Kanban","Figma","Workday","SAP","Dynamics 365","Sitecore","WordPress","Snowpark"
 ];
@@ -687,6 +737,32 @@ const RESUME_SKILLS_NEXT_RE =
 // space inside a phrase — "Machine Learning" keeps its single space.
 const SKILL_SPLIT_RE = /[,;|•·▪●•\n\r\t]+|\s+[-–—]\s+|\s{2,}/;
 
+// ── Heading detection ─────────────────────────────────────────────────────────
+// Every section slicer needs the same answer: "is this word a heading, or is it
+// prose that happens to use the heading's word?" The old test accepted ANY
+// ALL-CAPS match, wherever it sat on the line — so a skills row spelled
+// "CLOUD EXPERIENCE: AWS, Azure" ended the Skills block at "EXPERIENCE" and
+// every skill after that row was dropped. Line position is the reliable signal
+// whenever the extractor produced real lines; the ALL-CAPS guess is only a
+// fallback for text that came back flattened (no line breaks to read).
+function hasLineStructure(text) {
+  return (text.match(/\n/g) || []).length >= 3;
+}
+
+// True when the match at `idx` starts its own line (leading bullets/whitespace
+// allowed). `heading` is the matched text, used only for the flattened fallback.
+function isHeadingMatch(text, idx, heading, flattened) {
+  if (idx === 0) return true;
+  const lineStart = text.lastIndexOf("\n", idx - 1) + 1;
+  if (/^[\s\-*•·▪●]*$/.test(text.slice(lineStart, idx))) return true;
+  // Flattened text has no line breaks to test — fall back to ALL-CAPS, but only
+  // when the word is not part of a longer ALL-CAPS phrase ("CLOUD EXPERIENCE").
+  if (!flattened) return false;
+  if (heading !== heading.toUpperCase()) return false;
+  const before = text.slice(Math.max(0, idx - 30), idx);
+  return !/[A-Z0-9][A-Z0-9&+/.#-]*\s+$/.test(before);
+}
+
 function resumeListedSkills(text) {
   if (!text) return [];
   const matches = [...text.matchAll(RESUME_SKILLS_HEADING_RE)];
@@ -696,9 +772,8 @@ function resumeListedSkills(text) {
   // every later block. Take every match that reads like a real heading (ALL-CAPS
   // or line-start) and union their sections, falling back to the first prose
   // mention only when none of them qualify.
-  let heads = matches.filter(
-    m => m[0] === m[0].toUpperCase() || m.index === 0 || text[m.index - 1] === "\n"
-  );
+  const flattened = !hasLineStructure(text);
+  let heads = matches.filter(m => isHeadingMatch(text, m.index, m[0], flattened));
   if (heads.length === 0) heads = [matches[0]];
 
   const out = [];
@@ -722,10 +797,11 @@ function skillsFromSection(text, head) {
   // heading. A plain `search` ended the block on inline prose ("Java — 5 years
   // experience"), truncating everything listed after it.
   let end = rest.length;
+  const flattened = !hasLineStructure(rest);
   const nextRe = new RegExp(RESUME_SKILLS_NEXT_RE.source, "gi");
   let m;
   while ((m = nextRe.exec(rest)) !== null) {
-    if (m.index === 0 || rest[m.index - 1] === "\n" || m[0] === m[0].toUpperCase()) {
+    if (isHeadingMatch(rest, m.index, m[0], flattened)) {
       end = m.index;
       break;
     }
@@ -734,15 +810,34 @@ function skillsFromSection(text, head) {
   if (!section) return [];
 
   const out = [];
-  for (let raw of section.split(SKILL_SPLIT_RE)) {
+  const add = (s) => {
+    if (!isPlausibleSkill(s)) return;
+    if (isSkillsHeading(s)) return;   // a sub-heading inside the block, not a skill
+    if (!out.some(x => x.toLowerCase() === s.toLowerCase())) out.push(s);
+  };
+  const parts = section.split(SKILL_SPLIT_RE);
+  for (let i = 0; i < parts.length; i++) {
+    let raw = parts[i];
+    // A category label and its values are often split apart by the column gap
+    // ("Languages" ⟂ ": C#, VB.NET"), which left the label itself sitting in the
+    // list as a skill. A fragment whose values begin in the NEXT entry is a
+    // label — drop it, and drop the colon the next entry now starts with.
+    if (/:\s*$/.test(raw)) continue;
+    if (/^\s*:/.test(parts[i + 1] || "")) continue;
+    raw = raw.replace(/^\s*:\s*/, "");
     // Drop a leading category label ("Languages: Java Python" → "Java Python").
     raw = raw.replace(/^[^:]{0,40}:\s*/, "").trim();
     // Strip list punctuation and trailing "(5 yrs)" style annotations.
     raw = raw.replace(/\(.*?\)/g, " ").replace(/^[^A-Za-z0-9+#.]+|[^A-Za-z0-9+#)]+$/g, "").trim();
     raw = raw.replace(/\s+/g, " ");
-    if (!isPlausibleSkill(raw)) continue;
-    if (isSkillsHeading(raw)) continue;   // a sub-heading inside the block, not a skill
-    if (!out.some(s => s.toLowerCase() === raw.toLowerCase())) out.push(raw);
+    add(raw);
+    // "HTML5/CSS3/JavaScript" is three skills written as one entry, but "CI/CD"
+    // and "TCP/IP" are single skills — the difference is segment length, so keep
+    // the whole entry and additionally split only when every segment is a word.
+    if (raw.includes("/")) {
+      const segs = raw.split("/").map(s => s.trim());
+      if (segs.length > 1 && segs.every(s => s.length >= 3)) segs.forEach(add);
+    }
   }
   return out;
 }
@@ -754,13 +849,110 @@ function isSkillsHeading(s) {
   const re = new RegExp(`^(?:${RESUME_SKILLS_HEADING_RE.source})$`, "i");
   if (re.test(bare)) return true;
   // "Tools & Technologies" / "Skills and Tools": every word is heading filler.
-  const filler = /^(?:tools?|technolog(?:y|ies)|skills?|stack|tech|core|key|technical|expertise|competenc(?:y|ies)|proficienc(?:y|ies)|abilities|&|and)$/i;
+  // The category labels résumés use inside a skills block ("Languages",
+  // "Frameworks", "Databases", "Methodologies") are filler too — without them
+  // the label rows were scored as if they were skills.
+  const filler = /^(?:tools?|technolog(?:y|ies)|skills?|stack|tech|core|key|technical|expertise|competenc(?:y|ies)|proficienc(?:y|ies)|abilities|languages?|frameworks?|librar(?:y|ies)|databases?|platforms?|environments?|methodolog(?:y|ies)|practices?|concepts?|paradigms?|web|frontend|front[\s-]?end|backend|back[\s-]?end|other|misc(?:ellaneous)?|&|and)$/i;
   const words = bare.split(/[\s&]+/).filter(Boolean);
   return words.length > 0 && words.every(w => filler.test(w));
 }
 
+// A token still wearing the punctuation it was split beside — "etc.)", "(secure",
+// "scalable," — never matched SKILL_STOPWORDS, which is an exact-set lookup, so
+// the boilerplate word walked straight into the skill list. Peel the edges only:
+// "node.js" and "c++" must survive as themselves.
+function stopwordToken(t) {
+  return String(t).toLowerCase().replace(/^[^a-z0-9]+/, "").replace(/[^a-z0-9]+$/, "");
+}
+
 // Single-letter language names the length floor would otherwise throw away.
 const ONE_CHAR_SKILLS = new Set(["c", "r"]);
+
+// Verbs the enumeration splitter leaves stranded at the head of a fragment
+// ("…FastAPI to design and build scalable" → "build scalable"). Only words that
+// are never nouns belong here — "design", "test", "support" and "architect"
+// lead real skill names ("design patterns", "test automation"), so they stay out.
+const SKILL_LEADING_VERBS = new Set([
+  "build","develop","create","implement","maintain","manage","deliver","drive",
+  "ensure","deploy","optimize","integrate","troubleshoot","translate","partner",
+  "contribute","participate","perform","provide","handle","understand","utilize",
+  "leverage","collaborate","assist","enable","execute","oversee","spearhead",
+]);
+
+// Marketing adjectives + the generic outcome nouns they attach to. Together they
+// name what the work produces ("high-performance backend systems", "scalable
+// solutions"), never a skill a résumé can list. Either half alone is fine —
+// "distributed systems" and "scalable system design" are real skills — so both
+// must be present before the phrase is rejected.
+const SKILL_PUFF_ADJ_RE =
+  /(?:^|\s|-)(?:high[\s-]?performance|performant|scalable|robust|reliable|efficient|resilient|seamless|cutting[\s-]?edge|world[\s-]?class|best[\s-]?in[\s-]?class|enterprise[\s-]?grade|mission[\s-]?critical|state[\s-]?of[\s-]?the[\s-]?art|innovative|large[\s-]?scale|next[\s-]?gen(?:eration)?)(?:$|\s|-)/i;
+const SKILL_OUTCOME_TAIL_RE =
+  /(?:^|\s)(?:systems?|solutions?|applications?|apps?|environments?|products?|processes?|workflows?|capabilities|features?|deliverables?|initiatives?|experiences?)$/i;
+
+// Interpersonal traits. Every JD lists them and no stack can be matched against
+// them, so scoring them was pure noise on both sides — "leadership" sat in
+// Required forever as a miss no résumé could clear. Dropped from JD requirements
+// and résumé skills alike so the two sides stay symmetric.
+const SOFT_SKILL_LEAD_RE =
+  /^(?:excellent|strong|good|great|effective|exceptional|outstanding|proven|solid|superior|demonstrated|clear|professional|written|verbal|oral|highly|very|and|or)\s+/;
+const SOFT_SKILLS = new Set([
+  "communication","communications","collaboration","teamwork","team work","team player",
+  "team collaboration","team building","leadership","mentoring","mentorship","coaching",
+  "problem solving","critical thinking","analytical thinking","analytical","time management",
+  "self management","task management","adaptability","flexibility","creativity","initiative",
+  "work ethic","self starter","self motivated","detail oriented","detail orientation",
+  "attention to detail","multitasking","multi tasking","decision making","conflict resolution",
+  "negotiation","interpersonal","organizational","organisational","organization","presentation",
+  "public speaking","customer service","work independently","fast learner","quick learner",
+  "willingness to learn","passion","motivation","people management","emotional intelligence",
+  "active listening","stakeholder management","relationship building","work under pressure",
+]);
+function isSoftSkill(s) {
+  let n = String(s).toLowerCase().replace(/[^a-z\s-]/g, " ").replace(/[-\s]+/g, " ").trim();
+  n = n.replace(SKILL_NOISE_TAIL_RE, "").trim();
+  while (SOFT_SKILL_LEAD_RE.test(n)) n = n.replace(SOFT_SKILL_LEAD_RE, "");
+  return SOFT_SKILLS.has(n);
+}
+
+// Hiring conditions, not skills. They ride in the same comma list as the stack
+// ("Apex, SOQL, US Citizenship required, ability to travel 25%") and were mined
+// as requirements. Clearance and education have their own scored buckets, so
+// dropping them here loses nothing.
+const NON_SKILL_RE =
+  /\b(?:citizens?(?:hip)?|green\s+card|visas?|sponsorship|work\s+authoriz\w+|relocation|travel|driver'?s?\s+licen[cs]e|background\s+check|drug\s+(?:test|screen\w*)|degrees?|diplomas?|bachelors?|masters?|ph\.?d|doctorate|gpa|salary|compensation|benefits?|equal\s+opportunity|eeo|w2|c2c|corp[\s-]?to[\s-]?corp|1099)\b/i;
+
+// Words that name a CATEGORY of technology rather than a technology. A phrase
+// built only from these ("cloud platforms", "programming languages", "software
+// development") describes the shape of the job, not something a résumé can
+// match — one specific word is enough to keep the phrase ("data warehousing",
+// "service mesh").
+const GENERIC_SKILL_WORDS = new Set([
+  "cloud","platform","platforms","language","languages","system","systems","tool","tools",
+  "technology","technologies","service","services","framework","frameworks","library",
+  "libraries","database","databases","application","applications","app","apps","software",
+  "solution","solutions","methodology","methodologies","process","processes","concept",
+  "concepts","practice","practices","principle","principles","environment","environments",
+  "stack","suite","suites","product","products","programming","scripting","coding",
+  "development","engineering","web","frontend","backend","general","various","modern","related",
+  // Security umbrellas a JD lists in a parenthetical ("secure APIs (OAuth, JWT,
+  // encryption, etc.)"). They name a property of the work, not a tool a résumé
+  // lists, so alone they sit in Missing forever. A phrase naming the actual
+  // mechanism still survives — "AES encryption", "encryption at rest".
+  "encryption","encrypted","cryptography","jwt",
+]);
+
+// Gerunds are always verbal — "designing REST APIs" and "coaching junior
+// developers" are sentence fragments the enumeration splitter tore out, never
+// entries a skills list holds. Single-word gerunds ("testing", "scripting") can
+// be real, so this only fires on multi-word phrases.
+const SKILL_LEADING_GERUNDS = new Set([
+  "building","developing","creating","implementing","maintaining","managing","delivering",
+  "driving","ensuring","deploying","optimizing","integrating","troubleshooting","translating",
+  "partnering","contributing","participating","performing","providing","handling","understanding",
+  "utilizing","leveraging","collaborating","assisting","enabling","executing","overseeing",
+  "designing","working","using","leading","mentoring","coaching","supporting","writing",
+  "defining","learning","helping","owning","growing","scaling","architecting","spearheading",
+]);
 
 // A skills list holds short noun phrases, not sentences. Reject anything that
 // reads like prose so résumé narrative can't leak into the skill set.
@@ -769,8 +961,36 @@ function isPlausibleSkill(s) {
   if (s.length === 1) return ONE_CHAR_SKILLS.has(s.toLowerCase());
   if (s.length > 40) return false;
   if (!/[A-Za-z]/.test(s)) return false;                     // "5+" etc.
-  if (s.split(/\s+/).length > 4) return false;               // sentence fragment
-  if (/\b(?:and|with|the|for|of|in|to|using|experience|years?)\b/i.test(s)) return false;
+  // A name we already know is a skill by definition — the trait and hiring-
+  // condition filters below must never reach "Secret clearance" or "C#".
+  if (knownSkills().has(canonicalSkill(s))) return true;
+  if (isSoftSkill(s)) return false;
+  if (NON_SKILL_RE.test(s)) return false;
+  const words = s.split(/\s+/);
+  // "3+ years", "25%" — a quantity the splitter left behind, not a skill.
+  if (/^\d+[+%]?$/.test(words[0])) return false;
+  if (words.every(w => GENERIC_SKILL_WORDS.has(w.toLowerCase().replace(/[^a-z]/g, "")))) return false;
+  if (words.length > 4) return false;                        // sentence fragment
+  // Words that mark a clause, never a skill name — "FastAPI to design REST APIs"
+  // is prose the miner picked up mid-sentence, not a skill.
+  // Match on whitespace, not \b: \b treats a hyphen as a word break, so "in"
+  // fired inside "In-Memory Caching" and threw a real skill away.
+  if (/(?:^|\s)(?:with|the|using|experience|years?|to|for|in)(?:$|\s)/i.test(s)) return false;
+  // "and" and "of" are different — they sit inside real skill names ("Internet
+  // of Things", "Extract Transform and Load"), and the ≤4-word cap above
+  // already keeps prose sentences out.
+  // Nothing but generic words ("Secure", "Scalable", "Best Practices") is a
+  // scrap the splitter tore off a sentence, never a skill. One real word is
+  // enough to keep the phrase — "design patterns", "performance tuning".
+  if (words.every(w => SKILL_STOPWORDS.has(stopwordToken(w)))) return false;
+  if (words.length > 1) {
+    const lead = words[0].toLowerCase().replace(/[^a-z]/g, "");
+    if (SKILL_LEADING_VERBS.has(lead)) return false;
+    if (SKILL_LEADING_GERUNDS.has(lead)) return false;
+    // A puffed-up outcome, unless the whole phrase is a name we actually know.
+    if (SKILL_PUFF_ADJ_RE.test(s) && SKILL_OUTCOME_TAIL_RE.test(s) &&
+        !knownSkills().has(canonicalSkill(s))) return false;
+  }
   return true;
 }
 
@@ -791,15 +1011,15 @@ function resumeExperienceSection(text) {
   if (matches.length === 0) return "";
   // Same heading test as the other slicers: ALL-CAPS or line-start is a real
   // heading, a mid-sentence "experience" is prose.
-  const pick =
-    matches.find(m => m[0] === m[0].toUpperCase()) ||
-    matches.find(m => m.index === 0 || text[m.index - 1] === "\n");
+  const flat = !hasLineStructure(text);
+  const pick = matches.find(m => isHeadingMatch(text, m.index, m[0], flat));
   if (!pick) return "";
   const rest = text.slice(pick.index + pick[0].length);
+  const restFlat = !hasLineStructure(rest);
   const nextRe = new RegExp(RESUME_EXP_NEXT_RE.source, "gi");
   let end = rest.length, m;
   while ((m = nextRe.exec(rest)) !== null) {
-    if (m.index === 0 || rest[m.index - 1] === "\n" || m[0] === m[0].toUpperCase()) {
+    if (isHeadingMatch(rest, m.index, m[0], restFlat)) {
       end = m.index;
       break;
     }
@@ -858,6 +1078,12 @@ const SKILL_STOPWORDS = new Set([
   "related","equivalent","degree","plus","preferred","required","work","working","other","various",
   "such","as","is","are","be","you","your","our","we","will","must","should","have","proven","a","an",
   "the","and","or","with","in","of","to","using","for","on","at","an","but","not","this","that",
+  // Bare verbs and adjectives a split leaves behind ("build secure" → "secure",
+  // "build scalable"). Only phrases made ENTIRELY of these are dropped, so
+  // "database design" and "performance tuning" are untouched.
+  "build","develop","create","implement","deliver","drive","ensure","deploy","design",
+  "secure","scalable","robust","reliable","efficient","resilient","seamless","performant",
+  "modern","complex","high","performance","best","practices","well","highly","across","within",
 ]);
 
 // `max` is the cap on mined phrases. A JD states its stack once (15 is plenty);
@@ -870,24 +1096,50 @@ function extractListedSkills(section, max = 15) {
   SKILL_CUE_RE.lastIndex = 0;
   while ((m = SKILL_CUE_RE.exec(section)) && out.length < max) {
     const from = m.index + m[0].length;
-    let clause = section.slice(from, from + 140);
+    // The fixed-width window used to land mid-word, so "…verbal communication
+    // skills" was mined as the literal phrase "verbal communicat" — a
+    // requirement nothing can ever match. When the cut falls inside a word, drop
+    // the whole trailing entry: keeping its surviving words is just as wrong
+    // ("detail oriented" cut to "detail").
+    const end = from + 200;
+    let clause = section.slice(from, end);
+    if (end < section.length && /[A-Za-z0-9+#./-]/.test(section[end])) {
+      clause = clause.replace(/[^,|\n]*$/, "");
+    }
     // End the list at the first sentence break — but a period only ends a
     // sentence when whitespace follows it. A bare /[.;]/ cut "Vert.x", "Node.js"
     // and ".NET Core" in half at their internal dot.
     const stop = clause.search(/\.(?=\s|$)|;/);
     if (stop !== -1) clause = clause.slice(0, stop);
-    for (let phrase of clause.split(/[,/|]|\band\b|\n/i)) {
+    const add = (phrase) => {
       phrase = phrase.replace(/^[\s\-*•]+/, "").replace(/\s+/g, " ").trim();
-      if (phrase.length < 2 || phrase.length > 40) continue;
+      // The window can run past the end of one cue's list into the next label
+      // row ("…detail oriented / Technologies: Java"). The label is not part of
+      // the skill — keep what it introduces.
+      phrase = phrase.replace(/^[^:]{1,30}:\s*/, "").trim();
+      // "data warehousing concepts" and "data warehousing" are one requirement;
+      // strip the empty tail off the phrase itself so the chip reads clean, not
+      // only off its match key.
+      phrase = phrase.replace(SKILL_NOISE_TAIL_RE, "").trim();
+      if (phrase.length < 2 || phrase.length > 40) return;
       const toks = phrase.toLowerCase().split(/\s+/);
-      if (toks.length > 3) continue;                          // skills are short phrases
-      if (toks.every(t => SKILL_STOPWORDS.has(t))) continue;  // pure boilerplate
-      if (!/[a-z0-9]/i.test(phrase)) continue;
+      if (toks.length > 3) return;                          // skills are short phrases
+      if (toks.every(t => SKILL_STOPWORDS.has(stopwordToken(t)))) return;  // pure boilerplate
+      if (!/[a-z0-9]/i.test(phrase)) return;
       // A clause fragment is not a skill. "…with FastAPI to design REST APIs"
       // mined "FastAPI to design", which then sat in Required as a permanent
       // miss — nothing can ever match it. Same prose test the résumé reader uses.
-      if (!isPlausibleSkill(phrase)) continue;
+      if (!isPlausibleSkill(phrase)) return;
       if (!out.some(o => o.toLowerCase() === phrase.toLowerCase())) out.push(phrase);
+    };
+    // A bare "/" is NOT a list separator: splitting on it shredded "CI/CD" into
+    // a "CI" chip and a "CD" chip, neither of which any résumé can match. Same
+    // rule the résumé reader uses — "HTML5/CSS3/JavaScript" is three skills,
+    // "CI/CD" and "TCP/IP" are one, and segment length tells them apart.
+    for (const entry of clause.split(/[,|]|\band\b|\n/i)) {
+      const segs = entry.includes("/") ? entry.split("/").map(x => x.trim()) : [];
+      if (segs.length > 1 && segs.every(x => x.length >= 3)) segs.forEach(add);
+      else add(entry);
     }
   }
   return out;
@@ -1079,11 +1331,25 @@ async function parseResumePdf(b64) {
 // (endpoint not deployed) or malformed body falls through to local.
 const SCORE_RETRIES   = 2;
 const SCORE_TIMEOUT_MS = 12000;
+// Add = JazzHR create + DB writes + résumé/profile indexing server-side; slow
+// but finite. Past this the panel reports a timeout instead of spinning forever.
+const ADD_TIMEOUT_MS = 90000;
 
 async function backendScore(jd_id, candidate, resume_text) {
   const body = JSON.stringify({
     jd_id,
-    resume_text: resume_text || undefined, // backend applies résumé-replace rule
+    // resume_text is deliberately NOT sent as its own field. The backend's port
+    // of the résumé rule is the older whitelist-only one
+    // (findKeywords(resume_text)), so when it received the text it re-derived
+    // the skill set from scratch and threw away everything
+    // scoreCandidateForJd had already mined from the résumé's Skills section
+    // and experience entries — a résumé listing "Database Design, Query
+    // Optimization, Scalable System Design" scored as if it listed none of
+    // them, while the local path matched all three. The service worker already
+    // applies the résumé-replace rule (skills below, education too) before
+    // calling here, so there is nothing left for the backend to re-derive;
+    // `candidate` IS the résumé. Re-add the field only once the backend's
+    // parser matches this file's (README §"Scoring" calls them faithful ports).
     candidate: {
       title:            candidate.title || "",   // headline — backend scans it for clearance
       skills:           candidate.skills || [],
@@ -1099,9 +1365,13 @@ async function backendScore(jd_id, candidate, resume_text) {
       certifications:   (candidate.certifications || [])
                           .map(c => `${c.name || ""} ${c.issuer || ""}`.trim())
                           .filter(Boolean),
-      // Full experience descriptions — backend scans them so a JD skill only
-      // mentioned in role bullets (not the Skills section) still matches.
-      experience_text:  (candidate.experience || [])
+      // Prose the backend scans so a JD skill mentioned only in role bullets
+      // (never in the Skills list) still matches. A résumé replaces the profile
+      // here for the same reason it replaces the skills — it is the fuller
+      // document. This mirrors computeScore's textHas source exactly, so the
+      // backend and local paths read the same prose and agree on the result.
+      experience_text:  resume_text ||
+                        (candidate.experience || [])
                           .map(e => e && e.description).filter(Boolean).join("\n"),
     },
   });
@@ -1127,6 +1397,8 @@ async function backendScore(jd_id, candidate, resume_text) {
       return {
         score: d.score, label: d.label || "", rationale: d.rationale || "",
         categories: d.categories || null, gates: d.gates || null,
+        // false = the JD yielded nothing to score against (not a real match).
+        scorable: d.scorable !== false,
         auto_schedule: !!d.auto_schedule,
       };
     } catch (e) {                                    // network / abort(timeout) → transient, retry
@@ -1258,13 +1530,14 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   });
 
   // ── Category fills (each 0-1) ───────────────────────────────────────────────
-  // Prominence-weighted required fill (#7): each required skill counts by how
-  // often the JD mentions it, so core skills dominate the ratio.
-  const prom = requirements.prominence || {};
-  const wOf  = s => Math.max(prom[s] || 1, 1);
-  const reqTotal   = required_skills.reduce((a, s) => a + wOf(s), 0);
-  const reqMatched = matchedReq.reduce((a, s) => a + wOf(s), 0);
-  const reqFill  = reqTotal ? reqMatched / reqTotal : 0;
+  // Required fill is a plain ratio of the skills matched, so the count drawn
+  // beside the bar IS the bar. This used to be prominence-weighted (#7): each
+  // skill counted by how often the JD named it, which made one missed skill the
+  // posting repeated four times cost as much as four one-off misses — the card
+  // then read "21/24" next to a 77% bar, and dropping a bogus requirement moved
+  // no number. requirements.prominence is still carried in the payload (both the
+  // backend and the stored requirements hold the field); nothing scores off it.
+  const reqFill  = required_skills.length ? matchedReq.length / required_skills.length : 0;
   const prefFill = preferred_skills.length ? matchedPref.length / preferred_skills.length : 0;
 
   // Clearance bucket — active ONLY when the JD states a required clearance. Meets
@@ -1424,14 +1697,24 @@ function jobCacheEntry(job) {
   return { title: job.title, requirements };
 }
 
+// In-flight fetches by JD, so a caller arriving while one is running shares it
+// instead of paying a second ~1.5s round trip for the same JD.
+const jobFetches = new Map();
+
 async function getJobRequirements(jd_id) {
+  await jobCacheReady;
   const hit = jobCache.get(jd_id);
   if (hit) return hit;
-  const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
-  if (job.error) throw new Error(job.error);
-  const entry = jobCacheEntry(job);
-  jobCache.set(jd_id, entry);
-  return entry;
+  if (jobFetches.has(jd_id)) return jobFetches.get(jd_id);
+  const p = (async () => {
+    const job = await scoutGetJson(`/api/scout/jobs/${jd_id}`);
+    if (job.error) throw new Error(job.error);
+    const entry = jobCacheEntry(job);
+    rememberJob(jd_id, entry);
+    return entry;
+  })().finally(() => jobFetches.delete(jd_id));
+  jobFetches.set(jd_id, p);
+  return p;
 }
 
 // The backend scorer resolves a JD's location from the description prose alone —
@@ -1496,6 +1779,73 @@ async function repairBackendLocation(result, jd_id, candidate) {
   return { ...result, score, label: fitLabel(score), rationale, categories, gates, auto_schedule };
 }
 
+// Chip hygiene for backend results. The backend runs its own copy of this
+// file's JD parser, so a deployment older than the parser's filters ships
+// requirement chips this worker would never mine — "secure", "etc.)", "build
+// scalable" — and they render in the breakdown as permanent misses no résumé
+// can ever clear.
+//
+// Dropping the chip is only half the job: `fill` is what draws the bar and the
+// points, so a filtered chip list left the card contradicting itself — "21/24"
+// beside a 77% bar still computed over the 26 the backend counted, and removing
+// a junk requirement moved no number at all. Recompute the two skill fills off
+// the surviving chips (prominence-weighted for required, exactly as
+// computeScore does) and renormalize the composite, with the same guard
+// repairBackendLocation uses: if replaying the backend's own fills doesn't
+// reproduce its score, the two sides disagree on the formula and patching the
+// number from here would be a guess.
+function sanitizeCategorySkills(result) {
+  const cats = result && result.categories;
+  if (!Array.isArray(cats) || !cats.length) return result;
+
+  const dropped = [];
+  const clean = (list) => Array.isArray(list)
+    ? list.filter(s => {
+        const ok = isPlausibleSkill(String(s || "").trim());
+        if (!ok) dropped.push(s);
+        return ok;
+      })
+    : list;
+
+  const cleaned = cats.map(c =>
+    (c && (Array.isArray(c.matched) || Array.isArray(c.missing)))
+      ? { ...c, matched: clean(c.matched), missing: clean(c.missing) }
+      : c);
+  if (!dropped.length) return result;
+  console.log("[SCOUT] dropped non-skill chips from backend result:", dropped.join(", "));
+
+  const categories = cleaned.map(c => {
+    if (!c || !Array.isArray(c.matched) || !Array.isArray(c.missing)) return c;
+    if (c.key !== "required" && c.key !== "preferred") return c;
+    const total = c.matched.length + c.missing.length;
+    const fill  = total ? c.matched.length / total : 0;
+    return c.key === "preferred" ? { ...c, fill, active: total > 0 } : { ...c, fill };
+  });
+
+  const before = compositeFromCategories(cats);
+  const after  = compositeFromCategories(categories);
+  if (before === null || after === null) return { ...result, categories };
+  const rebuilt = clampScore(calibrate(before));
+  if (Math.abs(rebuilt - result.score) > 1) {
+    console.warn(`[SCOUT] chip filter: score formula mismatch (backend ${result.score}, local ${rebuilt})`
+      + " — chips filtered, score left as-is");
+    return { ...result, categories };
+  }
+
+  const score = clampScore(calibrate(after));
+  const reqCat = categories.find(c => c && c.key === "required");
+  const gates = result.gates
+    ? { ...result.gates, required_skills: !reqCat || reqCat.fill >= 1 }
+    : result.gates;
+  const auto_schedule = gates
+    ? score >= 80 && !!gates.required_skills && !!gates.certifications
+      && !!gates.clearance && !!gates.locality
+    : !!result.auto_schedule && score >= 80;
+
+  console.log(`[SCOUT] chip filter: ${dropped.length} chip(s) dropped | score ${result.score} → ${score}`);
+  return { ...result, score, label: fitLabel(score), categories, gates, auto_schedule };
+}
+
 // ── Score one candidate against one JD (backend-first, local fallback) ────────
 // Shared by GET_SCORE (single JD) and SCORE_ALL (every JD). Folds experience-
 // description skills + résumé skills, then scores. Returns { score, label,
@@ -1527,11 +1877,16 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     // saw only the tools it already knew, so an off-list tool that appears only
     // in a role's "Environment:" line never reached the scorer.
     const fromExp = resumeExperienceSkills(resume_text);
+    // Dedupe on the CANONICAL name, not the literal text: a résumé that writes
+    // both "FastAPI" and "Fast API framework" (or "REST" and "REST APIs") named
+    // one skill twice, and the raw-text key kept both.
     const seen = new Set();
     const resumeSkills = [...findKeywords(resume_text), ...listed, ...fromExp]
-      .filter(s => { const k = s.toLowerCase(); return seen.has(k) ? false : seen.add(k); });
+      .filter(s => { const k = canonicalSkill(s); return seen.has(k) ? false : seen.add(k); });
     console.log(`[SCOUT] résumé skills: ${resumeSkills.length}`
-      + ` (${listed.length} from Skills section, ${fromExp.length} from Experience)`);
+      + ` (${listed.length} from Skills section, ${fromExp.length} from Experience)`,
+      "\n[SCOUT]   Skills section:", listed.join(", ") || "(none)",
+      "\n[SCOUT]   Experience:", fromExp.join(", ") || "(none)");
     if (resumeSkills.length > 0) scored = { ...candidate, skills: resumeSkills };
     // Résumé also replaces education — but ONLY its Education section text, so
     // degree words in résumé prose can't inflate the level. Guard: no Education
@@ -1540,12 +1895,65 @@ async function scoreCandidateForJd(jd_id, candidate, resume_text) {
     if (resumeEdu) scored = { ...scored, education: [{ degree: resumeEdu, school: "" }] };
   }
 
+  // Same JD + same scored inputs → same answer. Re-picking a JD, reopening the
+  // panel on the same profile, or "best fit" after a single-JD score is served
+  // from here instead of another round trip; an identical request already in
+  // flight is shared rather than sent twice.
+  const key = scoreCacheKey(jd_id, scored, resume_text);
+  const cachedScore = scoreCache.get(key);
+  if (cachedScore && Date.now() - cachedScore.at < SCORE_CACHE_TTL_MS) return cachedScore.result;
+  if (scoreInFlight.has(key)) return scoreInFlight.get(key);
+  const p = scoreUncached(jd_id, scored, resume_text)
+    .then(result => {
+      // Only the backend's answer is cached — a local fallback is a stopgap
+      // that the next attempt should try to replace with the real score.
+      // Nor an "unscorable" answer: that says the JD could not be read, which a
+      // backend fix or an edited JD can change at any moment.
+      if (result.source === "backend" && result.scorable !== false) {
+        scoreCache.set(key, { at: Date.now(), result });
+        if (scoreCache.size > SCORE_CACHE_MAX) scoreCache.delete(scoreCache.keys().next().value);
+      }
+      return result;
+    })
+    .finally(() => scoreInFlight.delete(key));
+  scoreInFlight.set(key, p);
+  return p;
+}
+
+// ── Score result cache ────────────────────────────────────────────────────────
+// Keyed on the JD and the exact candidate payload scored (after the résumé
+// rules above), so any change to the profile or résumé is a different key.
+// Short-lived: the backend re-reads an edited JD, and this must follow it.
+const SCORE_CACHE_TTL_MS = 10 * 60 * 1000;
+const SCORE_CACHE_MAX = 300;
+const scoreCache = new Map();
+const scoreInFlight = new Map();
+
+// FNV-1a over the serialized inputs — a compact key, not a security hash.
+function scoreCacheKey(jd_id, scored, resume_text) {
+  const s = JSON.stringify([scored, resume_text || ""]);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${jd_id}|${s.length}|${(h >>> 0).toString(36)}`;
+}
+
+async function scoreUncached(jd_id, scored, resume_text) {
+  // The JD's requirements are needed after the backend answers (location
+  // repair) or instead of it (local fallback). Start fetching now, alongside
+  // the score, rather than paying the round trip after it — a new job is not
+  // in jobCache yet. Failures surface where the result is actually used.
+  getJobRequirements(jd_id).catch(() => {});
+
   // 1) Backend scoring (consistent across devices).
   const backend = await backendScore(jd_id, scored, resume_text);
   if (backend) {
     // The backend's location detection is weaker than this worker's — fold the
     // bucket back in when we can resolve it locally.
-    const repaired = await repairBackendLocation(backend, jd_id, scored);
+    const repaired = sanitizeCategorySkills(
+      await repairBackendLocation(backend, jd_id, scored));
     // Which buckets are active after the repair — the breakdown card renders only
     // these, so a missing row (e.g. location) means neither side could resolve it.
     console.log("[SCOUT] score source: backend | buckets:",
@@ -1574,10 +1982,15 @@ const JOBS_CACHE_KEY = "scout_jobs_cache";
 
 async function fetchJobs() {
   const data = await scoutGetJson(`/api/scout/jobs`);
+  // Carry over any clearance already parsed this session: every writer of the
+  // jobs cache goes through here, so without this a background revalidate would
+  // silently strip the badges off a dropdown that was already showing them.
+  const clr = jobClearanceMap();
   return (data.jobs || []).map(j => ({
     id:     j.id,
     title:  j.title,
-    client: j.internal_code || [j.city, j.state].filter(Boolean).join(", ") || j.type || ""
+    client: j.internal_code || [j.city, j.state].filter(Boolean).join(", ") || j.type || "",
+    ...(clr[j.id] ? { clearance: clr[j.id] } : {}),
   }));
 }
 
@@ -1586,10 +1999,22 @@ async function getCachedJobs() {
   return c && Array.isArray(c.jobs) ? c : null;
 }
 
+// Same jobs, same titles, same order — the dropdown would not change.
+const jobsSignature = (jobs) => (jobs || []).map(j => `${j.id}|${j.title}|${j.client}`).join("\n");
+
 async function refreshJobsCache() {
   try {
+    const prev = await getCachedJobs().catch(() => null);
     const jobs = await fetchJobs();
     await chrome.storage.local.set({ [JOBS_CACHE_KEY]: { ts: Date.now(), jobs } });
+    // An open popup already rendered the cached list; hand it the fresh one so
+    // a job created a moment ago shows without closing the panel or reloading
+    // the extension. No popup open just means nobody is listening.
+    if (jobsSignature(prev?.jobs) !== jobsSignature(jobs)) {
+      chrome.runtime.sendMessage({ type: "JOBS_UPDATED", data: jobs }).catch(() => {});
+      // Only the JDs not already held — the new job, typically.
+      prefetchJobDescriptions(jobs.filter(j => !jobCache.has(j.id)));
+    }
     return jobs;
   } catch (e) {
     console.error("[SCOUT] refreshJobsCache:", e.message);
@@ -1603,16 +2028,117 @@ chrome.runtime.onStartup?.addListener(() => { refreshJobsCache(); ensureOffscree
 chrome.runtime.onInstalled?.addListener(() => { refreshJobsCache(); });
 
 // ── Pre-fetch all job descriptions in background ──────────────────────────────
-// Called after GET_JDS returns. Populates jobCache so GET_SCORE is instant.
+// Fills jobCache (clearance badges in the picker, location repair, the local
+// fallback scorer). This used to fire one request per job all at once — ~150
+// on every panel open — and the browser's per-host connection limit then held
+// the recruiter's actual score request behind the whole burst, for many
+// seconds. Now it is a single background queue: low fetch priority, two at a
+// time, paused while any score is in flight, skipping JDs fetched in the last
+// JD_FRESH_MS. The parsed cache is persisted so a service-worker restart
+// (every ~30s idle) does not start the sweep over.
+
+const JD_FRESH_MS = 10 * 60 * 1000;
+const PREFETCH_CONCURRENCY = 2;
+const JD_STORE_KEY = "scout_jd_cache";
+const jobFetchedAt = new Map();          // job_id → ms of last successful fetch
+const prefetchQueue = [];
+const prefetchQueued = new Set();
+let prefetchRunning = false;
+
+// Restore the parsed JDs from the last worker lifetime before anything reads them.
+const jobCacheReady = (async () => {
+  try {
+    const { [JD_STORE_KEY]: saved } = await chrome.storage.local.get(JD_STORE_KEY);
+    for (const [id, { at, entry }] of Object.entries(saved || {})) {
+      if (!jobCache.has(id)) { jobCache.set(id, entry); jobFetchedAt.set(id, at); }
+    }
+  } catch (e) { console.warn("[SCOUT] JD cache restore failed:", e.message); }
+})();
+
+let persistTimer = null;
+function persistJobCache() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    const out = {};
+    for (const [id, entry] of jobCache) out[id] = { at: jobFetchedAt.get(id) || 0, entry };
+    chrome.storage.local.set({ [JD_STORE_KEY]: out }).catch(() => {});
+  }, 1000);
+}
+
+function rememberJob(id, entry) {
+  jobCache.set(id, entry);
+  jobFetchedAt.set(id, Date.now());
+  persistJobCache();
+}
 
 async function prefetchJobDescriptions(jobs) {
-  await Promise.allSettled(jobs.map(async (job) => {
-    try {
-      const data = await scoutGetJson(`/api/scout/jobs/${job.id}`);
-      if (!data.error) jobCache.set(job.id, jobCacheEntry(data));
-    } catch (_) { /* silently skip — GET_SCORE will fall back to a live fetch */ }
-  }));
-  console.log(`[SCOUT] Pre-cached ${jobCache.size} job descriptions`);
+  await jobCacheReady;
+  for (const job of jobs) {
+    const fresh = Date.now() - (jobFetchedAt.get(job.id) || 0) < JD_FRESH_MS;
+    if (!fresh && !prefetchQueued.has(job.id)) { prefetchQueued.add(job.id); prefetchQueue.push(job.id); }
+  }
+  if (prefetchRunning) return;           // the running sweep picks the new ids up
+  if (!prefetchQueue.length) { publishJobClearances(); return; }
+  prefetchRunning = true;
+  let done = 0;
+  const worker = async () => {
+    while (prefetchQueue.length) {
+      // A score the recruiter is waiting on always goes first.
+      while (scoreInFlight.size) await new Promise(r => setTimeout(r, 150));
+      const id = prefetchQueue.shift();
+      prefetchQueued.delete(id);
+      try {
+        const data = await scoutGetJson(`/api/scout/jobs/${id}`, { priority: "low" });
+        if (!data.error) rememberJob(id, jobCacheEntry(data));
+      } catch (_) { /* skip — GET_SCORE fetches it live if it is ever needed */ }
+      // Badges appear as the sweep goes rather than only at the very end.
+      if (++done % 25 === 0) publishJobClearances();
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: PREFETCH_CONCURRENCY }, worker));
+  } finally {
+    prefetchRunning = false;
+  }
+  console.log(`[SCOUT] Pre-cached ${jobCache.size} job descriptions (${done} fetched)`);
+  await publishJobClearances();
+}
+
+// ── Clearance labels for the JD picker ────────────────────────────────────────
+// A required clearance is a hard gate — a recruiter should see it while CHOOSING
+// the JD, not after scoring a candidate against it. It lives in the description
+// (the /jobs list payload doesn't carry one), so it only becomes known once
+// prefetchJobDescriptions has parsed each JD. Fold the labels into the cached
+// job list and push them to any open panel so the dropdown can badge the rows.
+function jobClearanceMap() {
+  const out = {};
+  for (const [id, entry] of jobCache) {
+    const clr = entry?.requirements?.required_clearance;
+    if (clr && clr.rank > 0 && clr.label) out[id] = clr.label;
+  }
+  return out;
+}
+
+async function publishJobClearances() {
+  const map = jobClearanceMap();
+  if (!Object.keys(map).length) return;
+
+  // Merge by id rather than rewriting the list: refreshJobsCache may have
+  // replaced it (with no clearance field) while the prefetch was in flight.
+  try {
+    const cached = await getCachedJobs();
+    if (cached && cached.jobs.length) {
+      const jobs = cached.jobs.map(j => (map[j.id] ? { ...j, clearance: map[j.id] } : j));
+      await chrome.storage.local.set({ [JOBS_CACHE_KEY]: { ts: cached.ts, jobs } });
+    }
+  } catch (e) {
+    console.warn("[SCOUT] clearance cache merge failed:", e.message);
+  }
+
+  console.log(`[SCOUT] JD clearances: ${Object.keys(map).length} of ${jobCache.size} jobs`,
+    Object.entries(map).map(([id, l]) => `${id}=${l}`).join(", "));
+  // The panel may be closed — a failed send is expected, not an error.
+  chrome.runtime.sendMessage({ type: "JD_CLEARANCES", data: map }).catch(() => {});
 }
 
 // ── Floating panel window ──────────────────────────────────────────────────────
@@ -1773,7 +2299,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         // fresh = user hit refresh: drop cached JD requirements so the next
         // GET_SCORE re-fetches and re-parses descriptions from the backend.
-        if (message.fresh) jobCache.clear();
+        // Scores computed against the old text go with them.
+        if (message.fresh) {
+          await jobCacheReady;
+          jobCache.clear();
+          jobFetchedAt.clear();
+          scoreCache.clear();
+          chrome.storage.local.remove(JD_STORE_KEY).catch(() => {});
+        }
 
         // Stale-while-revalidate: serve ANY cached list immediately (even past
         // TTL) so the dropdown never waits on the network after the first-ever
@@ -1784,7 +2317,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (cached && cached.jobs.length) {
             sendResponse({ ok: true, data: cached.jobs });
             ensureOffscreen().catch(() => {});
-            prefetchJobDescriptions(cached.jobs);
+            // A quiet re-check (the panel regaining focus) only fills gaps; a
+            // real open re-pulls every JD so edited descriptions are picked up.
+            prefetchJobDescriptions(message.quiet
+              ? cached.jobs.filter(j => !jobCache.has(j.id)) : cached.jobs);
             refreshJobsCache(); // silent background revalidate
             return;
           }
@@ -1876,21 +2412,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         const { job_id, job_title, candidate, resume_b64, resume_name, resume_mime, candidate_source,
-                override_note, override_score } = payload;
+                linkedin_url, override_note, override_score } = payload;
         const jazzhr_token = await getJazzhrToken();
         // Sourcing channel ("LinkedIn" / "Dice.com") — sent top-level as well as on
         // the candidate; the backend normalizes it into scout_candidates.candidate_source
         // for the dashboard chip.
+        // Bounded: with no timeout a stalled backend left the panel on
+        // "Adding…" forever with no outcome.
+        const ctrl  = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), ADD_TIMEOUT_MS);
         const r = await fetch(`${BASE_URL}/api/scout/candidates`, {
           method:  "POST",
           headers: scoutHeaders(),
+          signal:  ctrl.signal,
           body:    JSON.stringify({ job_id, job_title, candidate, resume_b64, resume_name, resume_mime, jazzhr_token,
                                     candidate_source: candidate_source || candidate?.source || "",
+                                    // LinkedIn-sourced only (canonical /in/<slug>/); absent for Dice.
+                                    linkedin_url: linkedin_url || candidate?.linkedin_url || undefined,
                                     // Set only when the recruiter added below the fit-score
                                     // floor; the backend files it on the candidate timeline.
                                     override_note, override_score }),
         });
-        const text = await r.text();
+        const text = await r.text().finally(() => clearTimeout(timer));
         let data;
         try { data = JSON.parse(text); }
         catch (_) { sendResponse({ ok: false, error: `Non-JSON (${r.status}): ${text.slice(0, 120)}` }); return; }
@@ -1911,7 +2454,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
       } catch (e) {
         console.error("[SCOUT] ADD_CANDIDATE error:", e.message);
-        sendResponse({ ok: false, error: `Fetch failed: ${e.message}` });
+        sendResponse({ ok: false, error: e.name === "AbortError"
+          ? `SCOUT didn't respond in ${ADD_TIMEOUT_MS / 1000}s — check the dashboard before retrying (it may still have been added).`
+          : `Fetch failed: ${e.message}` });
       }
     })();
     return true;

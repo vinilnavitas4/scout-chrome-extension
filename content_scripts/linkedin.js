@@ -279,27 +279,64 @@ function scrollToProfileTop() {
   if (mainEl) mainEl.scrollTop = 0;
 }
 
-// Scroll the page in steps, PAUSING at each one, until extractFn() returns rows.
-// The cards below Activity are skeletons until their own data request resolves,
-// and they only render while in the viewport — so a retry that never moves the
-// page (findX()?.scrollIntoView() when findX() is null) can never recover them.
-async function sweepForSection(label, extractFn, maxMs = 20000) {
+// Lower-page cards (Experience/Education/Certifications/Skills) render from lazy
+// data requests. Once ANY of them is in the DOM, that data has landed — so a
+// card still missing after a further full pass is genuinely absent from the
+// profile, not "not rendered yet".
+function anyLazyCardRendered() {
+  return !!(findExperienceSection() || findEducationSection() ||
+    findCertificationsSection() || findSkillsSection());
+}
+
+// One combined sweep for every section still empty after the scroll pass —
+// replaces a separate from-the-top sweep per section (each burned its full
+// timeout when the profile simply has no such section, e.g. no certifications).
+// `pending` maps label → extractFn (returns an array). Returns label → rows.
+// Stops when all are filled, or when lazy cards have rendered and one more full
+// pass has completed without the rest appearing (= absent), or at maxMs.
+async function sweepForMissing(pending, maxMs = 20000) {
   const mainEl = document.querySelector('main#workspace') || document.querySelector('main') || document.documentElement;
   const start = Date.now();
-  let rows = extractFn();
+  const result = {};
+  const todo = new Set(Object.keys(pending));
+  const poll = () => {
+    for (const label of [...todo]) {
+      const rows = pending[label]();
+      if (rows.length) { result[label] = rows; todo.delete(label); }
+    }
+  };
+  poll();
   let y = 0;
-  while (!rows.length && Date.now() - start < maxMs) {
+  let loadedAt = anyLazyCardRendered() ? Date.now() : 0;
+  let passDoneAfterLoad = false;
+  // A pending card whose container IS in the DOM but still has no rows is
+  // mid-render, not absent — keep sweeping for it (up to maxMs).
+  const finders = {
+    experience: findExperienceSection, education: findEducationSection,
+    certifications: findCertificationsSection, skills: findSkillsSection,
+  };
+  const pendingCardPresent = () => [...todo].some(l => finders[l]?.());
+  while (todo.size && !(passDoneAfterLoad && !pendingCardPresent()) && Date.now() - start < maxMs) {
     window.scrollTo(0, y);
     mainEl.scrollTop = y;
-    for (let i = 0; i < 5 && !rows.length; i++) {
+    // Before lazy data lands, park at each position so the card can render in
+    // view. After it lands, one quick look per position is enough.
+    const holds = loadedAt ? 1 : 5;
+    for (let i = 0; i < holds && todo.size; i++) {
       await new Promise(r => setTimeout(r, 400));
-      rows = extractFn();
+      poll();
+      if (!loadedAt && anyLazyCardRendered()) { loadedAt = Date.now(); y = -800; break; }
     }
     y += 800;
-    if (y > Math.max(mainEl.scrollHeight, document.body.scrollHeight)) y = 0;
+    if (y > Math.max(mainEl.scrollHeight, document.body.scrollHeight)) {
+      if (loadedAt) passDoneAfterLoad = true;
+      y = 0;
+    }
   }
-  console.log(`[SCOUT] sweepForSection(${label}): ${rows.length} items after ${Date.now() - start}ms`);
-  return rows;
+  for (const label of Object.keys(pending)) if (!result[label]) result[label] = [];
+  console.log(`[SCOUT] sweepForMissing: ${Object.keys(pending).map(l => `${l}=${result[l].length}`).join(' ')}` +
+    ` after ${Date.now() - start}ms${todo.size ? ` (absent: ${[...todo].join(', ')})` : ''}`);
+  return result;
 }
 
 // Degree wording as it appears in an Education row. Kept in sync with the
@@ -347,13 +384,17 @@ function extractEducation() {
 // Licenses & certifications (doc §3.1) — name, issuing body, issue/expiry dates.
 // Feeds the §4 "Required Certifications" auto-scheduling gate. LinkedIn renders
 // the section heading as "Licenses & certifications" (older: "Certifications").
-function extractCertifications() {
-  const certs = [];
-  const section = findSectionByHeading('Licenses & certifications')
+function findCertificationsSection() {
+  return findSectionByHeading('Licenses & certifications')
     || findSectionByHeading('Licenses and certifications')
     || findSectionByHeading('Certifications')
     || document.querySelector('#licenses_and_certifications')?.closest('section')
     || document.querySelector('section[componentkey*="Certification" i], section[componentkey*="Licenses" i]');
+}
+
+function extractCertifications() {
+  const certs = [];
+  const section = findCertificationsSection();
   if (!section) return certs;
   getSectionItems(section).forEach(item => {
     const editLink = item.querySelector('a[href*="edit/forms/"]');
@@ -624,26 +665,6 @@ function extractExperience() {
   return experience;
 }
 
-// Wait for the Experience section's items to lazy-render, then extract. On
-// slower machines/networks the section streams in AFTER the scroll pass, so a
-// single read races the render and returns []. Polls up to ~maxMs, scrolling
-// the section into view to trigger its lazy load, and returns as soon as items
-// appear. Same-account/same-browser profiles only differ by this timing — this
-// is why experience was missing on some machines but not others.
-// maxMs is 10s, not 6s: on a live profile the Experience card was still absent
-// ~2s after a full scroll pass and only streamed in afterwards.
-async function extractExperienceWithWait(maxMs = 20000) {
-  const experience = extractExperience();
-  if (experience.length > 0) return experience;
-
-  // Nothing found: the section is virtualized OUT at the bottom of the scroll
-  // pass — no heading, no componentkey, no anchor anywhere in the DOM. Polling
-  // in place cannot recover it (there is no element to scroll back into view),
-  // so sweep the page from the top like education/certifications do: the card
-  // re-renders only once its position is on screen again.
-  return await sweepForSection('experience', extractExperience, maxMs);
-}
-
 // Topcard fields (name / headline / location). Separate from extractProfile so
 // scrollAndExtract can capture them BEFORE scrolling — LinkedIn unloads the
 // topcard when it leaves the viewport, so a read at the bottom of the scroll
@@ -878,7 +899,7 @@ async function expandAndExtractAllSkills(profile) {
     return null;
   })();
   if (!skillSection) {
-    console.warn('[SCOUT] Skills section never rendered — skipping "Show all skills"');
+    console.log('[SCOUT] Skills section never rendered — skipping "Show all skills"');
     return;
   }
 
@@ -940,22 +961,26 @@ async function expandAndExtractAllSkills(profile) {
     let stable = 0;
     let lastCount = profile.skills.length;
 
+    let grew = false;
     const timer = setInterval(() => {
       polls++;
       harvest();
 
       if (profile.skills.length > lastCount) {
         stable = 0;
+        grew = true;
         lastCount = profile.skills.length;
-      } else {
+      } else if (grew || polls * 300 >= 2000) {
+        // Don't count "stable" while the modal is still opening (nothing new
+        // yet) — only once skills have streamed in or ~2s have passed.
         stable++;
       }
 
-      if (stable >= 4 || polls >= 30) {
+      if (stable >= 3 || polls >= 50) {
         clearInterval(timer);
         resolve();
       }
-    }, 500);
+    }, 300);
   });
 
   await closeOverlay();
@@ -1074,15 +1099,15 @@ async function extractContactInfo() {
       const timer = setInterval(() => {
         polls++;
         contactLink = document.querySelector('a[href*="overlay/contact-info"]');
-        if (contactLink || polls >= 40) { clearInterval(timer); resolve(); }
+        if (contactLink || polls >= 20) { clearInterval(timer); resolve(); }
       }, 150);
     });
     console.log('[SCOUT] contact link poll result:', contactLink ? 'found' : 'not found');
   }
 
   if (!contactLink) {
-    console.log('[SCOUT] No contact-info link found after 6s poll');
-    return { email: '', phone: '', sawOverlay: false };
+    console.log('[SCOUT] No contact-info link found after 3s poll');
+    return { email: '', phone: '', sawOverlay: false, linkFound: false };
   }
 
   // Carry whatever the fetch path resolves so a partial result (email but no
@@ -1113,7 +1138,7 @@ async function extractContactInfo() {
       // overlay often carries email but loads the phone lazily (only the live
       // modal renders it), so a missing phone must fall through to the modal.
       if (fetchedEmail && fetchedPhone) {
-        return { email: fetchedEmail, phone: fetchedPhone, sawOverlay: true };
+        return { email: fetchedEmail, phone: fetchedPhone, sawOverlay: true, linkFound: true };
       }
       console.log('[SCOUT] fetch missing phone — opening modal to complete');
     } else {
@@ -1131,7 +1156,7 @@ async function extractContactInfo() {
   console.log('[SCOUT] Clicking contact-info overlay');
   contactLink.click();
 
-  // Phase 1: wait up to 10s for the CONTACT modal container. Generic dialog
+  // Phase 1: wait up to 5s for the CONTACT modal container. Generic dialog
   // selectors alone match pre-existing overlays (messaging, search) and fire
   // instantly, so generic dialogs only count if their text looks like contact info.
   const looksLikeContactDialog = (el) => /contact|email|phone/i.test(el.textContent || '');
@@ -1144,7 +1169,7 @@ async function extractContactInfo() {
     let polls = 0;
     const timer = setInterval(() => {
       polls++;
-      if (findContactContainer() || polls > 40) { clearInterval(timer); resolve(); }
+      if (findContactContainer() || polls > 20) { clearInterval(timer); resolve(); }
     }, 250);
   });
 
@@ -1252,10 +1277,20 @@ async function extractContactInfo() {
   // sawOverlay=false means we never located a contact container (modal didn't
   // open or hadn't rendered) — caller may retry. true with blank fields means
   // the profile genuinely lists no email/phone, so retrying is pointless.
-  return { email, phone, sawOverlay: ctx !== document.body };
+  return { email, phone, sawOverlay: ctx !== document.body, linkFound: true };
 }
 
+// Whether the last scroll pass ever saw an About card. False → the profile has
+// no About, so the full-page fetchAbout() refetch is skipped.
+let scanAboutSeen = false;
+// Whether the scroll pass ever saw the Skills SECTION. profile.skills can be
+// non-empty without it (experience skill links, headline), so the list alone
+// can't tell whether the section still needs to be swept for.
+let scanSkillsSeen = false;
+
 function scrollAndExtract() {
+  scanAboutSeen = false;
+  scanSkillsSeen = false;
   return new Promise((resolve) => {
     const scrollStep = 800;
     const scrollDelay = 400;
@@ -1270,6 +1305,7 @@ function scrollAndExtract() {
     const capturedSkills = [];
     const capturedSeen = new Set();
     function captureSkills() {
+      if (findSkillsSection()) scanSkillsSeen = true;
       harvestSkillSection(raw => {
         const { name } = cleanSkillRow(raw);
         const low = name.toLowerCase();
@@ -1301,33 +1337,9 @@ function scrollAndExtract() {
       if (certs.length > capturedCerts.length) capturedCerts = certs;
     }
 
-    // The scroll pass covers a ~4000px profile in ~2s, but LinkedIn renders the
-    // Skills/Education/Certifications cards from a separate lazy request that can
-    // land several seconds later — the pass then finishes before those sections
-    // exist and captures nothing. When the pass ends with no skills, sweep the
-    // page again (slower) until they show up or maxMs elapses.
-    // The cards below Activity are placeholder skeletons until their data request
-    // resolves, which on this profile layout can take tens of seconds. Racing past
-    // them at 400ms/step captures nothing. Park at successive viewport positions
-    // (the card must stay in view to render) and poll until skills appear.
-    async function retrySweepForSkills(maxMs = 20000) {
-      const start = Date.now();
-      let y = 0;
-      while (Date.now() - start < maxMs && !capturedSkills.length) {
-        window.scrollTo(0, y);
-        mainEl.scrollTop = y;
-        // Hold this position and poll — the card renders in place once its data lands.
-        for (let i = 0; i < 5 && !capturedSkills.length; i++) {
-          await new Promise(r => setTimeout(r, 400));
-          captureSkills();
-          captureSections();
-          if (!capturedAbout) capturedAbout = extractAbout();
-        }
-        y += scrollStep;
-        if (y > Math.max(mainEl.scrollHeight, document.body.scrollHeight)) y = 0;
-      }
-      console.log(`[SCOUT] retrySweepForSkills: ${capturedSkills.length} skills after ${Date.now() - start}ms`);
-    }
+    // Skills/Education/Certifications cards render from a separate lazy request
+    // that can land after this pass ends. Anything still empty is recovered by
+    // one combined sweepForMissing() in runExtraction, not a per-section sweep.
 
     function step() {
       pos += scrollStep;
@@ -1341,12 +1353,12 @@ function scrollAndExtract() {
           capturedAbout = extractAbout();
           if (capturedAbout) console.log('[SCOUT] About captured at scroll pos', pos);
         }
+        if (!scanAboutSeen && findSectionByHeading('About')) scanAboutSeen = true;
         captureSkills();
         captureSections();
         if (pos < maxScroll) {
           step();
         } else {
-          if (!capturedSkills.length) await retrySweepForSkills();
           const profile = extractProfile();
           if (capturedAbout) profile.about = capturedAbout;
           // Merge skills captured mid-scroll (section may be virtualized out now).
@@ -1389,6 +1401,7 @@ function scrollAndExtract() {
             mainEl.scrollTop = 400;
             setTimeout(() => {
               const aboutText = extractAbout();
+              if (findSectionByHeading('About')) scanAboutSeen = true;
               console.log('[SCOUT] About after targeted 400px scroll:', aboutText ? aboutText.substring(0, 60) : '(empty)');
               if (aboutText) profile.about = aboutText;
               window.scrollTo(0, 0);
@@ -1453,35 +1466,67 @@ function runExtraction(force = false) {
   extractedSlug = slug;
   extractionSettled = false;
   extractionPromise = (async () => {
+    const t0 = Date.now();
+    const lap = (label) => console.log(`[SCOUT] timing: ${label} done at +${Date.now() - t0}ms`);
     const profile = await scrollAndExtract();
+    lap('scroll pass');
 
     // Contact info FIRST — while still on the main profile. The skills
     // "Show all" click can navigate to /details/skills and lose the
     // contact-info link, leaving email/phone blank.
     let contact = await extractContactInfo();
-    if (!contact.email && !contact.phone && !contact.sawOverlay) {
-      // Never found the link/modal — topcard likely mid-re-render (lazy reload
+    if (!contact.email && !contact.phone && !contact.sawOverlay && !contact.linkFound) {
+      // Never found the contact link — topcard likely mid-re-render (lazy reload
       // after scroll, or the side panel opening reflowed the page). One retry
-      // after the layout settles. Skipped when the overlay WAS found but empty:
+      // after the layout settles. Skipped when the link/overlay WAS found:
       // that's a profile with no public contact info, not a timing miss.
-      console.log('[SCOUT] contact info overlay never found — retrying once');
+      console.log('[SCOUT] contact info link never found — retrying once');
       await new Promise(r => setTimeout(r, 1500));
       contact = await extractContactInfo();
     }
     profile.email = contact.email;
     profile.phone = contact.phone;
+    lap('contact info');
 
-    // Experience can lose the lazy-render race on slower machines (same account/
-    // same browser, only timing differs). If empty, scroll the section into view
-    // and poll until it streams in, then recompute experience_years.
-    if (!profile.experience || profile.experience.length === 0) {
-      console.log('[SCOUT] experience empty after scroll — waiting for lazy render');
-      const exp = await extractExperienceWithWait();
-      if (exp.length > 0) {
-        profile.experience = exp;
-        profile.experience_years = calcExperienceYears(exp);
+    // Experience / Education / Certifications / Skills can lose the lazy-render
+    // race on slower machines (same account/browser, only timing differs). One
+    // combined sweep recovers whatever is still empty, and stops early once the
+    // lazy cards have rendered — a card still missing then is absent from the
+    // profile (e.g. no certifications), not worth waiting out a timeout for.
+    const pending = {};
+    if (!profile.experience?.length) pending.experience = extractExperience;
+    if (!profile.education?.length) pending.education = extractEducation;
+    if (!profile.certifications?.length) pending.certifications = extractCertifications;
+    if (!scanSkillsSeen) pending.skills = () => {
+      const out = [];
+      const seen = new Set();
+      harvestSkillSection(raw => {
+        const { name } = cleanSkillRow(raw);
+        if (name && !seen.has(name.toLowerCase())) { seen.add(name.toLowerCase()); out.push(name); }
+      });
+      return out;
+    };
+    let skillsAbsent = false;
+    if (Object.keys(pending).length) {
+      console.log(`[SCOUT] empty after scroll — sweeping for: ${Object.keys(pending).join(', ')}`);
+      const found = await sweepForMissing(pending);
+      if (found.experience?.length) {
+        profile.experience = found.experience;
+        profile.experience_years = calcExperienceYears(found.experience);
+      }
+      if (found.education?.length) profile.education = found.education;
+      if (found.certifications?.length) profile.certifications = found.certifications;
+      if (pending.skills) {
+        if (found.skills.length) {
+          profile.skills = Array.isArray(profile.skills) ? profile.skills : [];
+          const have = new Set(profile.skills.map(s => String(s).toLowerCase()));
+          for (const s of found.skills) if (!have.has(s.toLowerCase())) profile.skills.push(s);
+        } else if (!findSkillsSection()) {
+          skillsAbsent = true;   // no Skills section on this profile
+        }
       }
       scrollToProfileTop();   // the sweep leaves the page mid-scroll
+      lap('section sweep');
     }
 
     // A blank "yrs exp" chip in the panel means experience_years came back null.
@@ -1492,27 +1537,14 @@ function runExtraction(force = false) {
       (profile.experience || []).map(e =>
         `${e.title} | dates="${e.dates}" | type="${e.employmentType || '-'}"`));
 
-    // Education loses the same lazy-render race on slower machines. If still
-    // empty, scroll its section into view and poll until items stream in.
-    if (!profile.education || profile.education.length === 0) {
-      console.log('[SCOUT] education empty after scroll — waiting for lazy render');
-      const edu = await sweepForSection('education', extractEducation);
-      if (edu.length > 0) profile.education = edu;
-      scrollToProfileTop();
-    }
-
-    // Certifications feed the §4 required-cert gate and lose the same race.
-    if (!profile.certifications || profile.certifications.length === 0) {
-      const certs = await sweepForSection('certifications', extractCertifications, 8000);
-      if (certs.length > 0) profile.certifications = certs;
-      scrollToProfileTop();
-    }
-
-    if (!profile.about) {
+    // Full-page refetch only when an About card exists but its text wasn't read.
+    if (!profile.about && scanAboutSeen) {
       profile.about = await fetchAbout();
+      lap('fetch about');
     }
 
-    await expandAndExtractAllSkills(profile);
+    if (!skillsAbsent) await expandAndExtractAllSkills(profile);
+    lap('all skills');
 
     // Expand every collapsed "…see more" description, then re-read Experience:
     // a collapsed role only exposes its first ~2 lines, so mining ran over
@@ -1600,7 +1632,14 @@ function runExtraction(force = false) {
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getProfile') {
-    runExtraction(!!request.force).then(profile => sendResponse({ profile }));
+    // Always answer — an unanswered message looks to the panel like "script not
+    // loaded", and re-injecting it throws "Identifier ... already declared".
+    runExtraction(!!request.force)
+      .then(profile => sendResponse({ profile }))
+      .catch(err => {
+        console.error('[SCOUT] extraction failed:', err);
+        sendResponse({ error: String(err?.message || err) });
+      });
   }
   return true;
 });
