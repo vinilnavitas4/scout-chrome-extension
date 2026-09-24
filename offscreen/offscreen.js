@@ -11,9 +11,9 @@ import { pipeline, env } from "../lib/transformers.min.js";
 
 // Pull model files from the HF hub (cached in browser Cache Storage after first run).
 env.allowLocalModels = false;
-// ONNX runtime WASM binaries — fetched as data from jsdelivr (matches lib version).
-env.backends.onnx.wasm.wasmPaths =
-  "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2/dist/";
+// ONNX runtime WASM binary — bundled in lib/ (transformers 3.0.2 build) so no
+// executable code is loaded remotely (store policy + blocked-CDN networks).
+env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL("lib/");
 // Single-threaded: avoids spawning blob: web workers, which the extension CSP blocks.
 env.backends.onnx.wasm.numThreads = 1;
 
