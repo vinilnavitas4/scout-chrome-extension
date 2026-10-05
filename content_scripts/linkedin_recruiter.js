@@ -114,6 +114,16 @@ function collapseRecruiterSkills(root) {
   if (btn) { try { btn.click(); } catch (_) { /* detached node */ } }
 }
 
+// Return the profile to its top. Expanding/collapsing sections moves the
+// viewport, and the profile scrolls inside its own container (the drawer, or a
+// page wrapper) rather than the window — so reset every scrollable ancestor.
+function scrollRecruiterToTop(root) {
+  for (let el = root; el; el = el.parentElement) {
+    if (el.scrollTop) el.scrollTop = 0;
+  }
+  window.scrollTo(0, 0);
+}
+
 // "Contract" / "Full-time" as Recruiter prints it next to the company name,
 // normalized to the canonical labels isFullTimeRole() tests against.
 function rlEmploymentType(raw) {
@@ -319,7 +329,14 @@ function runRecruiterExtraction(force = false) {
     // Expanding can re-render the cards; read from the live container.
     const live = recruiterRoot() || root;
     const profile = extractRecruiterProfile(live);
-    if (skillsExpanded) collapseRecruiterSkills(live);
+    if (skillsExpanded) {
+      collapseRecruiterSkills(live);
+      // Let the list fold before resetting scroll, or the re-render shifts it again.
+      await new Promise(r => setTimeout(r, 300));
+    }
+    // Leave the recruiter at the top of the profile — unless they have already
+    // paged to another candidate, whose drawer must not be yanked around.
+    if (recruiterProfileId(window.location.href) === id) scrollRecruiterToTop(recruiterRoot() || live);
 
     mineSkillsAndClearance(profile);
     rlLastSignature = recruiterSignature(live);

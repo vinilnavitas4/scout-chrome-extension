@@ -126,17 +126,6 @@
         }
         .fab:hover + .tip,
         .fab:focus-visible + .tip { opacity: 1; transform: none; }
-        /* Recruiter Lite: the profile drawer keeps its close (X) and pagination
-           controls in the top-right corner, so dock bottom-right there, with
-           the tooltip above the button. */
-        :host([data-dock="bottom"]) .wrap {
-          top: auto;
-          bottom: 24px;
-          flex-direction: column-reverse;
-        }
-        :host([data-dock="bottom"]) .tip { transform: translateY(4px); }
-        :host([data-dock="bottom"]) .fab:hover + .tip,
-        :host([data-dock="bottom"]) .fab:focus-visible + .tip { transform: none; }
         @media (prefers-reduced-motion: reduce) {
           .fab, .tip { transition: none; }
         }
@@ -163,7 +152,6 @@
     if (onProfilePage()) {
       if (!host) { mount(); host = document.getElementById(HOST_ID); }
       else host.style.display = "";
-      if (host) host.dataset.dock = onRecruiterProfile() ? "bottom" : "top";
     } else if (host) {
       host.style.display = "none";
     }
