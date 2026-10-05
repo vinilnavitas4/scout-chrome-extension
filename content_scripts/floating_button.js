@@ -1,5 +1,5 @@
-// SCOUT floating action button — injected on LinkedIn /in/* and Dice profile
-// pages only (scoping comes from the content_scripts matches in manifest.json).
+// SCOUT floating action button — injected on LinkedIn /in/*, LinkedIn Recruiter
+// Lite /talent/.../profile/* and Dice profile pages only (scoping comes from the content_scripts matches in manifest.json).
 // Clicking it opens the side panel. The click is a user gesture, so
 // sidePanel.open() inside the SW's OPEN_PANEL handler succeeds immediately.
 
@@ -13,9 +13,16 @@
   // path still matches the content_scripts pattern for this host.
   function onProfilePage() {
     const { hostname, pathname } = window.location;
-    if (hostname.endsWith("linkedin.com")) return pathname.startsWith("/in/");
+    if (hostname.endsWith("linkedin.com")) return pathname.startsWith("/in/") || onRecruiterProfile();
     if (hostname.endsWith("dice.com")) return pathname.startsWith("/employers/talent-search/profile/");
     return false;
+  }
+
+  // Recruiter Lite candidate profile — full page (/talent/profile/<id>) or the
+  // slide-in drawer over a pipeline/search (/talent/hire/.../profile/<id>).
+  function onRecruiterProfile() {
+    const { hostname, pathname } = window.location;
+    return hostname.endsWith("linkedin.com") && /^\/talent\/(?:.*\/)?profile\/[^/]+/.test(pathname);
   }
 
   // Reloading/updating the extension orphans every content script already on the
@@ -119,6 +126,17 @@
         }
         .fab:hover + .tip,
         .fab:focus-visible + .tip { opacity: 1; transform: none; }
+        /* Recruiter Lite: the profile drawer keeps its close (X) and pagination
+           controls in the top-right corner, so dock bottom-right there, with
+           the tooltip above the button. */
+        :host([data-dock="bottom"]) .wrap {
+          top: auto;
+          bottom: 24px;
+          flex-direction: column-reverse;
+        }
+        :host([data-dock="bottom"]) .tip { transform: translateY(4px); }
+        :host([data-dock="bottom"]) .fab:hover + .tip,
+        :host([data-dock="bottom"]) .fab:focus-visible + .tip { transform: none; }
         @media (prefers-reduced-motion: reduce) {
           .fab, .tip { transition: none; }
         }
@@ -141,10 +159,11 @@
   }
 
   function sync() {
-    const host = document.getElementById(HOST_ID);
+    let host = document.getElementById(HOST_ID);
     if (onProfilePage()) {
-      if (!host) mount();
+      if (!host) { mount(); host = document.getElementById(HOST_ID); }
       else host.style.display = "";
+      if (host) host.dataset.dock = onRecruiterProfile() ? "bottom" : "top";
     } else if (host) {
       host.style.display = "none";
     }
