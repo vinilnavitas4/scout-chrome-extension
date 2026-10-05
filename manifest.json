@@ -31,7 +31,7 @@
     },
     {
       "matches": ["https://www.linkedin.com/*"],
-      "js": ["content_scripts/linkedin.js"],
+      "js": ["content_scripts/linkedin.js", "content_scripts/linkedin_recruiter.js"],
       "run_at": "document_idle"
     },
     {

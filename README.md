@@ -6,6 +6,7 @@ A Manifest V3 Chrome extension that overlays AI fit scores on candidate profiles
 
 Supported profile sources:
 - **LinkedIn** — `https://www.linkedin.com/in/*`
+- **LinkedIn Recruiter Lite** — `https://www.linkedin.com/talent/.../profile/*` (full-page profile and the slide-in drawer)
 - **Dice Talent Search** — `https://www.dice.com/employers/talent-search/profile/*`
 
 ---
@@ -34,6 +35,7 @@ Chrome Extension (this repo)
 ├── content_scripts/
 │   ├── floating_button.js     ← the on-page SCOUT button (both sites); opens the side panel
 │   ├── linkedin.js            ← scrapes LinkedIn profile DOM (scroll + overlay fetch)
+│   ├── linkedin_recruiter.js  ← scrapes Recruiter Lite profiles; shares linkedin.js helpers
 │   └── dice.js                ← scrapes Dice profile DOM + flight JSON; fetches & parses
 │                                 the résumé PDF with pdf.js (email, skills, JazzHR bytes)
 │
@@ -72,6 +74,9 @@ Host permissions: LinkedIn, Dice, `api.jazz.co` (JazzHR cookie), the SCOUT Azure
 
 ### LinkedIn (`content_scripts/linkedin.js`)
 Scrolls the profile to force lazy sections to render, then parses the topcard, Experience, Skills (including the "Show all skills" modal), Education, About, and the contact-info overlay (email/phone) — with retries for the timing differences seen across machines.
+
+### LinkedIn Recruiter Lite (`content_scripts/linkedin_recruiter.js`)
+Recruiter is a separate app from `/in/` profiles, read through its `data-test-*` hooks inside `[data-test-profile-container]` (the same container on the full page and in the drawer). The script waits for the drawer to finish rendering, expands the collapsed Experience and Skills lists in place, then reads the topcard, Summary, Experience (with each role's skill tags), Education, Skills, any shared email/phone, and the public `/in/<slug>` link, which is what gets sent as `linkedin_url`. It runs in the same content-script world as `linkedin.js` and reuses its helpers (years calculation, skill mining, clearance detection); `runExtraction()` hands off to it when the URL is a Recruiter profile. Candidates are tagged `LinkedIn`, same as regular profiles. Certifications and multi-role company cards are read best-effort.
 
 ### Dice (`content_scripts/dice.js`)
 Recruiter-view Talent Search profile. Data is merged from three sources:

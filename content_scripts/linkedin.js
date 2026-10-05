@@ -1456,7 +1456,56 @@ function requestPanelOpen() {
   });
 }
 
+// Final pass shared by the /in/ and Recruiter pipelines: mine skills out of the
+// role write-ups + About, then recompute clearance over the complete profile.
+// `sectionText` is optional raw text of the Experience section (see caller).
+function mineSkillsAndClearance(profile, sectionText = '') {
+  // Mine skills from every experience description + About — the Skills section
+  // is often thin, but the real stack is written up in the role bullets. Merge
+  // the keyword hits into the DOM skills, de-duped case-insensitively.
+  const expText = (profile.experience || [])
+    .map(e => e && [e.title, e.company, e.description].filter(Boolean).join(" "))
+    .filter(Boolean).join("\n");
+
+  const minedFrom = [expText, sectionText, profile.about].filter(Boolean).join("\n");
+  const textSkills = skillsFromText(minedFrom);
+  profile.skills = Array.isArray(profile.skills) ? profile.skills : [];
+  if (textSkills.length) {
+    const seen = new Set(profile.skills.map(s => String(s).toLowerCase()));
+    for (const s of textSkills) if (!seen.has(s.toLowerCase())) { profile.skills.push(s); seen.add(s.toLowerCase()); }
+    console.log(`[SCOUT] +${textSkills.length} skills mined from experience/about ` +
+      `(${expText.length} chars parsed roles, ${sectionText.length} chars raw section)`);
+  }
+
+  // Off-list skills named in explicit lists inside the role write-ups.
+  const listed = listedSkillsFromText(minedFrom);
+  if (listed.length) {
+    const seen2 = new Set(profile.skills.map(s => String(s).toLowerCase()));
+    let added = 0;
+    for (const s of listed) if (!seen2.has(s.toLowerCase())) { profile.skills.push(s); seen2.add(s.toLowerCase()); added++; }
+    console.log(`[SCOUT] +${added} off-list skills mined from description lists`);
+  }
+
+  // Recompute clearance now that About + the full skills list are populated.
+  // The first extractProfile() runs inside scrollAndExtract, before fetchAbout()
+  // and expandAndExtractAllSkills() finish — on slower devices that first pass
+  // sees empty About / partial skills and misses a résumé-stated clearance,
+  // which then also zeroes the clearance score. Re-scan the complete profile.
+  const clr = detectClearance([
+    profile.about,
+    profile.skills.join(" "),
+    profile.title,
+    (profile.experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
+    (profile.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
+  ].filter(Boolean).join("\n"));
+  if (clr) profile.clearance = clr;
+}
+
 function runExtraction(force = false) {
+  // Recruiter Lite (/talent/.../profile/<id>) is a different app with its own
+  // DOM — handled by linkedin_recruiter.js, loaded alongside this file.
+  if (recruiterProfileId(window.location.href)) return runRecruiterExtraction(force);
+
   const slug = profileSlug(window.location.href);
   if (extractionPromise && extractedSlug === slug) {
     // Same profile: reuse unless forced — and never restart a run in flight,
@@ -1572,50 +1621,11 @@ function runExtraction(force = false) {
       if (fullerAbout && fullerAbout.length > (profile.about || '').length) profile.about = fullerAbout;
     }
 
-    // Mine skills from every experience description + About — the Skills section
-    // is often thin, but the real stack is written up in the role bullets. Merge
-    // the keyword hits into the DOM skills, de-duped case-insensitively.
-    const expText = (profile.experience || [])
-      .map(e => e && [e.title, e.company, e.description].filter(Boolean).join(" "))
-      .filter(Boolean).join("\n");
-
     // Safety net: mine the Experience SECTION's own text too, not only the parsed
     // per-role descriptions. Any layout quirk that makes a role parse thin (or
     // drop out entirely) would otherwise silently hide every skill written in
     // that write-up; the raw section text is immune to how rows are split.
-    const sectionText = fullText(findExperienceSection());
-    const minedFrom = [expText, sectionText, profile.about].filter(Boolean).join("\n");
-    const textSkills = skillsFromText(minedFrom);
-    if (textSkills.length) {
-      profile.skills = Array.isArray(profile.skills) ? profile.skills : [];
-      const seen = new Set(profile.skills.map(s => String(s).toLowerCase()));
-      for (const s of textSkills) if (!seen.has(s.toLowerCase())) { profile.skills.push(s); seen.add(s.toLowerCase()); }
-      console.log(`[SCOUT] +${textSkills.length} skills mined from experience/about ` +
-        `(${expText.length} chars parsed roles, ${sectionText.length} chars raw section)`);
-    }
-
-    // Off-list skills named in explicit lists inside the role write-ups.
-    const listed = listedSkillsFromText(minedFrom);
-    if (listed.length) {
-      const seen2 = new Set((profile.skills || []).map(s => String(s).toLowerCase()));
-      let added = 0;
-      for (const s of listed) if (!seen2.has(s.toLowerCase())) { profile.skills.push(s); seen2.add(s.toLowerCase()); added++; }
-      console.log(`[SCOUT] +${added} off-list skills mined from description lists`);
-    }
-
-    // Recompute clearance now that About + the full skills list are populated.
-    // The first extractProfile() runs inside scrollAndExtract, before fetchAbout()
-    // and expandAndExtractAllSkills() finish — on slower devices that first pass
-    // sees empty About / partial skills and misses a résumé-stated clearance,
-    // which then also zeroes the clearance score. Re-scan the complete profile.
-    const clr = detectClearance([
-      profile.about,
-      (profile.skills || []).join(" "),
-      profile.title,
-      (profile.experience || []).map(e => e && e.description).filter(Boolean).join("\n"),
-      (profile.certifications || []).map(c => `${c.name || ""} ${c.issuer || ""}`).join("\n"),
-    ].filter(Boolean).join("\n"));
-    if (clr) profile.clearance = clr;
+    mineSkillsAndClearance(profile, fullText(findExperienceSection()));
 
     // Extraction scrolled the page all over; leave the user at the top of the
     // profile where they started, not parked mid-page.

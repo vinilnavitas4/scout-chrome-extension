@@ -467,9 +467,15 @@ async function getTargetTab() {
 // per-profile identity used to dedupe rescans (full-URL comparison loops because
 // the LinkedIn extraction visits /details/skills and /overlay/contact-info
 // sub-routes, which fire tabs.onUpdated and must not count as a new profile).
+const LINKEDIN_SCRIPTS = ['content_scripts/linkedin.js', 'content_scripts/linkedin_recruiter.js'];
+
 function siteFor(url) {
+  // Recruiter Lite: /talent/.../profile/<id> (full page or slide-in drawer).
+  // 'rl:' keeps its ids out of the public-slug namespace in the profile cache.
+  const rl = (url || '').match(/linkedin\.com\/talent\/(?:[^?#]*\/)?profile\/([^\/?#]+)/i);
+  if (rl) return { source: 'LinkedIn', script: LINKEDIN_SCRIPTS, slug: 'rl:' + rl[1].toLowerCase() };
   const li = (url || '').match(/linkedin\.com\/in\/([^\/?#]+)/i);
-  if (li) return { source: 'LinkedIn', script: 'content_scripts/linkedin.js', slug: li[1].toLowerCase() };
+  if (li) return { source: 'LinkedIn', script: LINKEDIN_SCRIPTS, slug: li[1].toLowerCase() };
   const dc = (url || '').match(/dice\.com\/employers\/talent-search\/profile\/([0-9a-f-]+)/i);
   if (dc) return { source: 'Dice', script: 'content_scripts/dice.js', slug: dc[1].toLowerCase() };
   return null;
@@ -576,7 +582,7 @@ function requestProfile(tabId, scriptFile, force = false) {
     }
     if (err) {
       chrome.scripting.executeScript(
-        { target: { tabId }, files: [scriptFile] },
+        { target: { tabId }, files: [].concat(scriptFile) },
         () => {
           if (chrome.runtime.lastError) {
             onProfileFailed('Could not inject script. Try refreshing the page.');
@@ -1222,7 +1228,7 @@ function renderBreakdown(categories) {
     const pct = Math.round((c.fill || 0) * 100);
     const tone = pct >= 100 ? 'excellent' : pct >= 60 ? 'good' : pct >= 30 ? 'fair' : 'poor';
     let detail = '';
-    if (c.key === 'clearance' || c.key === 'education') {
+    if (c.key === 'clearance' || c.key === 'education' || c.key === 'experience') {
       detail = `<span class="cat-detail">${escapeHtml(c.detected)} vs ${escapeHtml(c.required)}</span>`;
     } else if (c.key === 'location') {
       detail = `<span class="cat-detail">${escapeHtml(c.detected)} vs ${escapeHtml(c.required)}</span>`;
@@ -1273,7 +1279,8 @@ function renderSkippedRows(categories) {
   const candKnown = candLoc && candLoc !== 'Unknown';
 
   let why;
-  if (!jdKnown && !candKnown) why = 'no location on the job or the profile';
+  if (jdLoc === 'Remote') why = 'remote role — location not a constraint';
+  else if (!jdKnown && !candKnown) why = 'no location on the job or the profile';
   else if (!jdKnown) why = `job location not specified (profile: ${candLoc})`;
   else why = `profile location not recognized (job: ${jdLoc})`;
 
@@ -1402,7 +1409,9 @@ function candidateSource() {
 function linkedinUrl() {
   if (candidateSource() !== 'LinkedIn') return '';
   const m = (candidate?.profileUrl || '').match(/linkedin\.com\/in\/([^\/?#]+)/i);
-  const slug = m ? m[1] : lastProfileSlug;
+  // Recruiter Lite scans are keyed by a Recruiter id, not a public slug — no
+  // slug fallback there; the URL is sent only when the profile exposed it.
+  const slug = m ? m[1] : (candidate?.recruiter ? '' : lastProfileSlug);
   return slug ? `https://www.linkedin.com/in/${slug}/` : '';
 }
 

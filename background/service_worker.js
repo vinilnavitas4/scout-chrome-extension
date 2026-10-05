@@ -676,10 +676,10 @@ function locationSentence(jdRemote, jdState, candState, candLocationRaw) {
 // ask). Mirrored verbatim in score_endpoint.py so client and backend agree.
 const EDUCATION_LEVELS = [
   { rank: 4, label: "Doctorate",  re: /\b(?:ph\.?\s?d|doctorate|doctoral|d\.?sc\.?|ed\.?d)\b/i },
-  { rank: 3, label: "Master's",   re: /\b(?:master'?s?|m\.?s\.?c?\.?|m\.?\s?tech\b|m\.?eng\.?|mba|m\.?a\.?|graduate degree)\b/i },
+  { rank: 3, label: "Master's",   re: /\b(?:master'?s?|m\.?s\.?c?\.?|m\.?\s?tech\b|m\.?eng\.?|mba|mca|m\.?a\.?|graduate degree)\b/i },
   // "b\.e\.?" needs its dot — bare "BE" would false-match the common word "be"
   // in About/résumé prose that this detector also scans.
-  { rank: 2, label: "Bachelor's", re: /\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?\s?tech\b|b\.?eng\.?|b\.e\.?|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b/i },
+  { rank: 2, label: "Bachelor's", re: /\b(?:bachelor'?s?|b\.?s\.?c?\.?|b\.?\s?tech\b|b\.?eng\.?|b\.e\.?|bca|b\.?a\.?|undergraduate degree|four[\s-]?year degree|4[\s-]?year degree)\b/i },
   // Bare dotless "AS"/"AA" omitted on purpose — "as" is a common word and would
   // false-match. Accept spelled-out forms and dotted abbreviations only.
   { rank: 1, label: "Associate",  re: /\b(?:associate'?s?|a\.?a\.?s\.?|a\.s|two[\s-]?year degree)\b/i },
@@ -690,6 +690,40 @@ function detectEducation(text) {
   // Bare "degree" with no named level → treat as a Bachelor's-level ask/hold.
   if (/\bdegree\b/i.test(text)) return { rank: 2, label: "Degree" };
   return { rank: 0, label: "" };
+}
+
+// In a JD, "Associate" is far more often a job title ("Associate Engineer") than
+// a degree, so on the requirement side it only counts with degree context.
+const JD_ASSOCIATE_DEGREE_RE = /\b(?:associate'?s?\s+(?:degree|of)|a\.a\.s\.?|a\.s\.|two[\s-]?year degree)\b/i;
+
+// The degrees a JD accepts, read as "any one of the degrees it names". `ranks`
+// lists every level the JD names; a candidate meets the requirement only by
+// holding one of exactly those — a degree the JD does not list, lower OR higher,
+// does not count. `ranks` is empty when the JD asks for a "degree" without naming
+// a level: any degree then meets it. `rank` (lowest named) is kept for callers
+// only testing "is a degree required". Mirrored in score_endpoint.py.
+function detectRequiredEducation(text) {
+  if (!text) return { rank: 0, label: "", ranks: [] };
+  const found = EDUCATION_LEVELS
+    .filter(lvl => (lvl.rank === 1 ? JD_ASSOCIATE_DEGREE_RE : lvl.re).test(text))
+    .sort((a, b) => a.rank - b.rank);
+  if (!found.length) {
+    if (/\bdegree\b/i.test(text)) return { rank: 2, label: "Degree", ranks: [] };
+    return { rank: 0, label: "", ranks: [] };
+  }
+  return { rank: found[0].rank, label: found.map(l => l.label).join(" or "),
+           ranks: found.map(l => l.rank) };
+}
+
+// Every degree level named in a candidate's text, highest first — a candidate
+// holding a Bachelor's AND a PhD meets a JD that lists either. A bare "degree"
+// with no level reads as Bachelor's-level, as in detectEducation.
+function detectEducationAll(text) {
+  if (!text) return [];
+  const found = EDUCATION_LEVELS.filter(lvl => lvl.re.test(text))
+    .map(lvl => ({ rank: lvl.rank, label: lvl.label }));
+  if (!found.length && /\bdegree\b/i.test(text)) return [{ rank: 2, label: "Degree" }];
+  return found;
 }
 
 // Résumé Education-section slicer — when a résumé is attached, the candidate's
@@ -1203,8 +1237,10 @@ function parseRequirements(description) {
   const jd_remote = detectRemote(text);
 
   // Education requirement — prefer the "Need" section, fall back to the whole JD.
-  // Only scores when the JD actually states a degree requirement.
-  const required_education = detectEducation(needSection).rank ? detectEducation(needSection) : detectEducation(text);
+  // Only scores when the JD actually states a degree requirement. Any one of the
+  // degrees the JD names meets it — see detectRequiredEducation.
+  const needEdu = detectRequiredEducation(needSection);
+  const required_education = needEdu.rank ? needEdu : detectRequiredEducation(text);
   // Required certifications — only gate the auto-schedule rule when the JD names one.
   const required_certs = findCerts(needSection.length ? needSection : text);
 
@@ -1500,12 +1536,16 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
       if (!cn) return false;
       // Exact normalized match.
       if (cn === tn) return true;
-      // Token containment: one phrase's tokens ⊆ the other's (e.g. "react" ⊆ "react.js").
+      // Token containment, one direction only: the candidate's skill must name
+      // every word of the requirement ("azure devops" covers "Azure"). The
+      // reverse let a bare "azure" satisfy "Azure DevOps", and "data" satisfy
+      // "Data Engineering" — credit for requirements never actually met.
       const cTok = tokenSet(cs);
-      if (tTok.size && cTok.size) {
-        const [small, big] = tTok.size <= cTok.size ? [tTok, cTok] : [cTok, tTok];
-        if ([...small].every(t => big.has(t))) return true;
-      }
+      if (tTok.size && cTok.size && [...tTok].every(t => cTok.has(t))) return true;
+      // A skill naming only part of the requirement is broader, not a match —
+      // and MiniLM rates "azure" ~ "azure devops" highly, so it must not fall
+      // through to the similarity check either.
+      if (cTok.size && cTok.size < tTok.size && [...cTok].every(t => tTok.has(t))) return false;
       // Semantic fallback — clear-margin only, so borderline cosines don't flip
       // the score across devices.
       const cv = vecMap.get(cn);
@@ -1569,39 +1609,63 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   const reqEdu  = requirements.required_education || { rank: 0, label: "" };
   const eduText = (candidate.education || [])
     .map(e => `${e.degree || ""} ${e.school || ""}`).join("\n");
-  const candEdu = detectEducation(eduText);
+  // Holds one of the degrees the JD lists → full; anything else, lower or
+  // higher, or no degree → zero. A JD asking for "a degree" without naming a
+  // level (empty ranks) is met by any degree. A requirements object cached
+  // before `ranks` existed falls back to meets-or-exceeds.
+  let candEdu = detectEducation(eduText);
+  const candAll = detectEducationAll(eduText);
   const educationActive = reqEdu.rank > 0;
-  const educationFill = !educationActive ? 0
-    : candEdu.rank >= reqEdu.rank ? 1
-    : candEdu.rank > 0            ? 0.5
-    :                              0;
+  const listed = Array.isArray(reqEdu.ranks) ? reqEdu.ranks : null;
+  let educationFill = 0;
+  if (!educationActive) {
+    educationFill = 0;
+  } else if (listed === null) {
+    educationFill = candEdu.rank >= reqEdu.rank ? 1 : candEdu.rank > 0 ? 0.5 : 0;
+  } else if (!listed.length) {
+    educationFill = candAll.length ? 1 : 0;
+  } else {
+    const held = candAll.find(d => listed.includes(d.rank));
+    educationFill = held ? 1 : 0;
+    if (held) candEdu = held;
+  }
 
-  // Location bucket — active when the JD is remote, or both JD and candidate
-  // regions are known. Remote → location is not a constraint (full credit); same
-  // region → full; different region → zero (penalized). Unknown either side and
-  // not remote → bucket stays out (no penalty for missing data). Regions are
-  // country-namespaced, so this works the same for "US-TX" and "IN-TN".
+  // Location bucket — active only when the JD names a place and the candidate's
+  // region is known: same region → full, different → zero. A remote JD leaves
+  // the bucket out entirely — it used to count as full credit for everyone,
+  // which added free points and lifted people missing required skills past 70.
+  // Unknown either side → bucket stays out (no penalty for missing data).
+  // Regions are country-namespaced, so this works the same for "US-TX" and "IN-TN".
   const jdRemote  = !!requirements.jd_remote;
   const jdState   = requirements.jd_state || "";
   const candState = detectState(candidate.location || "", true);
-  const locationActive = jdRemote || (!!jdState && !!candState);
-  const locationFill = jdRemote ? 1 : (regionsMatch(jdState, candState) ? 1 : 0);
+  const locationActive = !jdRemote && !!jdState && !!candState;
+  const locationFill = regionsMatch(jdState, candState) ? 1 : 0;
+
+  // Experience bucket — active when the JD states years and the candidate's
+  // total is known. Meets → full; short → the fraction held (3 of 5 → 0.6).
+  // Unknown candidate years stay out, same as location.
+  const candYears = Number(expYears) || 0;
+  const experienceActive = required_years > 0 && candYears > 0;
+  const experienceFill = experienceActive ? Math.min(candYears / required_years, 1) : 0;
 
   // ── Composite (doc §3.3 weights) ────────────────────────────────────────────
-  // Required 35 / Preferred 15 / Clearance 20 / Education 15 / Location 15.
-  // Renormalize so only PRESENT buckets contribute and they sum to 100 — no free
-  // credit for an unstated preferred/clearance/education/location constraint.
-  const W_REQ = 35, W_PREF = 15, W_CLR = 20, W_EDU = 15, W_LOC = 15;
+  // Required 35 / Preferred 15 / Clearance 20 / Education 15 / Location 15 /
+  // Experience 15. Renormalize so only PRESENT buckets contribute and they sum
+  // to 100 — no free credit for an unstated constraint.
+  const W_REQ = 35, W_PREF = 15, W_CLR = 20, W_EDU = 15, W_LOC = 15, W_EXP = 15;
   let active = W_REQ;                                  // required is always present here
   if (preferred_skills.length) active += W_PREF;
   if (clearanceActive)         active += W_CLR;
   if (educationActive)         active += W_EDU;
   if (locationActive)          active += W_LOC;
+  if (experienceActive)        active += W_EXP;
   let raw = (W_REQ / active) * reqFill * 100;
   if (preferred_skills.length) raw += (W_PREF / active) * prefFill * 100;
   if (clearanceActive)         raw += (W_CLR / active) * clearanceFill * 100;
   if (educationActive)         raw += (W_EDU / active) * educationFill * 100;
   if (locationActive)          raw += (W_LOC / active) * locationFill * 100;
+  if (experienceActive)        raw += (W_EXP / active) * experienceFill * 100;
 
   const score = clampScore(calibrate(raw));
   const label = fitLabel(score);
@@ -1618,7 +1682,12 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
     { key: "education", name: "Education",          weight: W_EDU, active: educationActive,
       fill: educationFill, detected: candEdu.label || "None", required: reqEdu.label || "None" },
     { key: "location",  name: "Location / Commute", weight: W_LOC, active: locationActive,
-      fill: locationFill, detected: formatRegion(candState) || (candidate.location || "").trim() || "Unknown", required: jdLoc || "Any" },
+      fill: locationActive ? locationFill : 0,
+      detected: formatRegion(candState) || (candidate.location || "").trim() || "Unknown", required: jdLoc || "Any" },
+    { key: "experience", name: "Experience",        weight: W_EXP, active: experienceActive,
+      fill: experienceFill,
+      detected: candYears > 0 ? `${+candYears.toFixed(1)} yrs` : "Unknown",
+      required: required_years ? `${required_years}+ yrs` : "None" },
   ];
 
   // ── Auto-scheduling gate (doc §4) — pass/fail on the four critical categories,
@@ -1652,12 +1721,22 @@ async function computeScore(requirements, jobTitle, candidate, resumeText = "") 
   }
   if (matchedPref.length > 0) parts.push(`Preferred: ${matchedPref.slice(0, 3).join(", ")}.`);
   if (missingReq.length  > 0) parts.push(`Missing: ${missingReq.slice(0, 3).join(", ")}.`);
+  if (required_years) {
+    const yrs = +candYears.toFixed(1);
+    parts.push(!experienceActive
+      ? `Experience not stated; role requires ${required_years}+ years.`
+      : experienceFill >= 1
+        ? `${yrs} years' experience — meets the ${required_years}+ required.`
+        : `${yrs} years' experience, below the ${required_years}+ required.`);
+  }
   if (educationActive) {
     parts.push(educationFill === 1
       ? `Holds a ${candEdu.label} — meets the ${reqEdu.label} requirement.`
-      : candEdu.rank > 0
+      : candEdu.rank > 0 && listed === null
         ? `Holds a ${candEdu.label}, below the required ${reqEdu.label}.`
-        : `No degree found; role requires a ${reqEdu.label}.`);
+        : candEdu.rank > 0
+          ? `Holds a ${candEdu.label}, not one of the degrees the role lists (${reqEdu.label}).`
+          : `No degree found; role requires a ${reqEdu.label}.`);
   }
   if (clearanceActive) {
     parts.push(candGeneric
@@ -1741,15 +1820,18 @@ async function repairBackendLocation(result, jd_id, candidate) {
   const jdRemote  = !!requirements.jd_remote;
   const jdState   = requirements.jd_state || "";
   const candState = detectState(candidate.location || "", true);
-  if (!jdRemote && !(jdState && candState)) return result;   // still unknown → stays out
+  // A remote JD leaves location out of the score on purpose (no free credit) —
+  // never fold it back in here.
+  if (jdRemote) return result;
+  if (!(jdState && candState)) return result;   // still unknown → stays out
 
-  const fill = jdRemote ? 1 : (regionsMatch(jdState, candState) ? 1 : 0);
+  const fill = regionsMatch(jdState, candState) ? 1 : 0;
   const categories = cats.map(c => c.key !== "location" ? c : {
     ...c,
     active: true,
     fill,
     detected: formatRegion(candState) || (candidate.location || "").trim() || "Unknown",
-    required: jdRemote ? "Remote" : formatRegion(jdState),
+    required: formatRegion(jdState),
   });
 
   // Guard: recomputing WITHOUT location must reproduce the backend's own number.
