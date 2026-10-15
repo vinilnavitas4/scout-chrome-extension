@@ -403,7 +403,7 @@ body {
 
 .jd-wrap { position: relative; }
 
-.jd-select {
+.jd-input {
   width: 100%;
   padding: 10px 34px 10px 12px;
   border: var(--card-border);
@@ -414,23 +414,124 @@ body {
   background-color: var(--surface);
   cursor: pointer;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 12px center;
+  text-overflow: ellipsis;   /* long JD titles truncate rather than scroll away */
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-.jd-select:hover:not(:disabled) { border-color: var(--border-2); }
+.jd-input::placeholder { color: var(--text-3); }
+.jd-input:hover:not(:disabled) { border-color: var(--border-2); }
 
-.jd-select:focus-visible {
+.jd-input:focus,
+.jd-input:focus-visible {
+  outline: none;
   border-color: var(--brand-soft);
   box-shadow: var(--focus);
+  cursor: text;              /* typing is the point once it has focus */
 }
 
-.jd-select:disabled {
+.jd-input:disabled {
   background-color: var(--surface-2);
   color: var(--text-3);
   cursor: default;
+}
+
+/* Chevron. A button, not a background image, so the whole affordance is
+   clickable — clicking it opens the full list without filtering. */
+.jd-toggle {
+  position: absolute;
+  right: 1px;
+  top: 1px;
+  bottom: 1px;
+  width: 30px;
+  border: 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: transparent
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E")
+    no-repeat center;
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+.jd-toggle:disabled { cursor: default; opacity: 0.5; }
+.jd-wrap.open .jd-toggle { transform: rotate(180deg); }
+/* The spinner occupies the same corner while jobs load — hide the chevron. */
+.jd-wrap.loading .jd-toggle { display: none; }
+
+/* ── The listbox ── */
+.jd-list {
+  display: none;
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  /* Floor only — openJdList() raises this to the real space below the input so
+     the whole list is visible at once, the way the native <select> popup was.
+     Scrolling is the fallback for a list taller than the panel, not the norm. */
+  max-height: 264px;
+  overflow-y: auto;
+  overscroll-behavior: contain;   /* scrolling the list must not scroll the panel */
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--surface);
+  border: var(--card-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+}
+.jd-wrap.open .jd-list { display: block; }
+
+.jd-option {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+  cursor: pointer;
+}
+
+/* One highlight class for hover, keyboard, and pointer alike: the active option
+   is whatever the next Enter would pick, however the user got there. */
+.jd-option.active { background: var(--surface-3); }
+.jd-option[aria-selected="true"] { font-weight: 600; color: var(--brand); }
+
+.jd-option .jd-opt-client {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-2);
+}
+
+/* Required clearance — a hard gate, so it reads before the title rather than
+   after it. Floated so a wrapping title flows around it instead of being pushed
+   onto its own line in the narrow panel. */
+.jd-option .jd-opt-clearance {
+  float: right;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--fair);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--fair);
+  background: rgba(217, 119, 6, 0.10);
+  white-space: nowrap;
+}
+
+/* Matched substring of the query. */
+.jd-option mark {
+  background: rgba(56, 189, 248, 0.28);
+  color: inherit;
+  border-radius: 2px;
+}
+
+.jd-option.jd-clear { color: var(--text-2); font-style: italic; }
+
+.jd-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--text-3);
+  text-align: center;
 }
 
 /* Spinner shown while jobs are loading */
@@ -1086,9 +1187,12 @@ details[open] > .report-summary::before { transform: rotate(90deg); }
   .btn-primary:hover:not(:disabled) { background: var(--brand-soft); }
   .btn-primary:disabled { background: var(--surface-3); color: var(--text-3); }
 
-  .jd-select {
+  .jd-toggle {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a5b4d0' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
   }
+
+  .jd-option mark { background: rgba(56, 189, 248, 0.22); }
+  .jd-option .jd-opt-clearance { background: rgba(251, 191, 36, 0.12); }
 
   .header-mark { color: #041a2e; }
 }

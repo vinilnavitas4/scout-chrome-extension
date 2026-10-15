@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SCOUT Privacy Policy</title>
+  <style>
+    :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --accent: #0b5cad; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --line: #3d444d; --accent: #4493f8; }
+    }
+    body { margin: 0; background: var(--bg); color: var(--fg);
+           font: 16px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 16px 64px; }
+    h1 { font-size: 1.9rem; margin: 0 0 4px; }
+    h2 { font-size: 1.2rem; margin: 36px 0 8px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .meta { color: var(--muted); margin: 0 0 24px; }
+    a { color: var(--accent); }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.95rem; }
+    th, td { text-align: left; vertical-align: top; padding: 8px; border: 1px solid var(--line); }
+    th { background: color-mix(in srgb, var(--line) 35%, transparent); }
+    .table-wrap { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>SCOUT — Candidate Fit Scorer: Privacy Policy</h1>
+  <p class="meta">Effective date: September 24, 2026 · Publisher: Navitas Business Consulting, Inc.</p>
+
+  <p>
+    SCOUT is a browser extension for Navitas recruiters. It reads candidate profiles on LinkedIn and Dice,
+    scores how well each candidate fits open job requisitions, and, when the recruiter asks, adds the
+    candidate to Navitas's applicant tracking system (JazzHR). This policy covers what data the extension
+    handles, why, and where it goes.
+  </p>
+
+  <h2>1. Who can use SCOUT</h2>
+  <p>
+    SCOUT is an internal recruiting tool. It works only with Navitas's SCOUT backend service and JazzHR
+    account. It is not meant for the general public.
+  </p>
+
+  <h2>2. Data the extension handles</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Data</th><th>Source</th><th>Purpose</th></tr>
+    <tr>
+      <td>Candidate profile information: name, headline/title, location, about section, work experience,
+          education, skills, certifications, security clearance, "open to work" status, and contact details
+          (email and phone) when they appear on the page</td>
+      <td>LinkedIn or Dice profile pages the recruiter is viewing</td>
+      <td>Calculate fit scores against job requisitions. If the recruiter clicks to add the candidate,
+          create the candidate record in JazzHR.</td>
+    </tr>
+    <tr>
+      <td>Candidate résumé files (PDF) and the text taken from them</td>
+      <td>Dice profile pages the recruiter is viewing</td>
+      <td>Read the résumé text for scoring. If the recruiter adds the candidate, attach the file to the
+          JazzHR record.</td>
+    </tr>
+    <tr>
+      <td>Job requisition data: titles and descriptions</td>
+      <td>Navitas SCOUT backend</td>
+      <td>Show the list of open jobs and score candidates against them.</td>
+    </tr>
+    <tr>
+      <td>JazzHR session cookie (<code>sandcastle_ticket</code> on <code>api.jazz.co</code>)</td>
+      <td>The recruiter's own signed-in JazzHR browser session</td>
+      <td>Read only when the recruiter adds a candidate, so the backend can update the candidate's workflow
+          step in JazzHR for that recruiter. It is not used for anything else.</td>
+    </tr>
+    <tr>
+      <td>Recruiter override notes and scores</td>
+      <td>Typed by the recruiter in the extension panel</td>
+      <td>Saved on the candidate's timeline when a recruiter adds a candidate whose score is below the
+          threshold.</td>
+    </tr>
+  </table>
+  </div>
+  <p>
+    SCOUT does <strong>not</strong> collect the recruiter's browsing history, read pages other than LinkedIn
+    and Dice, track the recruiter across websites, or include analytics, advertising, or tracking code.
+  </p>
+
+  <h2>3. Where data is sent</h2>
+  <ul>
+    <li><strong>Navitas SCOUT backend</strong> (hosted on Microsoft Azure). Candidate profile data is sent
+        here for scoring. When the recruiter clicks to add a candidate, the profile, the résumé, and the
+        JazzHR session token are also sent. All traffic uses HTTPS.</li>
+    <li><strong>JazzHR</strong>. The SCOUT backend passes candidates that recruiters choose to add on to
+        Navitas's JazzHR account.</li>
+    <li><strong>Hugging Face</strong> (<code>huggingface.co</code>). The extension downloads a public
+        language model (all-MiniLM-L6-v2) once and keeps it in the browser cache. Skill matching then runs
+        on the recruiter's own computer. <strong>No candidate data is sent to Hugging Face.</strong></li>
+  </ul>
+  <p>SCOUT does not sell, rent, or share data with any other third party.</p>
+
+  <h2>4. What is stored in the browser</h2>
+  <ul>
+    <li><strong>Session storage</strong>, which is cleared when the browser closes: the candidate being
+        viewed and the fit scores already calculated, so the panel doesn't have to calculate them again.</li>
+    <li><strong>Local storage</strong>: a cache of job requisition titles and descriptions, so the panel
+        opens quickly. No candidate data is kept in local storage.</li>
+    <li><strong>Cache storage</strong>: the downloaded language model files.</li>
+  </ul>
+  <p>
+    Removing the extension deletes all of this data. Recruiters can also clear it through the browser's
+    site-data settings.
+  </p>
+
+  <h2>5. Retention</h2>
+  <p>
+    Candidates added to JazzHR are kept according to Navitas's recruiting records policy and the JazzHR
+    account settings. Profile data sent only for scoring, for candidates who are not added, is used to
+    calculate the score and is not kept as a candidate record.
+  </p>
+
+  <h2>6. Browser permissions</h2>
+  <ul>
+    <li><code>activeTab</code>, <code>scripting</code>: read the LinkedIn or Dice profile in the current tab.</li>
+    <li><code>storage</code>: the session and local caches described above.</li>
+    <li><code>sidePanel</code>: show the SCOUT panel next to the page.</li>
+    <li><code>offscreen</code>: run the local language model and read résumé PDFs in a hidden extension page.</li>
+    <li><code>cookies</code>: read the JazzHR session cookie described in section 2, and nothing else.</li>
+    <li>Host access: <code>linkedin.com</code>, <code>dice.com</code> (profile pages); <code>api.jazz.co</code>
+        (JazzHR session); the SCOUT backend; <code>huggingface.co</code> (model download).</li>
+  </ul>
+
+  <h2>7. Security</h2>
+  <p>
+    All data is sent over HTTPS. Only authorized Navitas personnel can access the SCOUT backend and
+    JazzHR.
+  </p>
+
+  <h2>8. Candidates' rights</h2>
+  <p>
+    Candidates whose information is in Navitas's recruiting systems can ask to see, correct, or delete it
+    by contacting us at the address below.
+  </p>
+
+  <h2>9. Changes to this policy</h2>
+  <p>
+    We will post any updates on this page and change the effective date above.
+  </p>
+
+  <h2>10. Contact</h2>
+  <p>
+    Navitas Business Consulting, Inc.<br />
+    Email: <a href="mailto:vinil.chandra@navitastech.com">vinil.chandra@navitastech.com</a>
+  </p>
+</main>
+</body>
+</html>
