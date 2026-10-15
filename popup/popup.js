@@ -98,8 +98,10 @@ profilePhone.addEventListener('input', () => {
 let emailTouched = false;  // true once the email field has been edited/flagged
 let scoreReady = false;  // true once a score has rendered for the selected JD
 
-// JazzHR rejects candidates without an email, so the Add button stays locked
-// until one is present and well-formed (found on the profile or typed in).
+// JazzHR rejects candidates without an email, so for JazzHR jobs the Add button
+// stays locked until one is present and well-formed (found on the profile or
+// typed in). SCOUT-internal jobs never touch JazzHR, so email is optional there —
+// but anything typed must still be well-formed.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/;
 
 // The manual field wins when filled; otherwise the value scraped from the
@@ -111,7 +113,7 @@ function effectiveEmail() {
 // '' when the email is usable, otherwise the message to show the recruiter.
 function emailProblem() {
   const email = effectiveEmail();
-  if (!email) return 'Email required *';
+  if (!email) return isInternalJob() ? '' : 'Email required for JazzHR jobs *';
   if (!EMAIL_RE.test(email)) return 'Enter a valid email address.';
   return '';
 }
@@ -158,7 +160,7 @@ function disableAddButtons() {
 }
 
 // Single gate for the Add button: needs a JD, a finished score above
-// MIN_ADD_SCORE, and an email. Skipped once the candidate has been added
+// MIN_ADD_SCORE, and an email (JazzHR jobs only). Skipped once the candidate has been added
 // (button is in its success state).
 function updateAddButton() {
   if (addBtn.classList.contains('btn-success')) return;
@@ -1121,6 +1123,9 @@ function applyJdSelection(jdId) {
   scoreCard.classList.remove('show');
   scoreReady = false;
   disableAddButtons();
+  // Email is required for JazzHR jobs only — refresh the inline error now the
+  // job type may have changed (buttons stay down until the new score renders).
+  validateEmail(emailTouched);
   saveLastProfile();
 
   if (candidate) {
@@ -1438,7 +1443,7 @@ function readyToSubmit() {
     showAddStatus('Please select a Job Description first.', 'error');
     return false;
   }
-  // JazzHR needs an email — last line of defence behind the disabled button.
+  // JazzHR jobs need an email — last line of defence behind the disabled button.
   const problem = emailProblem();
   if (problem) {
     emailTouched = true;
