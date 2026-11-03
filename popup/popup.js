@@ -7,10 +7,17 @@ const profileExp = document.getElementById('profile-exp');
 const profileEmail = document.getElementById('profile-email');
 const profileEmailFound = document.getElementById('profile-email-found');
 const emailError = document.getElementById('email-error');
+const findEmailWrap = document.getElementById('find-email');
+const findEmailBtn = document.getElementById('find-email-btn');
+const findEmailStatus = document.getElementById('find-email-status');
+let findEmailBusy = false;  // a SignalHire lookup is in flight
 const profilePhone = document.getElementById('profile-phone');
 const profilePhoneFound = document.getElementById('profile-phone-found');
 const sourceBadge = document.getElementById('source-badge');
-const jdSelect = document.getElementById('jd-select');
+const jdInput = document.getElementById('jd-input');
+const jdToggle = document.getElementById('jd-toggle');
+const jdList = document.getElementById('jd-list');
+const jdWrap = jdInput.closest('.jd-wrap');
 const jdSpinner = document.getElementById('jd-spinner');
 const scoreCard = document.getElementById('score-card');
 const scoreHeading = document.getElementById('score-heading');
@@ -22,6 +29,7 @@ const scoreBreakdown = document.getElementById('score-breakdown');
 const skillLists = document.getElementById('skill-lists');
 const addBtn = document.getElementById('add-btn');
 const overrideBtn = document.getElementById('override-btn');
+const updateScoreBtn = document.getElementById('update-score-btn');
 const noteModal = document.getElementById('note-modal');
 const noteText = document.getElementById('note-text');
 const noteError = document.getElementById('note-error');
@@ -29,6 +37,7 @@ const noteCancel = document.getElementById('note-cancel');
 const noteConfirm = document.getElementById('note-confirm');
 const jazzhrBtn = document.getElementById('jazzhr-btn');
 const statusEl = document.getElementById('status');
+const addStatusEl = document.getElementById('add-status');
 const resumeUpload = document.getElementById('resume-upload');
 const resumeFile = document.getElementById('resume-file');
 const resumeName = document.getElementById('resume-name');
@@ -94,8 +103,10 @@ profilePhone.addEventListener('input', () => {
 let emailTouched = false;  // true once the email field has been edited/flagged
 let scoreReady = false;  // true once a score has rendered for the selected JD
 
-// JazzHR rejects candidates without an email, so the Add button stays locked
-// until one is present and well-formed (found on the profile or typed in).
+// JazzHR rejects candidates without an email, so for JazzHR jobs the Add button
+// stays locked until one is present and well-formed (found on the profile or
+// typed in). SCOUT-internal jobs never touch JazzHR, so email is optional there —
+// but anything typed must still be well-formed.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/;
 
 // The manual field wins when filled; otherwise the value scraped from the
@@ -107,7 +118,7 @@ function effectiveEmail() {
 // '' when the email is usable, otherwise the message to show the recruiter.
 function emailProblem() {
   const email = effectiveEmail();
-  if (!email) return 'Email required *';
+  if (!email) return isInternalJob() ? '' : 'Email required for JazzHR jobs *';
   if (!EMAIL_RE.test(email)) return 'Enter a valid email address.';
   return '';
 }
@@ -125,8 +136,71 @@ function validateEmail(showError = true) {
   if (wrap) wrap.classList.toggle('invalid', flag);
 
   updateAddButton();
+  syncFindEmailBtn();
   return !problem;
 }
+
+// ── Find email (SignalHire via the Scout backend) ─────────────────────────────
+// Offered only on public LinkedIn /in/ profiles with no email yet — Recruiter
+// Lite and Dice have no slug SignalHire can resolve. Each lookup can cost a
+// credit, so the button disappears as soon as any email is known.
+function syncFindEmailBtn() {
+  const show = findEmailBusy || (!effectiveEmail() && !!linkedinUrl());
+  findEmailWrap.style.display = show ? 'flex' : 'none';
+  findEmailBtn.disabled = findEmailBusy;
+  findEmailBtn.textContent = findEmailBusy ? 'Searching…' : 'Find email';
+  if (!show) findEmailStatus.textContent = '';
+}
+
+const FIND_EMAIL_MESSAGES = {
+  not_found: 'No email found for this profile.',
+  credits_are_over: 'Out of SignalHire credits.',
+  signalhire_not_configured: 'SignalHire is not set up on the server.',
+  signalhire_auth: 'SignalHire rejected the API key.',
+  bad_profile_url: 'Only public linkedin.com/in/ profiles can be looked up.',
+  not_deployed: 'Find email is not deployed on this backend yet.',
+  pending: 'Still searching — try again in a minute.',
+  timeout_exceeded: 'SignalHire timed out — try again.',
+};
+
+findEmailBtn.addEventListener('click', () => {
+  const url = linkedinUrl();
+  if (!url || findEmailBusy) return;
+  findEmailBusy = true;
+  findEmailStatus.textContent = '';
+  syncFindEmailBtn();
+
+  chrome.runtime.sendMessage({ type: 'FIND_EMAIL', profile_url: url }, (res) => {
+    void chrome.runtime.lastError;
+    findEmailBusy = false;
+    // The recruiter moved to another profile while this was running.
+    if (linkedinUrl() !== url) { syncFindEmailBtn(); return; }
+
+    const data = res?.ok ? res.data : null;
+    if (data?.email) {
+      foundEmail = data.email;
+      profileEmailFound.textContent = foundEmail;
+      profileEmailFound.href = `mailto:${foundEmail}`;
+      profileEmailFound.style.display = 'block';
+      if (candidate && !profileEmail.value.trim()) candidate.email = foundEmail;
+    }
+    if (data?.phone && !foundPhone && !profilePhone.value.trim()) {
+      foundPhone = data.phone;
+      profilePhoneFound.textContent = foundPhone;
+      profilePhoneFound.href = `tel:${foundPhone.replace(/[^\d+]/g, '')}`;
+      profilePhoneFound.style.display = 'block';
+      if (candidate) candidate.phone = foundPhone;
+    }
+    if (data?.email || data?.phone) saveLastProfile();
+
+    validateEmail(emailTouched);  // unlocks Add and hides the button once an email is in
+    if (!data?.email) {
+      const key = res?.ok ? (data?.status || 'not_found') : (res?.code || '');
+      findEmailStatus.textContent = FIND_EMAIL_MESSAGES[key]
+        || (res?.error ? `Lookup failed: ${res.error}` : FIND_EMAIL_MESSAGES.not_found);
+    }
+  });
+});
 
 // Candidates below this fit score don't go to JazzHR. The bar itself passes —
 // a 60 is addable, a 59 is not.
@@ -147,15 +221,113 @@ function scoreProblem() {
 // or the score is being recomputed — the override button is only ever brought
 // back by updateAddButton, once a fresh score has actually rendered.
 function disableAddButtons() {
+  addStatusEl.classList.remove('show');
   addBtn.disabled = true;
   overrideBtn.disabled = true;
   overrideBtn.style.display = 'none';
+  updateScoreBtn.disabled = true;
 }
 
+// ── Already in SCOUT? ─────────────────────────────────────────────────────────
+// After a LinkedIn profile is scored, SCOUT is asked whether that profile is
+// already on the selected job. If it is, "Update score" replaces "Add" and
+// writes only the new fit score to that one candidate row.
+let existingCandidate = null;   // { key, applicant_id, candidate_name, score }
+let existingCheckSeq = 0;       // discards replies for a JD/profile we've left
+
+// Identity the lookup result belongs to — '' when no lookup applies (no JD,
+// not LinkedIn, nothing to match on). Email is a query hint, not part of it,
+// so typing in the email box doesn't flicker the button.
+function existingKey() {
+  if (!selectedJd || !candidate || candidateSource() !== 'LinkedIn') return '';
+  const url = linkedinUrl() || candidate.profileUrl || '';
+  if (!url && !effectiveEmail()) return '';
+  return `${selectedJd}|${url}`;
+}
+
+function currentExisting() {
+  const k = existingKey();
+  return k && existingCandidate?.key === k ? existingCandidate : null;
+}
+
+function checkExisting() {
+  const key = existingKey();
+  if (!key) return;
+  const seq = ++existingCheckSeq;
+  const payload = {
+    job_id: selectedJd,
+    profile_url: linkedinUrl() || candidate.profileUrl || '',
+    email: effectiveEmail(),
+  };
+  chrome.runtime.sendMessage({ type: 'CHECK_CANDIDATE', payload }, (res) => {
+    void chrome.runtime.lastError;               // no reply → treat as "not found"
+    if (seq !== existingCheckSeq || key !== existingKey()) return;
+    if (!res?.ok) return;                        // lookup failed — keep the Add flow
+    existingCandidate = res.exists
+      ? { key, applicant_id: res.applicant_id, candidate_name: res.candidate_name, score: res.score }
+      : null;
+    updateAddButton();
+    if (existingCandidate && scoreReady) showExistingNote(existingCandidate);
+  });
+}
+
+// Quiet note under the buttons — no scroll, unlike showAddStatus.
+function showExistingNote(ex) {
+  const s = ex.score == null ? 'no score on file' : `current score ${ex.score}`;
+  addStatusEl.textContent = `Already in SCOUT for this job — ${s}.`;
+  addStatusEl.className = 'status info show';
+}
+
+updateScoreBtn.addEventListener('click', () => {
+  const ex = currentExisting();
+  const score = Number(currentScore?.score);
+  if (!ex || !scoreReady || !Number.isFinite(score)) return;
+  const key = ex.key;
+  updateScoreBtn.disabled = true;
+  showAddStatus('Updating score in SCOUT…', 'loading');
+  chrome.runtime.sendMessage(
+    { type: 'UPDATE_SCORE', payload: { job_id: selectedJd, applicant_id: ex.applicant_id, score } },
+    (res) => {
+      if (chrome.runtime.lastError && !res) {
+        res = { ok: false, error: `Update interrupted (${chrome.runtime.lastError.message}) — check the SCOUT dashboard.` };
+      }
+      if (key !== existingKey()) return;          // recruiter moved to another JD/profile
+      if (res?.ok) {
+        const prev = res.previous_score ?? ex.score;
+        ex.score = res.score;
+        updateScoreBtn.textContent = 'Score updated ✓';
+        updateScoreBtn.className = 'btn btn-success';
+        updateScoreBtn.disabled = true;
+        showAddStatus(prev != null && prev !== res.score
+          ? `Score updated in SCOUT: ${prev} → ${res.score}`
+          : `Score updated in SCOUT: ${res.score}`, 'ok');
+      } else {
+        updateAddButton();
+        showAddStatus(res?.error || 'Failed to update score.', 'error');
+      }
+    }
+  );
+});
+
 // Single gate for the Add button: needs a JD, a finished score above
-// MIN_ADD_SCORE, and an email. Skipped once the candidate has been added
+// MIN_ADD_SCORE, and an email (JazzHR jobs only). Skipped once the candidate has been added
 // (button is in its success state).
 function updateAddButton() {
+  // Candidate already on this job in SCOUT → Update score instead of Add.
+  const ex = currentExisting();
+  updateScoreBtn.style.display = ex ? 'flex' : 'none';
+  if (ex) {
+    addBtn.style.display = 'none';
+    overrideBtn.style.display = 'none';
+    if (updateScoreBtn.classList.contains('btn-success')) return;
+    const s = Number(currentScore?.score);
+    const same = Number.isFinite(s) && ex.score != null && Number(ex.score) === s;
+    updateScoreBtn.disabled = !(scoreReady && Number.isFinite(s)) || same;
+    updateScoreBtn.textContent = same ? 'Score up to date' : 'Update score';
+    updateScoreBtn.title = same ? `SCOUT already has score ${s} for this candidate.` : '';
+    return;
+  }
+  addBtn.style.display = '';
   if (addBtn.classList.contains('btn-success')) return;
   const emailBad = emailProblem();
   const lowScore = scoreProblem();
@@ -165,7 +337,8 @@ function updateAddButton() {
   // A too-low score is a hard stop rather than something the recruiter can fix
   // in the form, so say it on the button — a disabled button never gets a click
   // to surface a status line, and its tooltip needs a hover to find.
-  addBtn.textContent = lowScore ? `Score below ${MIN_ADD_SCORE} — can't add` : 'Add to JazzHR';
+  addBtn.textContent = lowScore ? `Score below ${MIN_ADD_SCORE} — can't add`
+                                : (isInternalJob() ? 'Add to SCOUT' : 'Add to JazzHR');
 
   // The override button appears only when the score is the sole thing in the
   // way — a missing/invalid email still has to be fixed in the form first.
@@ -397,6 +570,26 @@ chrome.runtime.onMessage.addListener((message) => {
     }
   }
 
+  // Required clearances arrive after the SW has parsed every JD description —
+  // the job list itself doesn't carry them. Fold them into the options already
+  // on screen and repaint if the picker happens to be open.
+  if (message?.type === "JD_CLEARANCES" && message.data) {
+    let changed = 0;
+    jdOptions = jdOptions.map(o => {
+      const clearance = message.data[o.id] || '';
+      if (clearance === o.clearance) return o;
+      changed++;
+      return makeJdOption({ ...o, clearance });
+    });
+    if (changed && jdWrap.classList.contains('open')) renderJdList(jdQuery);
+  }
+
+  // The service worker re-pulled the job list behind a cached answer and it
+  // changed — a job was created or closed since the panel opened.
+  if (message?.type === "JOBS_UPDATED" && Array.isArray(message.data) && jdOptions.length) {
+    applyJobs(message.data, null, true);
+  }
+
   // Dice résumé finished rendering after the first scan → adopt the updated
   // candidate (real email + résumé skills + résumé text) and re-score.
   if (message?.type === "DICE_PROFILE_UPDATED" && message.profile) {
@@ -441,9 +634,15 @@ async function getTargetTab() {
 // per-profile identity used to dedupe rescans (full-URL comparison loops because
 // the LinkedIn extraction visits /details/skills and /overlay/contact-info
 // sub-routes, which fire tabs.onUpdated and must not count as a new profile).
+const LINKEDIN_SCRIPTS = ['content_scripts/linkedin.js', 'content_scripts/linkedin_recruiter.js'];
+
 function siteFor(url) {
+  // Recruiter Lite: /talent/.../profile/<id> (full page or slide-in drawer).
+  // 'rl:' keeps its ids out of the public-slug namespace in the profile cache.
+  const rl = (url || '').match(/linkedin\.com\/talent\/(?:[^?#]*\/)?profile\/([^\/?#]+)/i);
+  if (rl) return { source: 'LinkedIn', script: LINKEDIN_SCRIPTS, slug: 'rl:' + rl[1].toLowerCase() };
   const li = (url || '').match(/linkedin\.com\/in\/([^\/?#]+)/i);
-  if (li) return { source: 'LinkedIn', script: 'content_scripts/linkedin.js', slug: li[1].toLowerCase() };
+  if (li) return { source: 'LinkedIn', script: LINKEDIN_SCRIPTS, slug: li[1].toLowerCase() };
   const dc = (url || '').match(/dice\.com\/employers\/talent-search\/profile\/([0-9a-f-]+)/i);
   if (dc) return { source: 'Dice', script: 'content_scripts/dice.js', slug: dc[1].toLowerCase() };
   return null;
@@ -455,7 +654,7 @@ function siteFor(url) {
 function clearJdAndResume() {
   selectedJd = null;
   selectedJdTitle = null;
-  jdSelect.value = '';
+  syncJdInput();
   currentScore = null;
   scoreCard.classList.remove('show');
   resumeUpload.style.display = 'none';
@@ -537,9 +736,20 @@ chrome.tabs.onActivated.addListener(() => handleActiveTab());
 
 function requestProfile(tabId, scriptFile, force = false) {
   chrome.tabs.sendMessage(tabId, { action: 'getProfile', force }, (response) => {
-    if (chrome.runtime.lastError || !response?.profile) {
+    const err = chrome.runtime.lastError;
+    // Inject only when no content script is listening. If it IS loaded but the
+    // extraction failed, re-injecting throws "Identifier ... already declared".
+    if (!err && !response?.profile) {
+      onProfileFailed(response?.error ? `Could not read profile: ${response.error}` : 'Could not read profile. Try refreshing the page.');
+      return;
+    }
+    if (err && !/Receiving end does not exist/i.test(err.message || '')) {
+      onProfileFailed('Could not read profile. Try refreshing the page.');
+      return;
+    }
+    if (err) {
       chrome.scripting.executeScript(
-        { target: { tabId }, files: [scriptFile] },
+        { target: { tabId }, files: [].concat(scriptFile) },
         () => {
           if (chrome.runtime.lastError) {
             onProfileFailed('Could not inject script. Try refreshing the page.');
@@ -604,7 +814,9 @@ function applyCachedExtras(hit) {
   if (hit.jdId) {
     selectedJd = hit.jdId;
     selectedJdTitle = hit.jdTitle || hit.jdId;
-    jdSelect.value = hit.jdId;   // no-op if the JD list hasn't loaded yet — loadJds re-applies it
+    // No-op until the JD list has loaded — loadJds re-applies the selection and
+    // syncs the input once the labels exist.
+    syncJdInput();
   }
   if (hit.resume?.b64) {
     resumeB64 = hit.resume.b64;
@@ -727,6 +939,7 @@ function renderProfile(p) {
     profileEmailFound.style.display = 'none';
   }
   profileEmail.value = '';
+  findEmailStatus.textContent = '';  // previous profile's lookup result
   // Flag a missing/bad email right away — the recruiter needs to know before
   // picking a JD that the Add button won't unlock without one.
   emailTouched = !!emailProblem();
@@ -747,58 +960,338 @@ function renderProfile(p) {
   if (!selectedJd) statusEl.classList.remove('show');
 }
 
-// ── JD dropdown ───────────────────────────────────────────────────────────────
+// ── JD combobox ───────────────────────────────────────────────────────────────
+// A searchable dropdown, not a <select>: the openings list runs to dozens of
+// near-identical titles ("26-5021: Software Developer .Net", "26-5025: Software
+// Developer- DevOps", …), so scanning it by eye is the slow path. Typing filters;
+// the chevron (or an empty focus) still opens the whole list to browse.
+
+let jdOptions  = [];   // [{ id, title, client, clearance, label, search }] — every open JD
+let jdFiltered = [];   // the subset currently rendered
+let jdActive   = -1;   // index into jdFiltered that Enter would pick
+// The live search text. NOT the same as jdInput.value: opening with the chevron
+// leaves the selected JD's label sitting in the field while the query is still
+// empty, so a repaint driven off the field would filter down to that one row.
+let jdQuery    = '';
+
+function jdOptionById(id) {
+  return jdOptions.find(o => o.id === id) || null;
+}
+
+// `label` is what the closed input shows; `search` is the haystack typing runs
+// against. They differ because a required clearance is worth searching for
+// ("show me the TS/SCI roles") without padding the collapsed field with it.
+function makeJdOption(jd) {
+  const clearance = jd.clearance || '';
+  const label = jd.client ? `${jd.title}  ·  ${jd.client}` : jd.title;
+  return {
+    id: jd.id,
+    title: jd.title,
+    client: jd.client || '',
+    clearance,
+    label,
+    search: (label + ' ' + clearance).toLowerCase(),
+  };
+}
+
+// What the closed input shows for the current selection.
+function jdDisplayText() {
+  const o = jdOptionById(selectedJd);
+  if (o) return o.label;
+  // Selection restored from the profile cache before the list finished loading —
+  // show the cached title rather than leaving the box blank.
+  return selectedJd ? (selectedJdTitle || '') : '';
+}
+
+// Set the input's visible text without touching the selection or scoring.
+function syncJdInput() {
+  jdInput.value = jdDisplayText();
+}
+
+// Case-insensitive substring over id + title + client + clearance, so "3098",
+// "fastapi", "chennai" and "ts/sci" all find the postings they should.
+function filterJds(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return jdOptions.slice();
+  return jdOptions.filter(o => o.search.includes(q));
+}
+
+// Render `text` with the matched run of `query` wrapped in <mark>.
+function highlight(text, query) {
+  const q = query.trim();
+  if (!q) return escapeHtml(text);
+  const at = text.toLowerCase().indexOf(q.toLowerCase());
+  if (at === -1) return escapeHtml(text);
+  return escapeHtml(text.slice(0, at)) +
+         '<mark>' + escapeHtml(text.slice(at, at + q.length)) + '</mark>' +
+         escapeHtml(text.slice(at + q.length));
+}
+
+// Stands in for the old "— Choose a JD —" blank option: offered only when there
+// is a selection to clear and the list isn't filtered.
+const JD_CLEAR = { id: '', title: '— Clear selection —', client: '', label: '', clear: true };
+
+function renderJdList(query) {
+  jdQuery = query;
+  const matches = filterJds(query);
+  jdFiltered = (selectedJd && !query.trim()) ? [JD_CLEAR, ...matches] : matches;
+  jdList.innerHTML = '';
+
+  if (jdFiltered.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'jd-empty';
+    li.textContent = jdOptions.length ? 'No matching job openings' : 'No job openings';
+    jdList.appendChild(li);
+    setJdActive(-1);
+    return;
+  }
+
+  jdFiltered.forEach((o, i) => {
+    const li = document.createElement('li');
+    li.className = 'jd-option' + (o.clear ? ' jd-clear' : '');
+    li.id = `jd-opt-${i}`;
+    li.setAttribute('role', 'option');
+    li.setAttribute('aria-selected', String(!o.clear && o.id === selectedJd));
+    li.dataset.id = o.id;
+    li.innerHTML = o.clear
+      ? escapeHtml(o.title)
+      : (o.clearance
+          ? `<span class="jd-opt-clearance" title="This job requires a ${escapeHtml(o.clearance)} clearance">${escapeHtml(o.clearance)}</span>`
+          : '') +
+        highlight(o.title, query) +
+        (o.client ? `<span class="jd-opt-client">${highlight(o.client, query)}</span>` : '');
+    // mousedown, not click: mousedown beats the input's blur, so the option is
+    // still in the DOM when the pick runs.
+    li.addEventListener('mousedown', (e) => { e.preventDefault(); pickJd(o.id); });
+    li.addEventListener('mousemove', () => setJdActive(i));
+    jdList.appendChild(li);
+  });
+
+  // Preselect the current JD so Enter on an unfiltered list is a no-op rather
+  // than a surprise switch to whatever sits at the top.
+  const cur = jdFiltered.findIndex(o => !o.clear && o.id === selectedJd);
+  setJdActive(cur >= 0 ? cur : 0);
+}
+
+function setJdActive(i) {
+  jdActive = i;
+  [...jdList.querySelectorAll('.jd-option')].forEach((el, idx) => {
+    el.classList.toggle('active', idx === i);
+  });
+  if (i >= 0) {
+    jdInput.setAttribute('aria-activedescendant', `jd-opt-${i}`);
+    jdList.querySelector(`#jd-opt-${i}`)?.scrollIntoView({ block: 'nearest' });
+  } else {
+    jdInput.removeAttribute('aria-activedescendant');
+  }
+}
+
+// Give the list every pixel between the input and the bottom of the panel, so
+// opening it shows the whole list rather than a five-row peephole. The old
+// native <select> drew its popup outside the panel and could show ~17 rows at
+// once; a DOM listbox is clipped by the panel, so the next best thing is to use
+// all of it. Falls back to scrolling when even that isn't enough.
+const JD_LIST_MIN_H = 180;   // never smaller than this, even on a short panel
+const JD_LIST_GAP   = 12;    // breathing room above the panel's bottom edge
+
+function sizeJdList() {
+  const below = window.innerHeight - jdInput.getBoundingClientRect().bottom - JD_LIST_GAP;
+  jdList.style.maxHeight = Math.max(JD_LIST_MIN_H, Math.floor(below)) + 'px';
+}
+
+function openJdList(query = '') {
+  if (jdInput.disabled) return;
+  jdWrap.classList.add('open');
+  jdInput.setAttribute('aria-expanded', 'true');
+  renderJdList(query);
+  sizeJdList();
+}
+
+// The panel is resizable, and the input's position shifts as cards above it
+// render — re-measure rather than trusting the height from open time.
+window.addEventListener('resize', () => {
+  if (jdWrap.classList.contains('open')) sizeJdList();
+});
+
+// Closing always restores the selected JD's label — a half-typed query must
+// never be left sitting in the box looking like a selection.
+function closeJdList() {
+  jdWrap.classList.remove('open');
+  jdInput.setAttribute('aria-expanded', 'false');
+  jdInput.removeAttribute('aria-activedescendant');
+  setJdActive(-1);
+  syncJdInput();
+}
+
+function pickJd(id) {
+  closeJdList();
+  if (id === selectedJd) return;   // re-picking the same JD must not re-score
+  applyJdSelection(id);
+  syncJdInput();
+}
 
 function loadJds(preserveId, fresh) {
   jdSpinner.classList.add('show');
-  jdSelect.disabled = true;
+  jdWrap.classList.add('loading');
+  jdInput.disabled = true;
+  jdToggle.disabled = true;
+  jdInput.placeholder = 'Loading jobs…';
 
   chrome.runtime.sendMessage({ type: 'GET_JDS', fresh: !!fresh }, (res) => {
     jdSpinner.classList.remove('show');
+    jdWrap.classList.remove('loading');
     if (!res?.ok) {
-      jdSelect.innerHTML = '<option value="">Failed to load jobs</option>';
+      jdOptions = [];
+      jdInput.placeholder = 'Failed to load jobs';
       return;
     }
-    jdSelect.innerHTML = '<option value="">— Choose a JD —</option>';
-    res.data.forEach(jd => {
-      const opt = document.createElement('option');
-      opt.value = jd.id;
-      opt.dataset.title = jd.title;
-      opt.textContent = jd.client ? `${jd.title}  ·  ${jd.client}` : jd.title;
-      jdSelect.appendChild(opt);
-    });
-    jdSelect.disabled = false;
-    // Re-apply the selection: explicit preserveId (refresh button) or a JD
-    // restored from the profile cache before the list finished loading.
-    const keep = preserveId || selectedJd;
-    if (keep) {
-      jdSelect.value = keep;
-      if (jdSelect.value !== keep) {
-        // JD no longer exists on the backend — clear stale selection
-        selectedJd = null;
-        selectedJdTitle = null;
-      }
-    }
+    applyJobs(res.data, preserveId);
   });
 }
 
-jdSelect.addEventListener('change', () => {
-  const jdId = jdSelect.value;
+// Put a job list on screen, keeping the current selection when it is still in
+// the list. Used by the first load and by every later refresh, so a job
+// created while the panel is open simply appears. `quiet` refreshes happen
+// behind the recruiter's back, so they never drop the JD being worked on.
+function applyJobs(jobs, preserveId, quiet = false) {
+  // Clearance badges arrive separately (JD_CLEARANCES); a refreshed list that
+  // does not carry them yet keeps the ones already on screen.
+  const prevClearance = Object.fromEntries(jdOptions.map(o => [o.id, o.clearance]));
+  jdOptions = jobs.map(j => makeJdOption(
+    j.clearance || !prevClearance[j.id] ? j : { ...j, clearance: prevClearance[j.id] }));
+  jdInput.disabled = false;
+  jdToggle.disabled = false;
+  jdInput.placeholder = 'Search or select a job…';
+
+  // Re-apply the selection: explicit preserveId (refresh button) or a JD
+  // restored from the profile cache before the list finished loading.
+  const keep = preserveId || selectedJd;
+  if (keep) {
+    if (jdOptionById(keep)) {
+      selectedJd = keep;
+      selectedJdTitle = jdOptionById(keep).title;
+    } else if (!quiet) {
+      // JD no longer exists on the backend — clear stale selection
+      selectedJd = null;
+      selectedJdTitle = null;
+    }
+  }
+  // Leave the box alone while the recruiter is typing a search into it.
+  if (!(quiet && jdWrap.classList.contains('open'))) syncJdInput();
+  if (jdWrap.classList.contains('open')) renderJdList(jdQuery);
+}
+
+// Coming back to the panel (after creating a job on the dashboard, say) asks
+// for the list again. The service worker answers from its cache at once and
+// revalidates behind it, pushing JOBS_UPDATED if anything changed — no spinner.
+// Focus and visibility events fire in bursts (every click back into the panel),
+// so the re-check runs at most once per JD_QUIET_REFRESH_MS; a newly created
+// job still shows within that window, and JOBS_UPDATED covers the rest.
+const JD_QUIET_REFRESH_MS = 30 * 1000;
+let lastQuietRefresh = 0;
+function refreshJdsQuietly() {
+  if (!jdOptions.length) return; // first load still in flight or failed — loadJds owns that
+  if (Date.now() - lastQuietRefresh < JD_QUIET_REFRESH_MS) return;
+  lastQuietRefresh = Date.now();
+  chrome.runtime.sendMessage({ type: 'GET_JDS', quiet: true }, (res) => {
+    if (chrome.runtime.lastError || !res?.ok) return;
+    applyJobs(res.data, null, true);
+  });
+}
+window.addEventListener('focus', refreshJdsQuietly);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshJdsQuietly();
+});
+
+// ── Combobox interaction ──────────────────────────────────────────────────────
+
+// The chevron is the only thing that opens the full list — clicking into the
+// field just puts a cursor there. The existing text is selected on focus so the
+// first keystroke replaces the label instead of appending to it.
+jdInput.addEventListener('focus', () => { jdInput.select(); });
+
+// Typing searches. Clearing the box ends the search outright rather than
+// falling back to the full list — browsing everything is the chevron's job, so
+// an empty field means "never mind" and the picker closes.
+jdInput.addEventListener('input', () => {
+  const q = jdInput.value;
+  if (!q.trim()) { closeJdList(); return; }
+  if (!jdWrap.classList.contains('open')) openJdList(q);
+  else renderJdList(q);
+});
+
+jdInput.addEventListener('keydown', (e) => {
+  const open = jdWrap.classList.contains('open');
+  switch (e.key) {
+    case 'ArrowDown':
+    case 'ArrowUp': {
+      e.preventDefault();
+      if (!open) { openJdList(''); return; }
+      if (!jdFiltered.length) return;
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = (jdActive + step + jdFiltered.length) % jdFiltered.length;
+      setJdActive(next);
+      break;
+    }
+    case 'Home':
+      if (open && jdFiltered.length) { e.preventDefault(); setJdActive(0); }
+      break;
+    case 'End':
+      if (open && jdFiltered.length) { e.preventDefault(); setJdActive(jdFiltered.length - 1); }
+      break;
+    case 'Enter':
+      if (open && jdActive >= 0 && jdFiltered[jdActive]) {
+        e.preventDefault();
+        pickJd(jdFiltered[jdActive].id);
+      }
+      break;
+    case 'Escape':
+      if (open) { e.stopPropagation(); closeJdList(); }
+      break;
+    case 'Tab':
+      if (open) closeJdList();
+      break;
+  }
+});
+
+// Blur closes — but a click on an option fires mousedown first, so the pick has
+// already run by the time we get here.
+jdInput.addEventListener('blur', () => {
+  if (jdWrap.classList.contains('open')) closeJdList();
+});
+
+jdToggle.addEventListener('mousedown', (e) => {
+  e.preventDefault();               // keep focus off the button
+  if (jdWrap.classList.contains('open')) { closeJdList(); jdInput.focus(); }
+  else { jdInput.focus(); jdInput.select(); openJdList(''); }
+});
+
+// Selecting a JD — the work that used to hang off the <select>'s change event.
+function applyJdSelection(jdId) {
   if (!jdId) {
+    // Cleared. The old <select> left selectedJd pointing at the JD the recruiter
+    // had just deselected; drop it so the Add gate and the saved profile agree
+    // with what the box shows.
+    selectedJd = null;
+    selectedJdTitle = null;
     scoreCard.classList.remove('show');
     scoreReady = false;
     disableAddButtons();
     currentScore = null;
     scoreVersion++;
     statusEl.classList.remove('show');
+    saveLastProfile();
     return;
   }
 
   selectedJd = jdId;
-  selectedJdTitle = jdSelect.selectedOptions[0]?.dataset.title || jdId;
+  selectedJdTitle = jdOptionById(jdId)?.title || jdId;
   scoreCard.classList.remove('show');
   scoreReady = false;
   disableAddButtons();
+  // Email is required for JazzHR jobs only — refresh the inline error now the
+  // job type may have changed (buttons stay down until the new score renders).
+  validateEmail(emailTouched);
   saveLastProfile();
 
   if (candidate) {
@@ -811,9 +1304,30 @@ jdSelect.addEventListener('change', () => {
     // Profile fetch already failed
     showStatus('Could not read profile. Try refreshing the page.', 'error');
   }
-});
+}
 
 // ── Score ─────────────────────────────────────────────────────────────────────
+
+// Ask the service worker for a score. No reply at all (`res` undefined) means
+// the worker was stopped or restarted mid-request and the message port closed
+// — try once more, since a fresh worker answers fine. What reaches the callback
+// always carries a readable error instead of "unknown error".
+function sendScoreMessage(message, callback, retried = false) {
+  chrome.runtime.sendMessage(message, (res) => {
+    const lastErr = chrome.runtime.lastError?.message;
+    if (res) { callback(res); return; }
+    if (!retried && !/context invalidated/i.test(lastErr || '')) {
+      setTimeout(() => sendScoreMessage(message, callback, true), 300);
+      return;
+    }
+    callback({
+      ok: false,
+      error: /context invalidated/i.test(lastErr || '')
+        ? 'the extension was reloaded — close and reopen this panel'
+        : (lastErr || 'no reply from the extension background — close and reopen this panel'),
+    });
+  });
+}
 
 function requestScore(jdId) {
   scoreVersion++;
@@ -831,7 +1345,7 @@ function requestScore(jdId) {
   // scraped from the profile (Dice profiles embed the candidate's résumé).
   const effectiveResume = resumeText || candidate?.resumeText || '';
 
-  chrome.runtime.sendMessage(
+  sendScoreMessage(
     { type: 'GET_SCORE', payload: { jd_id: jdId, candidate, resume_text: effectiveResume || undefined } },
     (res) => {
       if (version !== scoreVersion) return; // stale — user changed JD
@@ -866,6 +1380,9 @@ function renderScore(data, updated = false) {
   scoreReady = true;
   resetAddButton();          // enables the button only if the email is valid too
   validateEmail(emailTouched);
+  // Already on this job in SCOUT? Swaps Add for "Update score" when it is.
+  if (currentExisting()) showExistingNote(currentExisting());
+  checkExisting();
 }
 
 // Doc §3.4 — per-category breakdown: weight, sub-score, points earned, and a fill
@@ -885,7 +1402,7 @@ function renderBreakdown(categories) {
     const pct = Math.round((c.fill || 0) * 100);
     const tone = pct >= 100 ? 'excellent' : pct >= 60 ? 'good' : pct >= 30 ? 'fair' : 'poor';
     let detail = '';
-    if (c.key === 'clearance' || c.key === 'education') {
+    if (c.key === 'clearance' || c.key === 'education' || c.key === 'experience') {
       detail = `<span class="cat-detail">${escapeHtml(c.detected)} vs ${escapeHtml(c.required)}</span>`;
     } else if (c.key === 'location') {
       detail = `<span class="cat-detail">${escapeHtml(c.detected)} vs ${escapeHtml(c.required)}</span>`;
@@ -936,7 +1453,8 @@ function renderSkippedRows(categories) {
   const candKnown = candLoc && candLoc !== 'Unknown';
 
   let why;
-  if (!jdKnown && !candKnown) why = 'no location on the job or the profile';
+  if (jdLoc === 'Remote') why = 'remote role — location not a constraint';
+  else if (!jdKnown && !candKnown) why = 'no location on the job or the profile';
   else if (!jdKnown) why = `job location not specified (profile: ${candLoc})`;
   else why = `profile location not recognized (job: ${jdLoc})`;
 
@@ -996,7 +1514,7 @@ scanJdsBtn.addEventListener('click', () => {
   bestfitStatus.textContent = 'Scoring against all JDs…';
 
   const effectiveResume = resumeText || candidate?.resumeText || '';
-  chrome.runtime.sendMessage(
+  sendScoreMessage(
     { type: 'SCORE_ALL', payload: { candidate, resume_text: effectiveResume || undefined } },
     (res) => {
       scanJdsBtn.disabled = false;
@@ -1034,8 +1552,9 @@ function renderBestFit(list) {
       `<span class="bestfit-title">${escapeHtml(label)}</span>`;
     // Click a row → select that JD in the dropdown and score it normally.
     const pick = () => {
-      jdSelect.value = jd.id;
-      jdSelect.dispatchEvent(new Event('change'));
+      if (jd.id === selectedJd) return;
+      applyJdSelection(jd.id);
+      syncJdInput();
     };
     row.addEventListener('click', pick);
     row.addEventListener('keydown', (e) => {
@@ -1058,13 +1577,25 @@ function candidateSource() {
   return sourceBadge.textContent || '';
 }
 
+// Canonical LinkedIn profile URL for LinkedIn-sourced candidates, '' otherwise.
+// Rebuilt from the slug so subpage routes (/details/skills, /overlay/contact-info)
+// and locale variants all land as https://www.linkedin.com/in/<slug>/.
+function linkedinUrl() {
+  if (candidateSource() !== 'LinkedIn') return '';
+  const m = (candidate?.profileUrl || '').match(/linkedin\.com\/in\/([^\/?#]+)/i);
+  // Recruiter Lite scans are keyed by a Recruiter id, not a public slug — no
+  // slug fallback there; the URL is sent only when the profile exposed it.
+  const slug = m ? m[1] : (candidate?.recruiter ? '' : lastProfileSlug);
+  return slug ? `https://www.linkedin.com/in/${slug}/` : '';
+}
+
 addBtn.addEventListener('click', () => {
   if (!readyToSubmit()) return;
   // Fit-score floor — last line of defence behind the disabled button. The
   // override path below is the only way past it.
   const lowScore = scoreProblem();
   if (lowScore) {
-    showStatus(lowScore, 'error');
+    showAddStatus(lowScore, 'error');
     return;
   }
   submitCandidate();
@@ -1074,19 +1605,19 @@ addBtn.addEventListener('click', () => {
 // candidate can't be sent regardless of score.
 function readyToSubmit() {
   if (!candidate) {
-    showStatus('Profile not loaded yet — wait and try again.', 'error');
+    showAddStatus('Profile not loaded yet — wait and try again.', 'error');
     return false;
   }
   if (!selectedJd) {
-    showStatus('Please select a Job Description first.', 'error');
+    showAddStatus('Please select a Job Description first.', 'error');
     return false;
   }
-  // JazzHR needs an email — last line of defence behind the disabled button.
+  // JazzHR jobs need an email — last line of defence behind the disabled button.
   const problem = emailProblem();
   if (problem) {
     emailTouched = true;
     validateEmail(true);
-    showStatus(problem, 'error');
+    showAddStatus(problem, 'error');
     profileEmail.focus();
     return false;
   }
@@ -1151,10 +1682,12 @@ function submitCandidate(overrideNote = '') {
   const rName = resumeB64 ? resumeFileName : (candidate.resumeName || 'resume.pdf');
   const rMime = resumeB64 ? resumeMime : (candidate.resumeMime || 'application/pdf');
 
+  const liUrl = linkedinUrl();
   const payload = {
     job_id: selectedJd,
     job_title: selectedJdTitle || '',
     candidate_source: candidateSource(),
+    linkedin_url: liUrl || undefined,
     resume_b64: rB64 || undefined,
     resume_name: rB64 ? rName : undefined,
     resume_mime: rB64 ? rMime : undefined,
@@ -1169,6 +1702,7 @@ function submitCandidate(overrideNote = '') {
       skills: candidate.skills,
       experience_years: candidate.experience_years,
       profileUrl: candidate.profileUrl,
+      linkedin_url: liUrl || undefined,
       email: effectiveEmail(),
       phone: normalizePhone(candidate.phone),
       experience: candidate.experience || [],
@@ -1181,18 +1715,25 @@ function submitCandidate(overrideNote = '') {
       score: currentScore?.score,
       score_label: currentScore?.label,
       rationale: currentScore?.rationale,
+      // The breakdown behind `score` — the dashboard timeline redraws this card.
+      score_categories: currentScore?.categories || undefined,
     }
   };
 
   addBtn.disabled = true;
   overrideBtn.disabled = true;
   jazzhrBtn.style.display = 'none';
-  showStatus('Adding to JazzHR…', 'loading');
+  showAddStatus(isInternalJob() ? 'Adding to SCOUT…' : 'Adding to JazzHR…', 'loading');
 
   chrome.runtime.sendMessage({ type: 'ADD_CANDIDATE', payload }, (res) => {
-    statusEl.classList.remove('show');
+    // Panel/SW channel dropped (SW restarted mid-request) — say so rather than
+    // leaving the spinner up with no outcome.
+    if (chrome.runtime.lastError && !res) {
+      res = { ok: false, error: `Add interrupted (${chrome.runtime.lastError.message}) — check the SCOUT dashboard before retrying.` };
+    }
+    addStatusEl.classList.remove('show');
     if (res?.ok) {
-      addBtn.textContent = 'Added to JazzHR ✓';
+      addBtn.textContent = isInternalJob() ? 'Added to SCOUT ✓' : 'Added to JazzHR ✓';
       addBtn.className = 'btn btn-success';
       addBtn.title = '';
       overrideBtn.style.display = 'none';   // the add already happened
@@ -1201,16 +1742,23 @@ function submitCandidate(overrideNote = '') {
         jazzhrBtn.href = res.jazzhr_url;
         jazzhrBtn.style.display = 'flex';
       }
-    } else {
-      showStatus(res?.error || 'Failed to add.', 'error');
+    } else if (/^duplicate_/.test(res?.code || '') && res.existing_applicant_id && existingKey()) {
+      // Already on this job (lookup missed or raced) — offer Update score instead.
+      existingCandidate = { key: existingKey(), applicant_id: res.existing_applicant_id,
+                            candidate_name: res.candidate_name || '', score: res.existing_score ?? null };
       updateAddButton();
+      showAddStatus('Already in SCOUT for this job — use Update score to refresh the score.', 'info');
+    } else {
+      updateAddButton();
+      showAddStatus(res?.error || 'Failed to add.', 'error');
     }
   });
 }
 
 function resetAddButton() {
-  addBtn.textContent = 'Add to JazzHR';
+  addBtn.textContent = isInternalJob() ? 'Add to SCOUT' : 'Add to JazzHR';
   addBtn.className = 'btn btn-primary';
+  updateScoreBtn.className = 'btn btn-primary';
   updateAddButton();
 }
 
@@ -1227,6 +1775,19 @@ function escapeHtml(s) {
 function showStatus(msg, type) {
   statusEl.textContent = msg;
   statusEl.className = `status ${type} show`;
+}
+
+// Same, for the add flow: rendered under the Add buttons and scrolled into view,
+// since the recruiter is at the bottom of the report when they click.
+function showAddStatus(msg, type) {
+  addStatusEl.textContent = msg;
+  addStatusEl.className = `status ${type} show`;
+  addStatusEl.scrollIntoView({ block: 'nearest' });
+}
+
+// SCOUT-native (SCT-…) jobs never go to JazzHR — ids are int_….
+function isInternalJob() {
+  return String(selectedJd || '').startsWith('int_');
 }
 
 // Clean a phone string for the backend/JazzHR: drop "(Mobile)" tags and any
