@@ -1,4 +1,11 @@
-const BASE_URL = "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
+// Dev switch: true sends every Scout call (jobs, scoring, Add to SCOUT) to a
+// local scout-service (`uvicorn backend.main:app --reload --port 8010`) and its
+// local DB. Must be false for any packaged build — scripts/package.ps1 refuses
+// to build while it is on.
+const USE_LOCAL_BACKEND = false;
+const BASE_URL = USE_LOCAL_BACKEND
+  ? "http://localhost:8010"
+  : "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io";
 
 // Shared secret for the Scout backend endpoints (extension has no Microsoft SSO token).
 // Sent as X-Scout-Key on every Scout API call. Must match SCOUT_API_KEY on the server.
@@ -2297,6 +2304,39 @@ async function getJazzhrToken() {
   }
 }
 
+// ── SignalHire email lookup ───────────────────────────────────────────────────
+
+const FIND_EMAIL_POLL_MS = 3000;
+const FIND_EMAIL_TIMEOUT_MS = 90000;
+
+// One enrich call. Error replies carry a `code` (credits_are_over,
+// signalhire_not_configured, bad_profile_url…) that the panel maps to a message.
+async function enrichRequest(path, init) {
+  const r = await fetch(`${BASE_URL}${path}`, { headers: scoutHeaders(), ...init });
+  let body = {};
+  try { body = await r.json(); } catch (_) { /* HTML error page */ }
+  if (!r.ok && r.status !== 202 && !(r.status === 404 && body.status === "none")) {
+    const err = new Error(body.error || `Backend HTTP ${r.status} at ${path}`);
+    err.code = body.code || (r.status === 404 ? "not_deployed" : "");
+    throw err;
+  }
+  return body;
+}
+
+async function findEmail(profileUrl) {
+  const q = `/api/scout/enrich?profile_url=${encodeURIComponent(profileUrl || "")}`;
+  let res = await enrichRequest("/api/scout/enrich", {
+    method: "POST",
+    body: JSON.stringify({ profile_url: profileUrl }),
+  });
+  const deadline = Date.now() + FIND_EMAIL_TIMEOUT_MS;
+  while (res.status === "pending" && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, FIND_EMAIL_POLL_MS));
+    res = await enrichRequest(q);
+  }
+  return { status: res.status || "", email: res.email || "", phone: res.phone || "" };
+}
+
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -2372,6 +2412,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: e.message });
       }
     })();
+    return true;
+  }
+
+  // ── FIND_EMAIL — SignalHire lookup via the Scout backend relay ────────────
+  // The backend holds the SignalHire key and receives its callback; we start
+  // the lookup, then poll until the callback has landed (or give up at 90 s).
+  if (type === "FIND_EMAIL") {
+    findEmail(message.profile_url).then(
+      data => sendResponse({ ok: true, data }),
+      e => sendResponse({ ok: false, code: e.code || "", error: e.message })
+    );
     return true;
   }
 
@@ -2489,6 +2540,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // ── CHECK_CANDIDATE — is this profile already on the selected job in SCOUT? ─
+  // A backend without the lookup route (404) reads as "not there", so the panel
+  // falls back to the plain Add flow.
+  if (type === "CHECK_CANDIDATE") {
+    (async () => {
+      try {
+        const { job_id, profile_url, email } = payload || {};
+        const qs = new URLSearchParams({ job_id: job_id || "", profile_url: profile_url || "", email: email || "" });
+        const d = await scoutGetJson(`/api/scout/candidates/lookup?${qs}`);
+        sendResponse({ ok: true, exists: !!d.exists, applicant_id: d.applicant_id || "",
+                       candidate_name: d.candidate_name || "", score: d.score ?? null });
+      } catch (e) {
+        if (/HTTP 404/.test(e.message)) { sendResponse({ ok: true, exists: false }); return; }
+        console.warn("[SCOUT] CHECK_CANDIDATE error:", e.message);
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  // ── UPDATE_SCORE — overwrite only this candidate's fit score on this job ──
+  if (type === "UPDATE_SCORE") {
+    (async () => {
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ADD_TIMEOUT_MS);
+      try {
+        const { job_id, applicant_id, score } = payload || {};
+        const r = await fetch(`${BASE_URL}/api/scout/candidates/score`, {
+          method:  "POST",
+          headers: scoutHeaders(),
+          signal:  ctrl.signal,
+          body:    JSON.stringify({ job_id, applicant_id, score }),
+        });
+        const text = await r.text();
+        let data = {};
+        try { data = JSON.parse(text); } catch (_) { /* HTML error page */ }
+        if (r.ok && data.ok) {
+          sendResponse({ ok: true, score: data.score, previous_score: data.previous_score ?? null });
+        } else {
+          sendResponse({ ok: false, code: data.code || "",
+                         error: data.error || (r.status === 404
+                           ? "Update score isn't available on the SCOUT backend yet."
+                           : `Backend HTTP ${r.status}`) });
+        }
+      } catch (e) {
+        console.error("[SCOUT] UPDATE_SCORE error:", e.message);
+        sendResponse({ ok: false, error: e.name === "AbortError"
+          ? `SCOUT didn't respond in ${ADD_TIMEOUT_MS / 1000}s — check the dashboard before retrying.`
+          : `Fetch failed: ${e.message}` });
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
+    return true;
+  }
+
   // ── ADD_CANDIDATE — post to SCOUT backend → JazzHR ───────────────────────
   if (type === "ADD_CANDIDATE") {
     (async () => {
@@ -2532,7 +2639,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } else if (data.ok) {
           sendResponse({ ok: false, error: jazzhrError || "JazzHR did not create the candidate." });
         } else {
-          sendResponse({ ok: false, error: data.error || `API error (${r.status})` });
+          sendResponse({ ok: false, error: data.error || `API error (${r.status})`,
+                         // 409 duplicate: lets the panel flip to "Update score".
+                         code: data.code || "",
+                         existing_applicant_id: data.existing_applicant_id || "",
+                         candidate_name: data.candidate_name || "",
+                         existing_score: data.existing_score ?? null });
         }
       } catch (e) {
         console.error("[SCOUT] ADD_CANDIDATE error:", e.message);

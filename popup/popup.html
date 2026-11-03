@@ -66,6 +66,11 @@
                 aria-describedby="email-error" />
             </div>
             <div class="field-error" id="email-error" role="alert"></div>
+            <!-- SignalHire lookup — only shown while no email is known -->
+            <div class="find-email" id="find-email" style="display:none">
+              <button type="button" class="find-email-btn" id="find-email-btn">Find email</button>
+              <span class="find-email-status" id="find-email-status" role="status" aria-live="polite"></span>
+            </div>
           </div>
 
           <div class="field">
@@ -155,6 +160,10 @@
         <!-- Last block in the report — reached by scrolling, never floating. -->
         <div class="action-bar">
           <button class="btn btn-primary" id="add-btn" disabled>Add to JazzHR</button>
+
+          <!-- Replaces Add when this LinkedIn profile is already on the selected
+               job in SCOUT: writes only the new fit score to that candidate. -->
+          <button class="btn btn-primary" id="update-score-btn" style="display:none" disabled>Update score</button>
 
           <!-- Escape hatch for a below-threshold score: only ever shown when the
                score gate is what's blocking the add. Needs a written reason. -->

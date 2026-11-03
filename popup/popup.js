@@ -7,6 +7,10 @@ const profileExp = document.getElementById('profile-exp');
 const profileEmail = document.getElementById('profile-email');
 const profileEmailFound = document.getElementById('profile-email-found');
 const emailError = document.getElementById('email-error');
+const findEmailWrap = document.getElementById('find-email');
+const findEmailBtn = document.getElementById('find-email-btn');
+const findEmailStatus = document.getElementById('find-email-status');
+let findEmailBusy = false;  // a SignalHire lookup is in flight
 const profilePhone = document.getElementById('profile-phone');
 const profilePhoneFound = document.getElementById('profile-phone-found');
 const sourceBadge = document.getElementById('source-badge');
@@ -25,6 +29,7 @@ const scoreBreakdown = document.getElementById('score-breakdown');
 const skillLists = document.getElementById('skill-lists');
 const addBtn = document.getElementById('add-btn');
 const overrideBtn = document.getElementById('override-btn');
+const updateScoreBtn = document.getElementById('update-score-btn');
 const noteModal = document.getElementById('note-modal');
 const noteText = document.getElementById('note-text');
 const noteError = document.getElementById('note-error');
@@ -131,8 +136,71 @@ function validateEmail(showError = true) {
   if (wrap) wrap.classList.toggle('invalid', flag);
 
   updateAddButton();
+  syncFindEmailBtn();
   return !problem;
 }
+
+// ── Find email (SignalHire via the Scout backend) ─────────────────────────────
+// Offered only on public LinkedIn /in/ profiles with no email yet — Recruiter
+// Lite and Dice have no slug SignalHire can resolve. Each lookup can cost a
+// credit, so the button disappears as soon as any email is known.
+function syncFindEmailBtn() {
+  const show = findEmailBusy || (!effectiveEmail() && !!linkedinUrl());
+  findEmailWrap.style.display = show ? 'flex' : 'none';
+  findEmailBtn.disabled = findEmailBusy;
+  findEmailBtn.textContent = findEmailBusy ? 'Searching…' : 'Find email';
+  if (!show) findEmailStatus.textContent = '';
+}
+
+const FIND_EMAIL_MESSAGES = {
+  not_found: 'No email found for this profile.',
+  credits_are_over: 'Out of SignalHire credits.',
+  signalhire_not_configured: 'SignalHire is not set up on the server.',
+  signalhire_auth: 'SignalHire rejected the API key.',
+  bad_profile_url: 'Only public linkedin.com/in/ profiles can be looked up.',
+  not_deployed: 'Find email is not deployed on this backend yet.',
+  pending: 'Still searching — try again in a minute.',
+  timeout_exceeded: 'SignalHire timed out — try again.',
+};
+
+findEmailBtn.addEventListener('click', () => {
+  const url = linkedinUrl();
+  if (!url || findEmailBusy) return;
+  findEmailBusy = true;
+  findEmailStatus.textContent = '';
+  syncFindEmailBtn();
+
+  chrome.runtime.sendMessage({ type: 'FIND_EMAIL', profile_url: url }, (res) => {
+    void chrome.runtime.lastError;
+    findEmailBusy = false;
+    // The recruiter moved to another profile while this was running.
+    if (linkedinUrl() !== url) { syncFindEmailBtn(); return; }
+
+    const data = res?.ok ? res.data : null;
+    if (data?.email) {
+      foundEmail = data.email;
+      profileEmailFound.textContent = foundEmail;
+      profileEmailFound.href = `mailto:${foundEmail}`;
+      profileEmailFound.style.display = 'block';
+      if (candidate && !profileEmail.value.trim()) candidate.email = foundEmail;
+    }
+    if (data?.phone && !foundPhone && !profilePhone.value.trim()) {
+      foundPhone = data.phone;
+      profilePhoneFound.textContent = foundPhone;
+      profilePhoneFound.href = `tel:${foundPhone.replace(/[^\d+]/g, '')}`;
+      profilePhoneFound.style.display = 'block';
+      if (candidate) candidate.phone = foundPhone;
+    }
+    if (data?.email || data?.phone) saveLastProfile();
+
+    validateEmail(emailTouched);  // unlocks Add and hides the button once an email is in
+    if (!data?.email) {
+      const key = res?.ok ? (data?.status || 'not_found') : (res?.code || '');
+      findEmailStatus.textContent = FIND_EMAIL_MESSAGES[key]
+        || (res?.error ? `Lookup failed: ${res.error}` : FIND_EMAIL_MESSAGES.not_found);
+    }
+  });
+});
 
 // Candidates below this fit score don't go to JazzHR. The bar itself passes —
 // a 60 is addable, a 59 is not.
@@ -157,12 +225,109 @@ function disableAddButtons() {
   addBtn.disabled = true;
   overrideBtn.disabled = true;
   overrideBtn.style.display = 'none';
+  updateScoreBtn.disabled = true;
 }
+
+// ── Already in SCOUT? ─────────────────────────────────────────────────────────
+// After a LinkedIn profile is scored, SCOUT is asked whether that profile is
+// already on the selected job. If it is, "Update score" replaces "Add" and
+// writes only the new fit score to that one candidate row.
+let existingCandidate = null;   // { key, applicant_id, candidate_name, score }
+let existingCheckSeq = 0;       // discards replies for a JD/profile we've left
+
+// Identity the lookup result belongs to — '' when no lookup applies (no JD,
+// not LinkedIn, nothing to match on). Email is a query hint, not part of it,
+// so typing in the email box doesn't flicker the button.
+function existingKey() {
+  if (!selectedJd || !candidate || candidateSource() !== 'LinkedIn') return '';
+  const url = linkedinUrl() || candidate.profileUrl || '';
+  if (!url && !effectiveEmail()) return '';
+  return `${selectedJd}|${url}`;
+}
+
+function currentExisting() {
+  const k = existingKey();
+  return k && existingCandidate?.key === k ? existingCandidate : null;
+}
+
+function checkExisting() {
+  const key = existingKey();
+  if (!key) return;
+  const seq = ++existingCheckSeq;
+  const payload = {
+    job_id: selectedJd,
+    profile_url: linkedinUrl() || candidate.profileUrl || '',
+    email: effectiveEmail(),
+  };
+  chrome.runtime.sendMessage({ type: 'CHECK_CANDIDATE', payload }, (res) => {
+    void chrome.runtime.lastError;               // no reply → treat as "not found"
+    if (seq !== existingCheckSeq || key !== existingKey()) return;
+    if (!res?.ok) return;                        // lookup failed — keep the Add flow
+    existingCandidate = res.exists
+      ? { key, applicant_id: res.applicant_id, candidate_name: res.candidate_name, score: res.score }
+      : null;
+    updateAddButton();
+    if (existingCandidate && scoreReady) showExistingNote(existingCandidate);
+  });
+}
+
+// Quiet note under the buttons — no scroll, unlike showAddStatus.
+function showExistingNote(ex) {
+  const s = ex.score == null ? 'no score on file' : `current score ${ex.score}`;
+  addStatusEl.textContent = `Already in SCOUT for this job — ${s}.`;
+  addStatusEl.className = 'status info show';
+}
+
+updateScoreBtn.addEventListener('click', () => {
+  const ex = currentExisting();
+  const score = Number(currentScore?.score);
+  if (!ex || !scoreReady || !Number.isFinite(score)) return;
+  const key = ex.key;
+  updateScoreBtn.disabled = true;
+  showAddStatus('Updating score in SCOUT…', 'loading');
+  chrome.runtime.sendMessage(
+    { type: 'UPDATE_SCORE', payload: { job_id: selectedJd, applicant_id: ex.applicant_id, score } },
+    (res) => {
+      if (chrome.runtime.lastError && !res) {
+        res = { ok: false, error: `Update interrupted (${chrome.runtime.lastError.message}) — check the SCOUT dashboard.` };
+      }
+      if (key !== existingKey()) return;          // recruiter moved to another JD/profile
+      if (res?.ok) {
+        const prev = res.previous_score ?? ex.score;
+        ex.score = res.score;
+        updateScoreBtn.textContent = 'Score updated ✓';
+        updateScoreBtn.className = 'btn btn-success';
+        updateScoreBtn.disabled = true;
+        showAddStatus(prev != null && prev !== res.score
+          ? `Score updated in SCOUT: ${prev} → ${res.score}`
+          : `Score updated in SCOUT: ${res.score}`, 'ok');
+      } else {
+        updateAddButton();
+        showAddStatus(res?.error || 'Failed to update score.', 'error');
+      }
+    }
+  );
+});
 
 // Single gate for the Add button: needs a JD, a finished score above
 // MIN_ADD_SCORE, and an email (JazzHR jobs only). Skipped once the candidate has been added
 // (button is in its success state).
 function updateAddButton() {
+  // Candidate already on this job in SCOUT → Update score instead of Add.
+  const ex = currentExisting();
+  updateScoreBtn.style.display = ex ? 'flex' : 'none';
+  if (ex) {
+    addBtn.style.display = 'none';
+    overrideBtn.style.display = 'none';
+    if (updateScoreBtn.classList.contains('btn-success')) return;
+    const s = Number(currentScore?.score);
+    const same = Number.isFinite(s) && ex.score != null && Number(ex.score) === s;
+    updateScoreBtn.disabled = !(scoreReady && Number.isFinite(s)) || same;
+    updateScoreBtn.textContent = same ? 'Score up to date' : 'Update score';
+    updateScoreBtn.title = same ? `SCOUT already has score ${s} for this candidate.` : '';
+    return;
+  }
+  addBtn.style.display = '';
   if (addBtn.classList.contains('btn-success')) return;
   const emailBad = emailProblem();
   const lowScore = scoreProblem();
@@ -774,6 +939,7 @@ function renderProfile(p) {
     profileEmailFound.style.display = 'none';
   }
   profileEmail.value = '';
+  findEmailStatus.textContent = '';  // previous profile's lookup result
   // Flag a missing/bad email right away — the recruiter needs to know before
   // picking a JD that the Add button won't unlock without one.
   emailTouched = !!emailProblem();
@@ -1214,6 +1380,9 @@ function renderScore(data, updated = false) {
   scoreReady = true;
   resetAddButton();          // enables the button only if the email is valid too
   validateEmail(emailTouched);
+  // Already on this job in SCOUT? Swaps Add for "Update score" when it is.
+  if (currentExisting()) showExistingNote(currentExisting());
+  checkExisting();
 }
 
 // Doc §3.4 — per-category breakdown: weight, sub-score, points earned, and a fill
@@ -1573,6 +1742,12 @@ function submitCandidate(overrideNote = '') {
         jazzhrBtn.href = res.jazzhr_url;
         jazzhrBtn.style.display = 'flex';
       }
+    } else if (/^duplicate_/.test(res?.code || '') && res.existing_applicant_id && existingKey()) {
+      // Already on this job (lookup missed or raced) — offer Update score instead.
+      existingCandidate = { key: existingKey(), applicant_id: res.existing_applicant_id,
+                            candidate_name: res.candidate_name || '', score: res.existing_score ?? null };
+      updateAddButton();
+      showAddStatus('Already in SCOUT for this job — use Update score to refresh the score.', 'info');
     } else {
       updateAddButton();
       showAddStatus(res?.error || 'Failed to add.', 'error');
@@ -1583,6 +1758,7 @@ function submitCandidate(overrideNote = '') {
 function resetAddButton() {
   addBtn.textContent = isInternalJob() ? 'Add to SCOUT' : 'Add to JazzHR';
   addBtn.className = 'btn btn-primary';
+  updateScoreBtn.className = 'btn btn-primary';
   updateAddButton();
 }
 

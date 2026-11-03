@@ -16,6 +16,7 @@
     "https://www.dice.com/*",
     "https://api.jazz.co/*",
     "https://scout-service.wonderfulfield-ebc060c9.eastus.azurecontainerapps.io/*",
+    "http://localhost:8010/*",
     "https://huggingface.co/*",
     "https://cdn-lfs.huggingface.co/*",
     "https://cdn-lfs-us-1.huggingface.co/*"

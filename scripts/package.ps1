@@ -4,6 +4,11 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+# Never ship a build that talks to a developer's localhost backend.
+if (Select-String -Path background/service_worker.js -Pattern '^\s*const USE_LOCAL_BACKEND\s*=\s*true' -Quiet) {
+  throw "USE_LOCAL_BACKEND is true in background/service_worker.js — set it to false before packaging."
+}
+
 $version = (Get-Content manifest.json -Raw | ConvertFrom-Json).version
 $stage = Join-Path $root "dist/stage"
 $zip = Join-Path $root "dist/scout-edge-$version.zip"
